@@ -22,7 +22,7 @@ That's it! The script is fully optimized for speed.
 | Model | Training Time | Accuracy | Image Size | Epochs |
 |-------|--------------|----------|------------|--------|
 | **Fast (New)** | **1-1.5 hours** | **92-95%** | **160x160** | **15** |
-| MobileNetV2 | 1-2 hours | 93-95% | 224x224 | 50 |
+| MobileNetV2 | 2-3 hours | 93-95% | 224x224 | 50 |
 | EfficientNetB3 | 3-5 hours | 95-97% | 300x300 | 50 |
 
 ## 🚀 Key Optimizations

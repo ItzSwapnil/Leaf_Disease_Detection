@@ -165,8 +165,7 @@ model.compile(
 
 print("✓ Model built successfully!")
 print(f"✓ Total parameters: {model.count_params():,}")
-trainable_params = sum([tf.size(w).numpy() for w in model.trainable_weights])
-print(f"✓ Trainable parameters: {trainable_params:,}")
+print(f"✓ Trainable parameters: {np.sum([tf.keras.backend.count_params(w) for w in model.trainable_weights]):,}")
 
 # Setup Callbacks
 print("\n[3/6] Setting up training callbacks...")
@@ -240,8 +239,7 @@ model.compile(
 )
 
 print(f"✓ Unfroze {len(base_model.layers) - fine_tune_at} layers for fine-tuning")
-trainable_params = sum([tf.size(w).numpy() for w in model.trainable_weights])
-print(f"✓ New trainable parameters: {trainable_params:,}")
+print(f"✓ New trainable parameters: {np.sum([tf.keras.backend.count_params(w) for w in model.trainable_weights]):,}")
 
 # Update checkpoint path for phase 2
 checkpoint_phase2 = ModelCheckpoint(
