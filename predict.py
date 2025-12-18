@@ -5,24 +5,30 @@ Load trained model and make predictions on new images
 
 import os
 import json
+import argparse
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
+from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 import matplotlib.pyplot as plt
 from PIL import Image
 
+# Suppress TF warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+
 class LeafDiseasePredictor:
-    def __init__(self, model_path='models/best_model_finetuned.h5', 
+    def __init__(self, model_path='models/99pct_final_reached.h5', 
                  class_indices_path='models/class_indices.json',
-                 img_size=300):
+                 img_size=160):
         """
         Initialize the predictor with a trained model
         
         Args:
             model_path: Path to the trained model
             class_indices_path: Path to class indices JSON file
-            img_size: Image size for preprocessing
+            img_size: Image size for preprocessing (default 160 for EfficientNetV2)
         """
         self.img_size = img_size
         
@@ -31,27 +37,37 @@ class LeafDiseasePredictor:
         self.model = load_model(model_path)
         print("✓ Model loaded successfully!")
         
-        # Load class indices
-        with open(class_indices_path, 'r') as f:
-            self.class_indices = json.load(f)
+        # Load or generate class indices
+        if os.path.exists(class_indices_path):
+            with open(class_indices_path, 'r') as f:
+                self.class_indices = json.load(f)
+        else:
+            # Generate from dataset if not exists
+            self.class_indices = self._generate_class_indices()
         
         # Create reverse mapping (index to class name)
         self.idx_to_class = {v: k for k, v in self.class_indices.items()}
         print(f"✓ Loaded {len(self.class_indices)} disease classes")
     
+    def _generate_class_indices(self):
+        """Generate class indices from dataset directory"""
+        train_dir = '/workspaces/Leaf_Disease_Detection/dataset/train'
+        classes = sorted(os.listdir(train_dir))
+        return {cls: i for i, cls in enumerate(classes) if os.path.isdir(os.path.join(train_dir, cls))}
+    
     def preprocess_image(self, img_path):
         """
-        Preprocess an image for prediction
+        Preprocess an image for prediction using EfficientNet preprocessing
         
         Args:
             img_path: Path to the image file
             
         Returns:
-            Preprocessed image array
+            Preprocessed image array normalized to [-1, 1]
         """
         img = image.load_img(img_path, target_size=(self.img_size, self.img_size))
         img_array = image.img_to_array(img)
-        img_array = img_array / 255.0  # Normalize
+        img_array = preprocess_input(img_array)  # EfficientNet preprocessing (-1 to 1)
         img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
         return img_array
     
@@ -77,19 +93,30 @@ class LeafDiseasePredictor:
         
         results = {
             'predictions': [],
-            'image_path': img_path
+            'image_path': img_path,
+            'disease': self.idx_to_class[top_indices[0]],
+            'confidence': float(predictions[top_indices[0]]) * 100
         }
         
         for idx in top_indices:
             class_name = self.idx_to_class[idx]
             confidence = float(predictions[idx])
+            
+            # Parse plant and disease from class name
+            parts = class_name.split('___')
+            plant = parts[0].replace('_', ' ') if len(parts) > 0 else 'Unknown'
+            disease = parts[1].replace('_', ' ') if len(parts) > 1 else class_name
+            
             results['predictions'].append({
                 'class': class_name,
+                'plant': plant,
+                'disease': disease,
                 'confidence': confidence,
                 'confidence_percent': f"{confidence * 100:.2f}%"
             })
         
         return results
+
     
     def predict_and_visualize(self, img_path, top_k=3, save_path=None):
         """
@@ -190,24 +217,32 @@ class LeafDiseasePredictor:
 
 def main():
     """
-    Example usage of the predictor
+    Command-line interface for prediction
     """
-    import sys
+    parser = argparse.ArgumentParser(description='Leaf Disease Detection Predictor')
+    parser.add_argument('--image', '-i', type=str, help='Path to image file or directory')
+    parser.add_argument('--model', '-m', type=str, default='models/1_10th_precision_model.h5',
+                        help='Path to model file')
+    parser.add_argument('--top_k', '-k', type=int, default=3,
+                        help='Number of top predictions to show')
+    parser.add_argument('--save', '-s', type=str, help='Path to save visualization')
+    args = parser.parse_args()
     
     # Initialize predictor
-    predictor = LeafDiseasePredictor()
+    predictor = LeafDiseasePredictor(model_path=args.model)
     
-    if len(sys.argv) > 1:
+    if args.image:
         # Predict on provided image path
-        img_path = sys.argv[1]
+        img_path = args.image
         if os.path.isfile(img_path):
-            predictor.predict_and_visualize(img_path, top_k=3)
+            predictor.predict_and_visualize(img_path, top_k=args.top_k, 
+                                           save_path=args.save)
         elif os.path.isdir(img_path):
             predictor.predict_batch(img_path)
         else:
             print(f"Error: {img_path} is not a valid file or directory")
     else:
-        # Example: predict on a test image
+        # Example: predict on a random test image
         test_dir = '/workspaces/Leaf_Disease_Detection/dataset/test'
         
         # Get first available test image
@@ -217,7 +252,7 @@ def main():
                 images = os.listdir(subdir_path)
                 if images:
                     test_image = os.path.join(subdir_path, images[0])
-                    print(f"Example prediction on: {test_image}")
+                    print(f"\nExample prediction on: {test_image}")
                     predictor.predict_and_visualize(test_image, top_k=5, 
                                                     save_path='plots/example_prediction.png')
                     break
