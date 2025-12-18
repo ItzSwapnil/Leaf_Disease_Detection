@@ -1,8 +1,21 @@
+# Leaf Disease Detection - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core ML Framework
 tensorflow>=2.13.0
-keras>=2.13.0
+
+# Data Processing
 numpy>=1.24.0
+pandas>=2.0.0
+Pillow>=10.0.0
+
+# Visualization
 matplotlib>=3.7.0
 seaborn>=0.12.0
+
+# ML Utilities
 scikit-learn>=1.3.0
-Pillow>=10.0.0
-pandas>=2.0.0
+
+# Optional: For Jupyter notebooks
+# jupyter>=1.0.0
+# ipykernel>=6.0.0
