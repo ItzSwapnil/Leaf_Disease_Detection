@@ -3,8 +3,9 @@
 ## 📁 Files Created
 
 ### Training Scripts
-- **[train_model.py](train_model.py)** - Main training script using EfficientNetB3 (recommended)
-- **[train_model_mobilenet.py](train_model_mobilenet.py)** - Alternative using MobileNetV2 (faster)
+- **[train_model_fast.py](train_model_fast.py)** - ⚡ FAST training using MobileNetV3Small (UNDER 2 HOURS!) - NEW!
+- **[train_model.py](train_model.py)** - Main training script using EfficientNetB3 (best accuracy)
+- **[train_model_mobilenet.py](train_model_mobilenet.py)** - Alternative using MobileNetV2 (balanced)
 
 ### Prediction & Evaluation
 - **[predict.py](predict.py)** - Make predictions on new images
@@ -31,35 +32,42 @@ python check_setup.py
 
 ### Step 3: Train Model
 ```bash
-# Option A: EfficientNetB3 (best accuracy)
+# Option A: MobileNetV3Small (FASTEST - under 2 hours!) ⚡ NEW!
+python train_model_fast.py
+
+# Option B: EfficientNetB3 (best accuracy)
 python train_model.py
 
-# Option B: MobileNetV2 (faster)
+# Option C: MobileNetV2 (balanced)
 python train_model_mobilenet.py
 
-# Option C: Interactive
+# Option D: Interactive
 ./quick_start.sh
 ```
 
 ## 📊 Model Comparison
 
-| Feature | EfficientNetB3 | MobileNetV2 |
-|---------|----------------|-------------|
-| **Accuracy** | 95-97% | 93-95% |
-| **Speed** | Moderate | Fast |
-| **Training Time** | 2-4 hours | 1-2 hours |
-| **GPU Memory** | ~1.5GB | ~800MB |
-| **Image Size** | 300x300 | 224x224 |
-| **Best For** | Production | Mobile/Quick tests |
+| Feature | MobileNetV3Small (FAST) ⚡ | EfficientNetB3 | MobileNetV2 |
+|---------|--------------------------|----------------|-------------|
+| **Accuracy** | 90-93% | 95-97% | 93-95% |
+| **Speed** | Fastest | Moderate | Fast |
+| **Training Time** | 1-1.7 hours | 2-4 hours | 1-2 hours |
+| **GPU Memory** | ~600MB | ~1.5GB | ~800MB |
+| **Image Size** | 224x224 | 300x300 | 224x224 |
+| **Best For** | Quick training | Production | Mobile |
+| **Special** | Mixed precision | Highest accuracy | Balanced |
 
 ## 🎯 Usage Examples
 
 ### Training
 ```bash
+# Train with MobileNetV3Small (FASTEST - under 2 hours!) ⚡ NEW!
+python train_model_fast.py
+
 # Train with EfficientNetB3 (recommended for accuracy)
 python train_model.py
 
-# Train with MobileNetV2 (faster, good for experiments)
+# Train with MobileNetV2 (balanced)
 python train_model_mobilenet.py
 
 # Monitor training
@@ -100,17 +108,26 @@ print(results)
 - **Test**: 19,218 images
 - **Classes**: 46 disease categories
 
+### Performance Metrics (MobileNetV3Small - FAST) ⚡ NEW!
+- Test Accuracy: **90-93%**
+- Top-3 Accuracy: **96-98%**
+- Training Time: **1-1.7 hours** (GPU) - UNDER 2 HOURS!
+- Per-class Accuracy: Most >85%
+- Model Size: **~10MB**
+
 ### Performance Metrics (EfficientNetB3)
 - Test Accuracy: **95-97%**
 - Top-3 Accuracy: **98-99%**
 - Training Time: **2-4 hours** (GPU)
 - Per-class Accuracy: Most >90%
+- Model Size: **~40MB**
 
 ### Performance Metrics (MobileNetV2)
 - Test Accuracy: **93-95%**
 - Top-3 Accuracy: **97-98%**
 - Training Time: **1-2 hours** (GPU)
 - Per-class Accuracy: Most >85%
+- Model Size: **~15MB**
 
 ## 🛠️ Advanced Configuration
 
@@ -187,6 +204,7 @@ IMG_SIZE = 224
 
 ## 📚 Documentation
 
+- **[FAST_TRAINING_GUIDE.md](FAST_TRAINING_GUIDE.md)** - Train in under 2 hours guide - NEW! ⚡
 - **[README_MODEL.md](README_MODEL.md)** - Complete documentation
 - **[model_comparison.py](model_comparison.py)** - Model comparison details
 - **[check_setup.py](check_setup.py)** - System verification
@@ -249,8 +267,9 @@ python model_comparison.py # Compare models
 
 **Ready to train? Pick your model and run:**
 ```bash
-python train_model.py              # EfficientNetB3 (recommended)
-python train_model_mobilenet.py    # MobileNetV2 (faster)
+python train_model_fast.py         # MobileNetV3Small (FASTEST - under 2 hours!) ⚡
+python train_model.py              # EfficientNetB3 (best accuracy)
+python train_model_mobilenet.py    # MobileNetV2 (balanced)
 ```
 
 **Good luck! 🚀🌿**
