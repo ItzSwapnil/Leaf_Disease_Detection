@@ -94,7 +94,7 @@ if [ ! -d "$DATASET_PATH" ]; then
         if [ -d "$CUSTOM_PATH" ]; then
             echo ""
             echo "⚠️  You'll need to update the BASE_DIR path in train_model_fast.py"
-            echo "   Change line 30 to: BASE_DIR = '$CUSTOM_PATH'"
+            echo "   Change the BASE_DIR variable to: BASE_DIR = '$CUSTOM_PATH'"
             echo ""
             read -p "Press Enter to continue..."
         else

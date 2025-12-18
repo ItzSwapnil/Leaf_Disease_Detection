@@ -30,8 +30,8 @@ import time
 try:
     set_global_policy('mixed_float16')
     print("✓ Mixed precision training enabled (GPU acceleration)")
-except:
-    print("⚠ Mixed precision not available, using default precision")
+except (ValueError, RuntimeError) as e:
+    print(f"⚠ Mixed precision not available: {e}, using default precision")
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -43,6 +43,7 @@ BATCH_SIZE = 64  # Larger batch size for better GPU utilization
 EPOCHS = 30  # Reduced epochs with early stopping
 NUM_CLASSES = 46
 LEARNING_RATE = 0.002  # Slightly higher initial learning rate
+FINE_TUNE_RATIO = 0.7  # Freeze first 70% of base layers during fine-tuning
 
 # Dataset paths
 BASE_DIR = '/workspaces/Leaf_Disease_Detection/dataset'
@@ -133,7 +134,7 @@ def build_fast_model(img_size=IMG_SIZE, num_classes=NUM_CLASSES):
         input_shape=(img_size, img_size, 3),
         include_top=False,
         weights='imagenet',
-        minimalistic=False  # Use full model for better accuracy
+        minimalistic=False  # Use non-minimalistic variant for additional layers
     )
     
     # Initially freeze base model
@@ -229,7 +230,7 @@ phase2_start = time.time()
 
 # Unfreeze last 30% of base model layers
 base_model.trainable = True
-fine_tune_at = int(len(base_model.layers) * 0.7)
+fine_tune_at = int(len(base_model.layers) * FINE_TUNE_RATIO)
 for layer in base_model.layers[:fine_tune_at]:
     layer.trainable = False
 
