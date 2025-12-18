@@ -6,5 +6,4 @@ models/
 logs/
 plots/
 *.h5
-*.json
 

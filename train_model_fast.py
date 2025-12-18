@@ -134,7 +134,7 @@ def build_fast_model(img_size=IMG_SIZE, num_classes=NUM_CLASSES):
         input_shape=(img_size, img_size, 3),
         include_top=False,
         weights='imagenet',
-        minimalistic=False  # Use non-minimalistic variant for additional layers
+        minimalistic=False  # Use full architecture with SE blocks and hard swish
     )
     
     # Initially freeze base model
