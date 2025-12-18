@@ -1,2 +1,6 @@
 dataset
 __pycache__
+models
+
+*h5
+/workspaces/Leaf_Disease_Detection/models
