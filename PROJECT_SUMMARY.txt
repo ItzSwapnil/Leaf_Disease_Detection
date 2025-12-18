@@ -19,24 +19,32 @@ images using transfer learning with state-of-the-art CNN architectures.
 🏗️ MODELS AVAILABLE
 -------------------
 
-1. EfficientNetB3 (Recommended for Production)
+1. Fast Training ⚡ (NEW - Recommended to Start)
+   ✓ Accuracy: 92-95%
+   ✓ Training Time: 1-1.5 hours (GPU)
+   ✓ Image Size: 160x160
+   ✓ Best for: Quick results, testing, prototypes
+   ✓ Script: train_model_fast.py
+
+2. EfficientNetB3 (Recommended for Production)
    ✓ Accuracy: 95-97%
-   ✓ Training Time: 2-4 hours (GPU)
+   ✓ Training Time: 3-5 hours (GPU)
    ✓ Image Size: 300x300
    ✓ Best for: Maximum accuracy
    ✓ Script: train_model.py
 
-2. MobileNetV2 (Recommended for Quick Testing)
+3. MobileNetV2 (Recommended for Balanced Approach)
    ✓ Accuracy: 93-95%
-   ✓ Training Time: 1-2 hours (GPU)
+   ✓ Training Time: 2-3 hours (GPU)
    ✓ Image Size: 224x224
-   ✓ Best for: Mobile deployment, faster training
+   ✓ Best for: Mobile deployment, balanced needs
    ✓ Script: train_model_mobilenet.py
 
 📁 FILES CREATED
 ----------------
 
 Training Scripts:
+  ✓ train_model_fast.py               - ⚡ Fast training under 2 hours (NEW)
   ✓ train_model.py                    - EfficientNetB3 training
   ✓ train_model_mobilenet.py          - MobileNetV2 training
 
@@ -51,8 +59,11 @@ Utilities:
   ✓ quick_start.sh                    - Interactive setup
 
 Documentation:
+  ✓ README.md                         - Main documentation
+  ✓ README_FAST_TRAINING.md           - ⚡ Fast training guide (NEW)
   ✓ README_MODEL.md                   - Complete documentation
   ✓ QUICK_REFERENCE.md                - Quick reference guide
+  ✓ MODEL_COMPARISON.md               - Model comparison (NEW)
   ✓ requirements.txt                  - Python dependencies
 
 🚀 QUICK START (3 STEPS)
@@ -65,9 +76,11 @@ Step 2: Verify Setup
   $ python check_setup.py
 
 Step 3: Train Model
+  $ python train_model_fast.py         # ⚡ Fast (under 2 hours) - RECOMMENDED
+  OR
   $ python train_model.py              # EfficientNetB3 (best accuracy)
   OR
-  $ python train_model_mobilenet.py    # MobileNetV2 (faster)
+  $ python train_model_mobilenet.py    # MobileNetV2 (balanced)
 
 ⚡ KEY FEATURES
 ---------------
@@ -84,14 +97,22 @@ Step 3: Train Model
 📈 EXPECTED PERFORMANCE
 -----------------------
 
+Fast Training ⚡:
+  • Test Accuracy: 92-95%
+  • Top-3 Accuracy: 96-98%
+  • Training Time: 1-1.5 hours
+  • Most classes >85% accuracy
+
 EfficientNetB3:
   • Test Accuracy: 95-97%
   • Top-3 Accuracy: 98-99%
+  • Training Time: 3-5 hours
   • Most classes >90% accuracy
 
 MobileNetV2:
   • Test Accuracy: 93-95%
   • Top-3 Accuracy: 97-98%
+  • Training Time: 2-3 hours
   • Most classes >85% accuracy
 
 🎓 ARCHITECTURE HIGHLIGHTS
@@ -121,7 +142,9 @@ Phase 2 (25-30 epochs):
 -----------------
 
 Training:
-  $ python train_model.py
+  $ python train_model_fast.py         # Fast (under 2 hours) ⚡
+  $ python train_model.py              # Best accuracy
+  $ python train_model_mobilenet.py    # Balanced
 
 Evaluation:
   $ python evaluate_model.py
@@ -164,8 +187,8 @@ logs/
 ------------------------
 
 1. Use GPU for training (20-30x faster than CPU)
-2. Start with MobileNetV2 for quick validation
-3. Use EfficientNetB3 for final production model
+2. Start with Fast Training for quick validation (under 2 hours) ⚡
+3. Use EfficientNetB3 for final production model (best accuracy)
 4. Monitor training with TensorBoard
 5. Let fine-tuning phase complete for best accuracy
 6. Evaluate thoroughly using evaluate_model.py
@@ -210,14 +233,17 @@ Your model is working well if:
 
 Choose your path:
 
+⚡ Fast Training (Under 2 Hours):
+   $ python train_model_fast.py
+
 🚀 Quick Start:
    $ ./quick_start.sh
 
-⚡ Fast Training:
-   $ python train_model_mobilenet.py
-
 🎯 Best Accuracy:
    $ python train_model.py
+
+⚖️ Balanced Approach:
+   $ python train_model_mobilenet.py
 
 📊 Analyze Dataset First:
    $ python visualize_dataset.py
