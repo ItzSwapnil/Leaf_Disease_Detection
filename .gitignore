@@ -1,1 +1,10 @@
 dataset
+__pycache__/
+*.pyc
+*.pyo
+models/
+logs/
+plots/
+*.h5
+*.json
+
