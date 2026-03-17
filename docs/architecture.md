@@ -1,225 +1,186 @@
 # System Architecture Documentation
 
-## 🏗️ Overall Architecture
+## Overall Architecture
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    APPLICATION LAYER                                        │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐           │
-│  │   predict.py   │  │  validation.py │  │ train_99pct.py │  │resume_training │           │
-│  │  (Inference)   │  │  (Evaluation)  │  │   (Training)   │  │     .py        │           │
-│  └────────────────┘  └────────────────┘  └────────────────┘  └────────────────┘           │
-└────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-                                           ▼
-┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    MODEL LAYER                                              │
-│  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                           EfficientNetV2B0 + Custom Head                              │  │
-│  │  ┌─────────────────────────────────────────────────────────────────────────────────┐ │  │
-│  │  │  Input      EfficientNetV2B0       GAP        BN       Dense     Dropout  Output │ │  │
-│  │  │ (160,160,3) ───────────────► (5,5,1280) ──► (1280) ─► (1024) ──► (1024) ─► (46)  │ │  │
-│  │  └─────────────────────────────────────────────────────────────────────────────────┘ │  │
-│  └──────────────────────────────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-                                           ▼
-┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    DATA LAYER                                               │
-│  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                        ImageDataGenerator Pipeline                                    │  │
-│  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐         │  │
-│  │  │  Load from    │  │   Resize &    │  │  EfficientNet │  │   Augment     │         │  │
-│  │  │  Directory    │─►│   Normalize   │─►│  Preprocess   │─►│  (Training)   │         │  │
-│  │  └───────────────┘  └───────────────┘  └───────────────┘  └───────────────┘         │  │
-│  └──────────────────────────────────────────────────────────────────────────────────────┘  │
-│                                           │                                                 │
-│  ┌────────────────────────────────────────┼────────────────────────────────────────────┐   │
-│  │                              Dataset Structure                                       │   │
-│  │   dataset/train/               dataset/val/                dataset/test/            │   │
-│  │   ├── Apple___Apple_scab/      ├── Apple___Apple_scab/     ├── Apple___Apple_scab/  │   │
-│  │   ├── Apple___Black_rot/       ├── Apple___Black_rot/      ├── Apple___Black_rot/   │   │
-│  │   ├── ... (46 classes)         ├── ... (46 classes)        ├── ... (46 classes)     │   │
-│  └────────────────────────────────────────────────────────────────────────────────────────┘│
-└────────────────────────────────────────────────────────────────────────────────────────────┘
-                                           │
-                                           ▼
-┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    STORAGE LAYER                                            │
-│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐             │
-│  │   models/*.h5        │  │   plots/*.png        │  │   logs/              │             │
-│  │   (Trained Weights)  │  │   (Visualizations)   │  │   (Training Logs)    │             │
-│  └──────────────────────┘  └──────────────────────┘  └──────────────────────┘             │
-└────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+This document describes the end-to-end architecture for training, evaluating, and serving the leaf disease detection model.
 
----
+```mermaid
+flowchart TB
+    classDef layer fill:#0f172a,stroke:#1e293b,color:#f8fafc,stroke-width:1.5px
+    classDef service fill:#e2e8f0,stroke:#64748b,color:#0f172a
+    classDef data fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef model fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef output fill:#fef3c7,stroke:#d97706,color:#7c2d12
 
-## 🧠 Neural Network Architecture
+    subgraph APP[Application Layer]
+        PRED[predict.py\nInference API]
+        EVAL[model_evaluation.py\nEvaluation]
+        TRAIN[model_training.py\nTraining]
+        FT[model_fine_tuning.py\nFine-tuning]
+        VIZ[visualization_pipeline.py\nVisualization]
+        MPATH[model_paths.py\nShared Model Resolver]
+    end
 
-### EfficientNetV2B0 Base Model
+    subgraph MODEL[Model Layer]
+        BASE[EfficientNetV2B0\nFeature Extractor]
+        HEAD[Custom Classifier Head\nGAP + BN + Dense + Dropout]
+        FINAL[46-class Softmax Output]
+    end
 
-```
-EfficientNetV2B0 (Transfer Learning from ImageNet)
-├── Stem: Conv2D(3→32) + BN + Swish
-├── Stage 1: FusedMBConv (32→16) × 1
-├── Stage 2: FusedMBConv (16→32) × 2  
-├── Stage 3: FusedMBConv (32→48) × 2
-├── Stage 4: MBConv (48→96) × 3
-├── Stage 5: MBConv (96→112) × 5
-├── Stage 6: MBConv (112→192) × 8
-└── Stage 7: MBConv (192→1280) × 1
-    
-Total Parameters: ~5.9M (Base only)
-```
+    subgraph DATA[Data Layer]
+        TR[dataset/train]
+        VA[dataset/val]
+        TE[dataset/test]
+        PRE[Preprocessing\nResize + Normalize + Augment]
+    end
 
-### Custom Classification Head
+    subgraph STORAGE[Storage Layer]
+        MSTORE[models/*.keras\nTrained Weights]
+        CINDEX[models/class_indices.json]
+        PSTORE[plots/*.png]
+    end
 
-```python
-# Architecture Definition
-x = base_model.output                      # (None, 5, 5, 1280)
-x = GlobalAveragePooling2D()(x)            # (None, 1280)
-x = BatchNormalization()(x)                # (None, 1280)
-x = Dense(1024, activation='relu')(x)      # (None, 1024)
-x = Dropout(0.4)(x)                        # (None, 1024) - Regularization
-outputs = Dense(46, activation='softmax')(x)  # (None, 46) - Classification
+    TR --> PRE
+    VA --> PRE
+    TE --> PRE
+    PRE --> TRAIN
+    PRE --> FT
+    PRE --> EVAL
+    TRAIN --> BASE --> HEAD --> FINAL
+    FT --> BASE
+    EVAL --> FINAL
+    PRED --> FINAL
+    VIZ --> FINAL
 
-Total Parameters: ~7.3M (including base)
-Trainable (Fine-tuned): ~2.1M
+    FINAL --> MSTORE
+    FINAL --> CINDEX
+    VIZ --> PSTORE
+    MPATH --> MSTORE
+
+    class APP,MODEL,DATA,STORAGE layer
+    class PRED,EVAL,TRAIN,FT,VIZ service
+    class TR,VA,TE,PRE data
+    class BASE,HEAD,FINAL model
+    class MSTORE,CINDEX,PSTORE output
 ```
 
 ---
 
-## 🔄 Training Pipeline
+## Neural Network Architecture
 
-### Three-Phase Training Strategy
+### Backbone + Classification Head
 
+```mermaid
+flowchart LR
+    classDef block fill:#f8fafc,stroke:#475569,color:#0f172a
+    classDef strong fill:#bfdbfe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px
+
+    IN[Input\n224x224x3] --> EFF[EfficientNetV2B0\nImageNet Pretrained]
+    EFF --> GAP[GlobalAveragePooling2D\n1280 features]
+    GAP --> BN[BatchNormalization]
+    BN --> D1[Dense 1024 + ReLU]
+    D1 --> DO[Dropout 0.4]
+    DO --> OUT[Dense 46 + Softmax]
+
+    class IN,EFF,GAP,BN,D1,DO block
+    class OUT strong
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         PHASE 1: FEATURE EXTRACTION                              │
-│  Base Model: FROZEN                                                              │
-│  Learning Rate: 0.002                                                            │
-│  Epochs: 10                                                                      │
-│  Expected Accuracy: ~85%                                                         │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         PHASE 2: FINE-TUNING                                     │
-│  Base Model: TOP 50 LAYERS UNFROZEN                                              │
-│  Learning Rate: 0.0001                                                           │
-│  Epochs: 15                                                                      │
-│  Expected Accuracy: ~92%                                                         │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         PHASE 3: PRECISION TRAINING                              │
-│  Base Model: TOP 50 LAYERS UNFROZEN                                              │
-│  Learning Rate: 1e-6 (Very Small)                                                │
-│  Epochs: 10+                                                                     │
-│  Target Accuracy: 99%                                                            │
-│  Current Accuracy: 94.46%                                                        │
-└─────────────────────────────────────────────────────────────────────────────────┘
+
+### Parameter Summary
+
+- Base model parameters: approximately 5.9M
+- Full model parameters: approximately 7.3M
+- Fine-tuned trainable parameters: approximately 2.1M
+
+---
+
+## Training Pipeline
+
+### Core Two-Phase Strategy
+
+```mermaid
+flowchart LR
+    classDef p1 fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef p2 fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef p3 fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+
+    P1[Phase 1\nFeature Extraction\nHead Training] --> P2[Phase 2\nIn-script Fine-tuning\nTop Layers Unfrozen]
+    P2 --> P3[Optional Extended Fine-tune\nvia fine_tune_model.py]
+
+    class P1 p1
+    class P2 p2
+    class P3 p3
+```
+
+Learning-rate control uses optimizer schedules (cosine restarts). ReduceLROnPlateau is disabled to avoid conflicts with schedule-managed learning rates.
+
+### Data Preprocessing
+
+```mermaid
+flowchart LR
+    A[Load Image] --> B[Resize to 224x224]
+    B --> C[EfficientNet Preprocess\nNormalize to expected range]
+    C --> D{Split}
+    D --> E[Training\nRotation + Horizontal Flip]
+    D --> F[Validation/Test\nNo Augmentation]
 ```
 
 ---
 
-## 📊 Preprocessing Pipeline
+## Inference Pipeline
 
-### Training Data Augmentation
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant API as Flask API
+    participant PRE as Preprocessing
+    participant MOD as Trained Model
+    participant MAP as Class Mapping
 
-```python
-ImageDataGenerator(
-    preprocessing_function=efficientnet_v2.preprocess_input,  # Normalize to [-1, 1]
-    rotation_range=15,       # Random rotation ±15°
-    horizontal_flip=True     # Random horizontal flip
-)
-```
-
-### Validation/Test Preprocessing
-
-```python
-ImageDataGenerator(
-    preprocessing_function=efficientnet_v2.preprocess_input   # Only normalize
-)
-```
-
----
-
-## 🎯 Inference Pipeline
-
-```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   Input      │    │  Preprocess  │    │   Model      │    │   Output     │
-│   Image      │───►│  (Resize,    │───►│  Forward     │───►│  Disease +   │
-│  (Any Size)  │    │   Normalize) │    │   Pass       │    │  Confidence  │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
-     │                     │                  │                    │
-     │                     │                  │                    │
-     ▼                     ▼                  ▼                    ▼
-  Load with          Resize to 160x160    Softmax output      argmax → class
-  PIL/tf.io          preprocess_input()   shape: (1, 46)      max prob → conf
+    U->>API: Upload leaf image
+    API->>PRE: Validate + resize + normalize
+    PRE->>MOD: Tensor (1, 224, 224, 3)
+    MOD-->>API: Probability vector (46 classes)
+    API->>MAP: Resolve class id to label
+    MAP-->>API: Disease label
+    API-->>U: Disease + confidence
 ```
 
 ---
 
-## 📁 File Structure & Dependencies
+## File Responsibilities
 
-```
-Leaf_Disease_Detection/
-│
-├── config.py              # Hyperparameters & paths
-│   └── Used by: train_99pct.py, predict.py
-│
-├── train_99pct.py         # Main training script
-│   ├── Uses: config.py, tensorflow, keras
-│   └── Outputs: models/*.h5
-│
-├── resume_training.py     # Continue from checkpoint
-│   ├── Uses: models/1_10th_precision_model.h5
-│   └── Outputs: models/99pct_final_reached.h5
-│
-├── validation.py          # Model evaluation
-│   ├── Uses: models/*.h5, dataset/val/
-│   └── Outputs: accuracy metrics
-│
-├── predict.py             # Inference API
-│   ├── Uses: models/*.h5, class_indices.json
-│   └── Outputs: predictions
-│
-└── generate_visualizations.py  # Create plots
-    ├── Uses: models/*.h5, dataset/
-    └── Outputs: plots/*.png
-```
+| Module | Purpose | Key Outputs |
+| ------ | ------- | ----------- |
+| `model_training.py` | Primary training workflow | Checkpoint and model artifacts |
+| `model_fine_tuning.py` | Resume/precision training | Improved model weights |
+| `model_evaluation.py` | Validation and test metrics | Accuracy and evaluation summaries |
+| `predict.py` | Inference logic | Disease label and confidence |
+| `visualization_pipeline.py` | Plot generation | Confusion matrix, curves, analysis visuals |
+| `model_paths.py` | Shared model path resolution | Consistent `.keras` fallback behavior |
 
 ---
 
-## 🔧 Configuration Parameters
+## Deployment Considerations
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `IMG_SIZE` | 160 | Input image dimensions |
-| `BATCH_SIZE` | 32 (train), 16 (resume) | Images per batch |
-| `NUM_CLASSES` | 46 | Disease categories |
-| `STEPS_PER_EPOCH` | 750 | Batches per epoch |
-| `LABEL_SMOOTHING` | 0.1 | Regularization technique |
-| `DROPOUT_RATE` | 0.4 | Classification head dropout |
+### Runtime and Performance
 
----
-
-## 🚀 Deployment Considerations
-
-### Memory Requirements
-- **Training**: 8GB RAM minimum, 16GB recommended
-- **Inference**: 2GB RAM sufficient
-
-### Performance Optimization
-- CPU threading: 4 threads for parallelism
-- Batch inference for multiple images
-- Model quantization possible for edge deployment
+- Training: 8 GB RAM minimum, 16 GB recommended.
+- Inference: 2 GB RAM is usually sufficient for single-image predictions.
+- CPU threading can be tuned to improve throughput.
 
 ### Scalability
-- Model can be served via TensorFlow Serving
-- REST API wrapper can be added for web deployment
-- Mobile deployment via TensorFlow Lite conversion
+
+- Suitable for Flask API deployment behind a reverse proxy.
+- Can be containerized for cloud or edge environments.
+- Model export path supports conversion workflows such as TensorFlow Lite.
+
+---
+
+## Empirical Visualizations
+
+The following generated figures provide empirical support for training behavior and classification quality.
+
+![Learning Curves](../plots/learning_curves.png)
+![Confusion Matrix](../plots/confusion_matrix.png)
+![Model Architecture](../plots/model_architecture.png)

@@ -1,0 +1,7 @@
+"""Professional CLI entrypoint for model inference."""
+
+from predict import main
+
+
+if __name__ == "__main__":
+    main()

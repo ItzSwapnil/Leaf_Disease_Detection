@@ -1,0 +1,32 @@
+[project]
+name = "leaf-disease-detection"
+version = "0.1.0"
+description = "Plant leaf disease detection using deep learning with EfficientNetV2"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+	"tensorflow[and-cuda]>=2.21.0,<2.22",
+	"keras>=3.12.0,<3.13",
+	"numpy>=2.2.0,<3",
+	"Pillow>=11.0.0,<12",
+	"matplotlib>=3.10.0,<4",
+	"seaborn>=0.13.2,<1",
+	"scikit-learn>=1.6.0,<2",
+	"flask>=3.1.0,<4",
+]
+
+[project.scripts]
+leaf-disease = "main:main"
+leaf-disease-train = "train_model:main"
+leaf-disease-fine-tune = "fine_tune_model:main"
+leaf-disease-evaluate = "evaluate_model:main"
+leaf-disease-predict = "predict_cli:main"
+leaf-disease-figures = "generate_figures:main"
+
+[tool.uv]
+link-mode = "copy"
+
+[dependency-groups]
+dev = [
+	"pytest>=8.4.2,<9",
+]

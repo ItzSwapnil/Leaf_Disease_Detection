@@ -1,18 +1,17 @@
-"""
-Configuration for Leaf Disease Detection Project
-"""
-import os
+"""Central configuration for training, inference, and evaluation."""
+
+from pathlib import Path
 
 # ============================================================
 #                    MODEL CONFIGURATION
 # ============================================================
 
 # Image settings
-IMG_SIZE = 160                    # Input image dimensions (160x160)
+IMG_SIZE = 224                    # Input image dimensions (increased for GPU inference)
 NUM_CLASSES = 46                  # Number of disease classes
 
 # Training hyperparameters
-BATCH_SIZE = 32                   # Images per batch (use 16 for low RAM)
+BATCH_SIZE = 16                   # Images per batch (adjusted for larger images)
 EPOCHS_PHASE1 = 10                # Transfer learning epochs
 EPOCHS_PHASE2 = 15                # Fine-tuning epochs
 LEARNING_RATE_PHASE1 = 0.002      # Initial learning rate
@@ -31,23 +30,23 @@ LABEL_SMOOTHING = 0.1
 #                       PATHS
 # ============================================================
 
-# Base directory
-BASE_DIR = '/workspaces/Leaf_Disease_Detection'
+# Base directory (auto-detected from this file's location)
+BASE_DIR = Path(__file__).resolve().parent
 
 # Dataset paths
-TRAIN_DIR = os.path.join(BASE_DIR, 'dataset/train')
-VAL_DIR = os.path.join(BASE_DIR, 'dataset/val')
-TEST_DIR = os.path.join(BASE_DIR, 'dataset/test')
+TRAIN_DIR = BASE_DIR / 'dataset' / 'train'
+VAL_DIR = BASE_DIR / 'dataset' / 'val'
+TEST_DIR = BASE_DIR / 'dataset' / 'test'
 
 # Model paths
-MODELS_DIR = os.path.join(BASE_DIR, 'models')
-CHECKPOINT_PATH = os.path.join(MODELS_DIR, '1_10th_precision_model.h5')
-FINAL_MODEL_PATH = os.path.join(MODELS_DIR, '99pct_final_reached.h5')
-CLASS_INDICES_PATH = os.path.join(MODELS_DIR, 'class_indices.json')
+MODELS_DIR = BASE_DIR / 'models'
+CHECKPOINT_MODEL_PATH = MODELS_DIR / 'leaf_disease_checkpoint.keras'
+FINAL_MODEL_PATH = MODELS_DIR / 'leaf_disease_classifier.keras'
+CLASS_INDICES_PATH = MODELS_DIR / 'class_indices.json'
 
 # Output paths
-PLOTS_DIR = os.path.join(BASE_DIR, 'plots')
-LOGS_DIR = os.path.join(BASE_DIR, 'logs')
+PLOTS_DIR = BASE_DIR / 'plots'
+LOGS_DIR = BASE_DIR / 'logs'
 
 # ============================================================
 #                    CPU OPTIMIZATION
@@ -83,9 +82,20 @@ MIN_LR = 1e-7
 #                    CURRENT MODEL STATUS
 # ============================================================
 
-CURRENT_ACCURACY = 94.47  # Validation accuracy (%) - 99pct_final_reached.h5
+CURRENT_ACCURACY = None   # Populate from latest evaluation
 TARGET_ACCURACY = 99.0    # Target accuracy (%)
-MODEL_COMPLETE = False    # Training complete flag (96.5% achieved during training)
+MODEL_COMPLETE = False    # Training complete flag
 
 # Best model file
-BEST_MODEL = 'models/99pct_final_reached.h5'  # 94.47% accuracy
+BEST_MODEL = str(FINAL_MODEL_PATH)
+
+# Compatibility aliases used by existing scripts.
+CHECKPOINT_PATH = str(CHECKPOINT_MODEL_PATH)
+FINAL_MODEL_PATH = str(FINAL_MODEL_PATH)
+CLASS_INDICES_PATH = str(CLASS_INDICES_PATH)
+TRAIN_DIR = str(TRAIN_DIR)
+VAL_DIR = str(VAL_DIR)
+TEST_DIR = str(TEST_DIR)
+MODELS_DIR = str(MODELS_DIR)
+PLOTS_DIR = str(PLOTS_DIR)
+LOGS_DIR = str(LOGS_DIR)
