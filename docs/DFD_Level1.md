@@ -1,117 +1,119 @@
 # Data Flow Diagram - Level 1 (Detailed Process View)
 
-## 🔄 Detailed System Decomposition
+## Detailed System Decomposition
 
-This diagram breaks down the main system into its sub-processes.
+Level 1 expands the core system into major internal processes for data preprocessing, model training, storage, and inference.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    LEAF DISEASE DETECTION SYSTEM                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    classDef source fill:#f8fafc,stroke:#64748b,color:#0f172a
+    classDef proc fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef model fill:#e0e7ff,stroke:#4f46e5,color:#312e81
+    classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef out fill:#fef3c7,stroke:#d97706,color:#7c2d12
 
-                    ┌─────────────┐
-                    │   TRAINING  │
-                    │   DATASET   │
-                    └──────┬──────┘
-                           │
-                           │ Raw Images + Labels
-                           ▼
-┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│  ┌─────────────────────────────────────────────────────────────────────────────────────┐     │
-│  │                           1.0 DATA PREPROCESSING                                     │     │
-│  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐           │     │
-│  │  │   Image     │    │   Resize    │    │   Normalize │    │    Data     │           │     │
-│  │  │   Loading   │───►│   160x160   │───►│   (-1, 1)   │───►│ Augmentation│           │     │
-│  │  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘           │     │
-│  └─────────────────────────────────────────────────────────────────────────────────────┘     │
-│                                            │                                                  │
-│                                            │ Preprocessed Batches                            │
-│                                            ▼                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────────────┐     │
-│  │                           2.0 MODEL TRAINING                                         │     │
-│  │  ┌─────────────────────────────────────────────────────────────────────────────┐    │     │
-│  │  │                     EfficientNetV2B0 Architecture                            │    │     │
-│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │    │     │
-│  │  │  │ Phase 1:     │  │ Phase 2:     │  │ Phase 3:     │  │   Model      │     │    │     │
-│  │  │  │ Feature      │─►│ Fine-tune    │─►│ Precision    │─►│   Export     │     │    │     │
-│  │  │  │ Extraction   │  │ Top Layers   │  │ Training     │  │   (.h5)      │     │    │     │
-│  │  │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │    │     │
-│  │  └─────────────────────────────────────────────────────────────────────────────┘    │     │
-│  └─────────────────────────────────────────────────────────────────────────────────────┘     │
-│                                            │                                                  │
-│                                            │ Trained Model                                   │
-│                                            ▼                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────────────┐     │
-│  │                           3.0 MODEL STORAGE                                          │     │
-│  │  ┌─────────────────────────────────────────────────────────────────────────────┐    │     │
-│  │  │   models/1_10th_precision_model.h5    │    models/99pct_final_reached.h5   │    │     │
-│  │  │   (Best Checkpoint - 94.46%)          │    (Final Model - Target 99%)      │    │     │
-│  │  └─────────────────────────────────────────────────────────────────────────────┘    │     │
-│  └─────────────────────────────────────────────────────────────────────────────────────┘     │
-│                                            │                                                  │
-└────────────────────────────────────────────┼──────────────────────────────────────────────────┘
-                                             │
-                                             │ Load Model
-                                             ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                              INFERENCE PIPELINE                                              │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐              │
-│  │  User Input  │    │   Image      │    │   Model      │    │  Disease     │              │
-│  │  (Leaf Image)│───►│ Preprocessing│───►│  Prediction  │───►│  Diagnosis   │              │
-│  └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘              │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
+    SRC[(Training Dataset)]
+    UIN[User Input Image]
+
+    subgraph P1[1.0 Data Preprocessing]
+        P11[1.1 Image Loading]
+        P12[1.2 Resize 224x224]
+        P13[1.3 Normalize / Preprocess]
+        P14[1.4 Data Augmentation]
+        P11 --> P12 --> P13 --> P14
+    end
+
+    subgraph P2[2.0 Model Training]
+        T1[2.1 Feature Extraction]
+        T2[2.2 Fine-tuning]
+        T3[2.3 Precision Training]
+        T4[2.4 Model Export]
+        T1 --> T2 --> T3 --> T4
+    end
+
+    subgraph P3[3.0 Model Storage]
+        D1[(Checkpoint Model)]
+        D2[(Final Model)]
+        D3[(Class Indices)]
+    end
+
+    subgraph P4[4.0 Inference Pipeline]
+        I1[4.1 Input Preprocessing]
+        I2[4.2 Model Prediction]
+        I3[4.3 Disease Diagnosis]
+        I1 --> I2 --> I3
+    end
+
+    RES[Disease + Confidence]
+
+    SRC --> P11
+    P14 --> T1
+    T4 --> D1
+    T4 --> D2
+    T4 --> D3
+
+    UIN --> I1
+    D2 --> I2
+    D3 --> I3
+    I3 --> RES
+
+    class SRC,UIN source
+    class P11,P12,P13,P14,T1,T2,T3,T4,I1,I2,I3 proc
+    class D1,D2,D3 store
+    class RES out
 ```
 
 ---
 
-## 📋 Process Descriptions
+## Process Descriptions
 
 ### 1.0 Data Preprocessing
 
 | Sub-Process | Input | Output | Description |
-|-------------|-------|--------|-------------|
-| **1.1 Image Loading** | Raw image files | PIL Image objects | Load images from directory structure |
-| **1.2 Resize** | Variable size images | 160x160 images | Standardize dimensions for model |
-| **1.3 Normalize** | 0-255 pixel values | -1 to 1 values | EfficientNet preprocessing |
-| **1.4 Augmentation** | Original images | Augmented images | Rotation, flip for better generalization |
+| ----------- | ----- | ------ | ----------- |
+| 1.1 Image Loading | Raw files | Image objects | Loads samples from dataset directories |
+| 1.2 Resize | Variable dimensions | 224x224 tensors | Standardizes image size |
+| 1.3 Normalize | Pixel values | Model-ready tensors | Applies EfficientNet preprocessing |
+| 1.4 Augmentation | Training tensors | Augmented tensors | Improves generalization via transforms |
 
 ### 2.0 Model Training
 
 | Sub-Process | Input | Output | Description |
-|-------------|-------|--------|-------------|
-| **2.1 Phase 1 - Feature Extraction** | Preprocessed batches | Warm-up weights | Train classifier with frozen base |
-| **2.2 Phase 2 - Fine-tuning** | Phase 1 model | Tuned weights | Unfreeze & train top 50 layers |
-| **2.3 Phase 3 - Precision Training** | Phase 2 model | Final model | Very low LR for final accuracy boost |
-| **2.4 Model Export** | Trained weights | .h5 file | Save model for deployment |
+| ----------- | ----- | ------ | ----------- |
+| 2.1 Feature Extraction | Preprocessed data | Warm-up weights | Trains head with frozen base |
+| 2.2 Fine-tuning | Warm-up weights | Tuned backbone | Unfreezes selected layers |
+| 2.3 Precision Training | Tuned backbone | High-accuracy model | Uses low LR for final convergence |
+| 2.4 Model Export | Trained weights | Model artifacts | Saves deployable files |
 
 ### 3.0 Model Storage
 
 | Data Store | Contents | Purpose |
-|------------|----------|---------|
-| **D1: Checkpoint Model** | `1_10th_precision_model.h5` | Best validation accuracy checkpoint |
-| **D2: Final Model** | `99pct_final_reached.h5` | Production-ready model |
-| **D3: Class Indices** | `class_indices.json` | Disease name mappings |
+| ---------- | -------- | ------- |
+| D1 | Checkpoint model | Best intermediate validation state |
+| D2 | Final model | Production inference model |
+| D3 | Class index mapping | Label id to disease name mapping |
 
 ### 4.0 Inference Pipeline
 
 | Sub-Process | Input | Output | Description |
-|-------------|-------|--------|-------------|
-| **4.1 Image Preprocessing** | User image | Tensor (1,160,160,3) | Prepare for model input |
-| **4.2 Model Prediction** | Preprocessed tensor | 46-dim probability vector | Forward pass through CNN |
-| **4.3 Disease Diagnosis** | Probability vector | Disease name + confidence | Argmax + formatting |
+| ----------- | ----- | ------ | ----------- |
+| 4.1 Input Preprocessing | User image | Model tensor | Aligns input format with training pipeline |
+| 4.2 Model Prediction | Preprocessed tensor | Probability vector | Computes class probabilities |
+| 4.3 Disease Diagnosis | Probability vector | Disease + confidence | Selects top class and confidence score |
 
 ---
 
-## 🔄 Data Dictionary
+## Data Dictionary
 
 | Data Flow | Type | Format | Description |
-|-----------|------|--------|-------------|
-| Raw Images | Image | JPEG/PNG | Original leaf photographs |
-| Preprocessed Batches | Tensor | (batch, 160, 160, 3) | Normalized image batches |
-| Training Labels | Array | One-hot encoded | 46-class category labels |
-| Model Weights | Binary | HDF5 (.h5) | Keras model with weights |
-| Prediction | Dict | JSON | `{disease: str, confidence: float}` |
+| --------- | ---- | ------ | ----------- |
+| Raw Images | Image | JPEG/PNG | Leaf image samples from users and dataset |
+| Preprocessed Tensors | Tensor | (batch, 224, 224, 3) | Normalized model input batches |
+| Model Artifacts | Binary | .keras | Saved model weights and topology |
+| Prediction Output | Object | JSON-like | Disease name and confidence value |
 
 ---
 
-*Previous: See [DFD_Level0.md](DFD_Level0.md) for context diagram*
+Previous: See [docs/DFD_Level0.md](docs/DFD_Level0.md) for system context.
+
+Related empirical figures: [plots/confusion_matrix.png](../plots/confusion_matrix.png), [plots/sample_predictions.png](../plots/sample_predictions.png).

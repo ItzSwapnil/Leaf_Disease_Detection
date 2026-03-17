@@ -1,2 +1,15 @@
-dataset
-__pycache__
+dataset/
+__pycache__/
+.pytest_cache/
+.venv/
+.python-version
+.idea/
+.vscode/
+*.iml
+
+uploads/*
+!uploads/.gitkeep
+
+*.log
+*.tmp
+*.deb

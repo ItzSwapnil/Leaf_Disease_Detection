@@ -7,34 +7,39 @@ import os
 import json
 import argparse
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
+from keras.models import load_model
+from keras.preprocessing import image
+from keras.applications.efficientnet_v2 import preprocess_input
 import matplotlib.pyplot as plt
 from PIL import Image
+from hardware import configure_tensorflow
+from config import IMG_SIZE, FINAL_MODEL_PATH, CLASS_INDICES_PATH
+from model_paths import resolve_keras_model_path
 
-# Suppress TF warnings
+# Suppress TF warnings and prefer GPU
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+configure_tensorflow()
 
 
 class LeafDiseasePredictor:
-    def __init__(self, model_path='models/99pct_final_reached.h5', 
-                 class_indices_path='models/class_indices.json',
-                 img_size=160):
+    def __init__(self, model_path=None,
+                 class_indices_path=CLASS_INDICES_PATH,
+                 img_size=IMG_SIZE):
         """
         Initialize the predictor with a trained model
         
         Args:
             model_path: Path to the trained model
             class_indices_path: Path to class indices JSON file
-            img_size: Image size for preprocessing (default 160 for EfficientNetV2)
+            img_size: Image size for preprocessing
         """
         self.img_size = img_size
+
+        resolved_model_path = resolve_keras_model_path([model_path] if model_path else None)
         
         # Load the model
-        print(f"Loading model from {model_path}...")
-        self.model = load_model(model_path)
+        print(f"Loading model from {resolved_model_path}...")
+        self.model = load_model(resolved_model_path)
         print("✓ Model loaded successfully!")
         
         # Load or generate class indices
@@ -51,7 +56,7 @@ class LeafDiseasePredictor:
     
     def _generate_class_indices(self):
         """Generate class indices from dataset directory"""
-        train_dir = '/workspaces/Leaf_Disease_Detection/dataset/train'
+        train_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dataset', 'train')
         classes = sorted(os.listdir(train_dir))
         return {cls: i for i, cls in enumerate(classes) if os.path.isdir(os.path.join(train_dir, cls))}
     
@@ -221,7 +226,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description='Leaf Disease Detection Predictor')
     parser.add_argument('--image', '-i', type=str, help='Path to image file or directory')
-    parser.add_argument('--model', '-m', type=str, default='models/1_10th_precision_model.h5',
+    parser.add_argument('--model', '-m', type=str, default=None,
                         help='Path to model file')
     parser.add_argument('--top_k', '-k', type=int, default=3,
                         help='Number of top predictions to show')
@@ -243,7 +248,7 @@ def main():
             print(f"Error: {img_path} is not a valid file or directory")
     else:
         # Example: predict on a random test image
-        test_dir = '/workspaces/Leaf_Disease_Detection/dataset/test'
+        test_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dataset', 'test')
         
         # Get first available test image
         for subdir in os.listdir(test_dir):

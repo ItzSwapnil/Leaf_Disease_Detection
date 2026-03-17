@@ -5,23 +5,47 @@ A modern Flask-based web interface for plant disease detection
 
 import os
 import json
+import uuid
+import sys
+import time
+import threading
+import subprocess
+import re
 import numpy as np
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
-from PIL import Image
-import io
+from keras.models import load_model
+from keras.preprocessing import image
+from keras.applications.efficientnet_v2 import preprocess_input
 import base64
+from PIL import Image
+from config import IMG_SIZE, FINAL_MODEL_PATH, CLASS_INDICES_PATH
+from model_paths import resolve_keras_model_path
+from hardware import configure_tensorflow, get_compute_info
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
+
+def _log_tf_runtime_info():
+    """Log TensorFlow build info and detected GPU devices at startup."""
+    try:
+        print(f"TensorFlow version: {tf.__version__}")
+        print(f"CUDA visible devices: {tf.config.list_physical_devices('GPU')}")
+        print(f"Built with CUDA: {tf.test.is_built_with_cuda()}")
+        print(f"Built with ROCm: {tf.test.is_built_with_rocm()}")
+    except Exception as exc:  # Best effort; do not block app startup
+        print(f"TensorFlow runtime probe failed: {exc}")
+
+
+configure_tensorflow()
+_log_tf_runtime_info()
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
 app.config['UPLOAD_FOLDER'] = 'uploads'
+ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
 
 # Create uploads folder
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -29,7 +53,182 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # Global model variable
 model = None
 class_indices = None
-disease_info = None
+MODEL_LOAD_ERROR = None
+
+JOB_LOG_LIMIT = 250
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+CONTROL_ACTIONS = {
+    "train": {
+        "label": "Train Model",
+        "script": "train_model.py",
+        "description": "Run base model training pipeline."
+    },
+    "fine_tune": {
+        "label": "Fine Tune Model",
+        "script": "fine_tune_model.py",
+        "description": "Continue training from a saved checkpoint."
+    },
+    "evaluate": {
+        "label": "Evaluate Model",
+        "script": "evaluate_model.py",
+        "description": "Run validation and evaluation metrics."
+    },
+    "generate_figures": {
+        "label": "Generate Figures",
+        "script": "generate_figures.py",
+        "description": "Build plots and visual analysis artifacts."
+    }
+}
+
+
+def _resolve_model_path():
+    return resolve_keras_model_path([FINAL_MODEL_PATH])
+
+
+def _is_allowed_upload(filename):
+    ext = os.path.splitext(filename.lower())[1]
+    return ext in ALLOWED_EXTENSIONS
+
+
+def _create_job(action_key):
+    action = CONTROL_ACTIONS[action_key]
+    script = action["script"]
+    command = [sys.executable, script]
+    job_id = uuid.uuid4().hex
+    now = time.time()
+    job = {
+        "id": job_id,
+        "action": action_key,
+        "label": action["label"],
+        "description": action["description"],
+        "script": script,
+        "command": " ".join(command),
+        "status": "starting",
+        "start_time": now,
+        "end_time": None,
+        "return_code": None,
+        "progress_pct": 0.0,
+        "eta_seconds": None,
+        "progress_stage": "pending",
+        "logs": [],
+        "stop_requested": False,
+        "process": None,
+    }
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+    return job
+
+
+def _append_job_log(job, line):
+    if not line:
+        return
+
+    cleaned = line.replace("\r", " ").replace("\b", "")
+    cleaned = ANSI_ESCAPE_RE.sub("", cleaned)
+    cleaned = "".join(ch for ch in cleaned if ch == "\t" or 32 <= ord(ch) <= 126)
+    cleaned = cleaned.strip()
+
+    if not cleaned:
+        return
+
+    if job["logs"] and job["logs"][-1] == cleaned:
+        return
+
+    job["logs"].append(cleaned)
+    if len(job["logs"]) > JOB_LOG_LIMIT:
+        job["logs"] = job["logs"][-JOB_LOG_LIMIT:]
+
+
+def _parse_progress_line(job, raw_line):
+    prefix = "COPILOT_PROGRESS "
+    line = (raw_line or "").strip()
+    if not line.startswith(prefix):
+        return False
+
+    try:
+        payload = json.loads(line[len(prefix):])
+        progress = float(payload.get("progress_pct", job.get("progress_pct", 0.0)))
+        eta = payload.get("eta_seconds")
+
+        job["progress_pct"] = max(0.0, min(100.0, progress))
+        job["eta_seconds"] = None if eta is None else max(0.0, float(eta))
+        job["progress_stage"] = payload.get("stage", job.get("progress_stage", "running"))
+        return True
+    except Exception:
+        return False
+
+
+def _run_job(job):
+    script_path = os.path.join(os.getcwd(), job["script"])
+    command = [sys.executable, script_path]
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=os.getcwd(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        job["process"] = process
+        job["status"] = "running"
+        _append_job_log(job, f"Started: {' '.join(command)}")
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            if _parse_progress_line(job, line):
+                continue
+            _append_job_log(job, line)
+
+        return_code = process.wait()
+        job["return_code"] = int(return_code)
+        job["end_time"] = time.time()
+
+        if job["stop_requested"]:
+            job["status"] = "stopped"
+        elif return_code == 0:
+            job["status"] = "completed"
+            job["progress_pct"] = 100.0
+            job["eta_seconds"] = 0.0
+            _append_job_log(job, "Completed successfully.")
+        else:
+            job["status"] = "failed"
+            _append_job_log(job, f"Exited with code {return_code}.")
+
+    except Exception as exc:
+        job["status"] = "failed"
+        job["end_time"] = time.time()
+        _append_job_log(job, f"Error: {exc}")
+    finally:
+        job["process"] = None
+
+
+def _job_response(job):
+    runtime_seconds = None
+    end_time = job["end_time"] if job["end_time"] is not None else time.time()
+    if job["start_time"] is not None:
+        runtime_seconds = round(end_time - job["start_time"], 1)
+
+    return {
+        "id": job["id"],
+        "action": job["action"],
+        "label": job["label"],
+        "description": job["description"],
+        "script": job["script"],
+        "command": job["command"],
+        "status": job["status"],
+        "start_time": job["start_time"],
+        "end_time": job["end_time"],
+        "runtime_seconds": runtime_seconds,
+        "return_code": job["return_code"],
+        "progress_pct": round(float(job.get("progress_pct", 0.0)), 2),
+        "eta_seconds": job.get("eta_seconds"),
+        "progress_stage": job.get("progress_stage", "pending"),
+        "logs": job["logs"][-80:],
+    }
 
 # Disease information database
 DISEASE_INFO = {
@@ -406,14 +605,20 @@ DISEASE_INFO = {
 
 def load_model_and_classes():
     """Load the model and class indices"""
-    global model, class_indices
-    
+    global model, class_indices, MODEL_LOAD_ERROR
+
+    model = None
+    class_indices = None
+    MODEL_LOAD_ERROR = None
+
     print("🔄 Loading AI model...")
-    model = load_model('models/99pct_final_reached.h5')
-    
-    with open('models/class_indices.json', 'r') as f:
+    model_path = _resolve_model_path()
+    model = load_model(model_path)
+    print(f"✅ Loaded model file: {model_path}")
+
+    with open(CLASS_INDICES_PATH, 'r') as f:
         class_indices = json.load(f)
-    
+
     # Reverse the indices to get class names from predictions
     class_indices = {v: k for k, v in class_indices.items()}
     print("✅ Model loaded successfully!")
@@ -421,8 +626,10 @@ def load_model_and_classes():
 
 def predict_disease(img_path):
     """Predict disease from image"""
-    # Load and preprocess image
-    img = image.load_img(img_path, target_size=(160, 160))
+    if model is None or class_indices is None:
+        raise RuntimeError("Model or class indices are not loaded.")
+
+    img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
     img_array = image.img_to_array(img)
     img_array = np.expand_dims(img_array, axis=0)
     img_array = preprocess_input(img_array)
@@ -431,9 +638,50 @@ def predict_disease(img_path):
     predictions = model.predict(img_array, verbose=0)
     predicted_class_idx = np.argmax(predictions[0])
     confidence = float(predictions[0][predicted_class_idx]) * 100
+
+    # Top-2 margin helps detect ambiguous predictions.
+    top_two = np.argsort(predictions[0])[-2:]
+    top1_prob = float(predictions[0][top_two[-1]])
+    top2_prob = float(predictions[0][top_two[-2]])
+    confidence_margin = (top1_prob - top2_prob) * 100
     
     # Get class name
     class_name = class_indices.get(predicted_class_idx, "Unknown")
+
+    leaf_validation = assess_leaf_likelihood(img_path)
+    low_confidence = confidence < 45.0
+    low_margin = confidence_margin < 12.0
+
+    appears_non_leaf = (
+        leaf_validation["leaf_score"] < 0.23
+        and leaf_validation["vegetation_ratio"] < 0.08
+    )
+
+    weak_leaf_signal = leaf_validation["leaf_score"] < 0.35
+    uncertain_prediction = low_confidence or low_margin
+
+    if appears_non_leaf or (uncertain_prediction and weak_leaf_signal):
+        guidance = "Upload a clear, close-up image of a single leaf under good lighting."
+        if leaf_validation["reason"]:
+            guidance = f"{leaf_validation['reason']} {guidance}"
+
+        return {
+            "class_name": "Unknown",
+            "confidence": round(confidence, 2),
+            "plant": "Unknown",
+            "disease": "Not a valid leaf image",
+            "description": "The uploaded photo does not appear to be a plant leaf, or the model is not confident enough to classify it safely.",
+            "symptoms": "No disease analysis was performed because leaf validation failed.",
+            "treatment": guidance,
+            "prevention": "Use a plain background and make sure the leaf fills most of the frame.",
+            "is_healthy": False,
+            "is_valid_leaf": False,
+            "validation": {
+                "leaf_score": leaf_validation["leaf_score"],
+                "vegetation_ratio": leaf_validation["vegetation_ratio"],
+                "confidence_margin": round(confidence_margin, 2),
+            },
+        }
     
     # Get disease info
     info = DISEASE_INFO.get(class_name, {
@@ -454,30 +702,111 @@ def predict_disease(img_path):
         "symptoms": info["symptoms"],
         "treatment": info["treatment"],
         "prevention": info["prevention"],
-        "is_healthy": "healthy" in class_name.lower()
+        "is_healthy": "healthy" in class_name.lower(),
+        "is_valid_leaf": True,
+        "validation": {
+            "leaf_score": leaf_validation["leaf_score"],
+            "vegetation_ratio": leaf_validation["vegetation_ratio"],
+            "confidence_margin": round(confidence_margin, 2),
+        },
     }
+
+
+def assess_leaf_likelihood(img_path):
+    """Heuristic leaf plausibility check to reject obvious non-leaf uploads."""
+    try:
+        with Image.open(img_path) as img:
+            arr = np.asarray(img.convert("RGB").resize((IMG_SIZE, IMG_SIZE)), dtype=np.float32)
+
+        if arr.size == 0:
+            return {
+                "leaf_score": 0.0,
+                "vegetation_ratio": 0.0,
+                "reason": "Image content could not be analyzed.",
+            }
+
+        arr_norm = arr / 255.0
+        maxc = np.max(arr_norm, axis=2)
+        minc = np.min(arr_norm, axis=2)
+        delta = np.maximum(maxc - minc, 1e-8)
+
+        hue = np.zeros_like(maxc)
+        r = arr_norm[:, :, 0]
+        g = arr_norm[:, :, 1]
+        b = arr_norm[:, :, 2]
+
+        r_mask = maxc == r
+        g_mask = maxc == g
+        b_mask = maxc == b
+
+        hue[r_mask] = (60.0 * ((g[r_mask] - b[r_mask]) / delta[r_mask]) + 360.0) % 360.0
+        hue[g_mask] = (60.0 * ((b[g_mask] - r[g_mask]) / delta[g_mask]) + 120.0) % 360.0
+        hue[b_mask] = (60.0 * ((r[b_mask] - g[b_mask]) / delta[b_mask]) + 240.0) % 360.0
+
+        sat = np.where(maxc <= 0.0, 0.0, delta / maxc)
+        val = maxc
+
+        vegetation_mask = (hue >= 20.0) & (hue <= 140.0) & (sat >= 0.15) & (val >= 0.15)
+        vegetation_ratio = float(np.mean(vegetation_mask))
+        contrast = float(np.std(arr_norm))
+
+        leaf_score = min(1.0, vegetation_ratio * 1.7 + contrast * 0.6)
+
+        reason = ""
+        if vegetation_ratio < 0.08:
+            reason = "Very little leaf-like color/texture was detected."
+        elif leaf_score < 0.35:
+            reason = "Leaf signal is weak in this image."
+
+        return {
+            "leaf_score": round(leaf_score, 3),
+            "vegetation_ratio": round(vegetation_ratio, 3),
+            "reason": reason,
+        }
+    except Exception as exc:
+        return {
+            "leaf_score": 0.0,
+            "vegetation_ratio": 0.0,
+            "reason": f"Image validation failed: {exc}",
+        }
 
 
 @app.route('/')
 def index():
     """Render the main page"""
-    return render_template('index.html')
+    return render_template(
+        'index.html',
+        control_actions=CONTROL_ACTIONS,
+        compute_info=get_compute_info(),
+    )
 
 
 @app.route('/predict', methods=['POST'])
 def predict():
     """Handle image upload and prediction"""
+    if model is None or class_indices is None:
+        details = MODEL_LOAD_ERROR or (
+            "Model artifacts are not loaded. Run training first or place a valid model in the models/ directory."
+        )
+        return jsonify({'error': details}), 503
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     
     file = request.files['file']
-    
-    if file.filename == '':
+    filename_input = file.filename
+
+    if not filename_input:
         return jsonify({'error': 'No file selected'}), 400
+
+    if not _is_allowed_upload(filename_input):
+        return jsonify({'error': 'Unsupported file type. Use JPG, PNG, or WEBP.'}), 400
     
     if file:
         # Save file temporarily
-        filename = secure_filename(file.filename)
+        original_name = secure_filename(filename_input)
+        _, ext = os.path.splitext(original_name)
+        filename = f"{uuid.uuid4().hex}{ext.lower()}"
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
@@ -507,11 +836,93 @@ def predict():
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'model_loaded': model is not None})
+    return jsonify({
+        'status': 'healthy',
+        'model_loaded': model is not None and class_indices is not None,
+        'model_error': MODEL_LOAD_ERROR,
+    })
+
+
+@app.route('/control/actions', methods=['GET'])
+def control_actions():
+    """Return available control panel actions."""
+    actions = []
+    for action_key, meta in CONTROL_ACTIONS.items():
+        actions.append(
+            {
+                "action": action_key,
+                "label": meta["label"],
+                "description": meta["description"],
+                "script": meta["script"],
+            }
+        )
+    return jsonify({"actions": actions})
+
+
+@app.route('/control/run/<action_key>', methods=['POST'])
+def control_run(action_key):
+    """Start a background workflow action."""
+    if action_key not in CONTROL_ACTIONS:
+        return jsonify({"error": "Unknown control action."}), 404
+
+    with JOBS_LOCK:
+        for job in JOBS.values():
+            if job["action"] == action_key and job["status"] in {"starting", "running"}:
+                return jsonify({"error": "This action is already running.", "job": _job_response(job)}), 409
+
+    job = _create_job(action_key)
+    thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
+    thread.start()
+
+    return jsonify({"message": f"{job['label']} started.", "job": _job_response(job)})
+
+
+@app.route('/control/jobs', methods=['GET'])
+def control_jobs():
+    """List all workflow jobs."""
+    with JOBS_LOCK:
+        jobs = [_job_response(job) for job in JOBS.values()]
+    jobs.sort(key=lambda x: x["start_time"] or 0, reverse=True)
+    return jsonify({"jobs": jobs})
+
+
+@app.route('/control/system', methods=['GET'])
+def control_system():
+    """Return compute backend information for control panel status."""
+    return jsonify({"compute": get_compute_info()})
+
+
+@app.route('/control/stop/<job_id>', methods=['POST'])
+def control_stop(job_id):
+    """Stop a running workflow job."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+
+    process = job.get("process")
+    if job["status"] not in {"starting", "running"} or process is None:
+        return jsonify({"error": "Job is not running.", "job": _job_response(job)}), 409
+
+    job["stop_requested"] = True
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    except Exception as exc:
+        _append_job_log(job, f"Stop request failed: {exc}")
+
+    return jsonify({"message": "Stop signal sent.", "job": _job_response(job)})
 
 
 if __name__ == '__main__':
-    load_model_and_classes()
+    try:
+        load_model_and_classes()
+    except Exception as exc:
+        MODEL_LOAD_ERROR = str(exc)
+        print(f"⚠️ Model initialization skipped: {MODEL_LOAD_ERROR}")
+        print("ℹ️ The web app will still start, but prediction requests will return 503 until a model is available.")
     print("\n🌿 Leaf Disease Detection Web App")
     print("=" * 40)
     print("🌐 Open http://localhost:5000 in your browser")

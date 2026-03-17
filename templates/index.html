@@ -356,6 +356,12 @@
             border: 1px solid rgba(239, 68, 68, 0.3);
         }
 
+        .status-badge.invalid {
+            background: rgba(251, 146, 60, 0.2);
+            color: #fdba74;
+            border: 1px solid rgba(251, 146, 60, 0.3);
+        }
+
         .plant-name {
             font-size: 1.2rem;
             color: #94a3b8;
@@ -579,6 +585,239 @@
         .pulse {
             animation: pulse 2s infinite;
         }
+
+        /* Control Panel */
+        .control-panel {
+            margin-top: 30px;
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .control-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .control-title h3 {
+            font-size: 1.4rem;
+            margin-bottom: 6px;
+        }
+
+        .control-title p {
+            color: #94a3b8;
+            font-size: 0.95rem;
+        }
+
+        .compute-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            color: #cbd5e1;
+            background: rgba(148, 163, 184, 0.12);
+        }
+
+        .compute-indicator.gpu {
+            border-color: rgba(34, 197, 94, 0.35);
+            background: rgba(34, 197, 94, 0.16);
+            color: #86efac;
+        }
+
+        .compute-indicator.cpu {
+            border-color: rgba(245, 158, 11, 0.35);
+            background: rgba(245, 158, 11, 0.16);
+            color: #fcd34d;
+        }
+
+
+        .refresh-btn {
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: var(--white);
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            font-weight: 600;
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-bottom: 20px;
+        }
+
+        .control-action {
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(15, 23, 42, 0.55);
+            color: var(--white);
+            border-radius: 14px;
+            padding: 14px;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            text-align: left;
+        }
+
+        .control-action:hover {
+            transform: translateY(-2px);
+            border-color: rgba(16, 185, 129, 0.45);
+        }
+
+        .control-action h4 {
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .control-action p {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            line-height: 1.35;
+        }
+
+        .jobs-list {
+            display: grid;
+            gap: 12px;
+        }
+
+        .job-card {
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.55);
+            border-radius: 14px;
+            padding: 14px;
+        }
+
+        .job-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+
+        .job-meta {
+            color: #94a3b8;
+            font-size: 0.82rem;
+        }
+
+        .job-progress-wrap {
+            margin: 10px 0 8px;
+        }
+
+        .job-progress-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.78rem;
+            color: #cbd5e1;
+            margin-bottom: 6px;
+            gap: 8px;
+        }
+
+        .job-progress-track {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.18);
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .job-progress-fill {
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #10b981, #3b82f6);
+            transition: width 0.45s ease;
+            width: 0%;
+        }
+
+        .job-status {
+            border-radius: 999px;
+            font-size: 0.78rem;
+            padding: 5px 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .job-status.running, .job-status.starting {
+            background: rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .job-status.completed {
+            background: rgba(34, 197, 94, 0.2);
+            color: #86efac;
+            border: 1px solid rgba(34, 197, 94, 0.35);
+        }
+
+        .job-status.failed {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.35);
+        }
+
+        .job-status.stopped {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fcd34d;
+            border: 1px solid rgba(245, 158, 11, 0.35);
+        }
+
+        .job-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .stop-btn {
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            color: #fca5a5;
+            background: rgba(239, 68, 68, 0.12);
+            border-radius: 10px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .job-log {
+            margin-top: 10px;
+            max-height: 160px;
+            overflow: auto;
+            background: rgba(2, 6, 23, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.78rem;
+            color: #cbd5e1;
+            white-space: pre-wrap;
+            line-height: 1.35;
+        }
+
+        .jobs-empty {
+            color: #94a3b8;
+            border: 1px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            padding: 14px;
+            text-align: center;
+            font-size: 0.9rem;
+        }
     </style>
 </head>
 <body>
@@ -652,7 +891,7 @@
                             <div class="confidence-fill" id="confidenceFill" style="width: 0%"></div>
                         </div>
                         <div class="confidence-text">
-                            <span>Confidence</span>
+                            <span id="confidenceLabel">Confidence</span>
                             <span id="confidenceValue">94.5%</span>
                         </div>
                     </div>
@@ -740,6 +979,42 @@
                 <p>Your images are processed securely and not stored</p>
             </div>
         </section>
+
+        <section class="control-panel" id="controlPanel">
+            <div class="control-header">
+                <div class="control-title">
+                    <h3><i class="fas fa-sliders-h"></i> Workflow Control Panel</h3>
+                    <p>Run training, fine-tuning, evaluation, and figure generation directly from the UI.</p>
+                </div>
+                <div class="compute-indicator {% if compute_info.backend == 'GPU' %}gpu{% else %}cpu{% endif %}" id="computeIndicator" title="Runtime backend for TensorFlow jobs">
+                    <i class="fas fa-microchip"></i>
+                    <span id="computeIndicatorText">
+                        {% if compute_info.backend == 'GPU' %}
+                        GPU Active{% if compute_info.gpu_count %} ({{ compute_info.gpu_count }}){% endif %}
+                        {% else %}
+                        CPU Only
+                        {% endif %}
+                    </span>
+                </div>
+                <button class="refresh-btn" onclick="refreshControlPanel()">
+                    <i class="fas fa-sync-alt"></i>
+                    Refresh Status
+                </button>
+            </div>
+
+            <div class="control-grid">
+                {% for action_key, meta in control_actions.items() %}
+                <button class="control-action" onclick="runControlAction('{{ action_key }}')">
+                    <h4>{{ meta.label }}</h4>
+                    <p>{{ meta.description }}</p>
+                </button>
+                {% endfor %}
+            </div>
+
+            <div id="jobsList" class="jobs-list">
+                <div class="jobs-empty">No workflow jobs yet.</div>
+            </div>
+        </section>
     </div>
 
     <!-- Footer -->
@@ -753,6 +1028,7 @@
 
     <script>
         let selectedFile = null;
+        let jobsPollHandle = null;
 
         // Drag and Drop
         const dropZone = document.getElementById('dropZone');
@@ -866,16 +1142,24 @@
             // Update status badge
             const statusBadge = document.getElementById('statusBadge');
             const statusText = document.getElementById('statusText');
-            if (result.is_healthy) {
+            const confidenceLabel = document.getElementById('confidenceLabel');
+            if (result.is_valid_leaf === false) {
+                statusBadge.className = 'status-badge invalid';
+                statusText.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Unsupported Image';
+                confidenceLabel.textContent = 'Model best guess confidence';
+            } else if (result.is_healthy) {
                 statusBadge.className = 'status-badge healthy';
                 statusText.innerHTML = '<i class="fas fa-check-circle"></i> Healthy';
+                confidenceLabel.textContent = 'Prediction confidence';
             } else {
                 statusBadge.className = 'status-badge diseased';
                 statusText.innerHTML = '<i class="fas fa-virus"></i> Disease Detected';
+                confidenceLabel.textContent = 'Prediction confidence';
             }
 
             // Update text content
-            document.getElementById('plantName').textContent = result.plant + ' Plant';
+            document.getElementById('plantName').textContent =
+                result.is_valid_leaf === false ? 'Leaf Validation' : (result.plant + ' Plant');
             document.getElementById('diseaseName').textContent = result.disease;
             document.getElementById('confidenceValue').textContent = result.confidence + '%';
             
@@ -902,6 +1186,150 @@
             document.getElementById('analyzeBtn').disabled = false;
             document.getElementById('confidenceFill').style.width = '0%';
         }
+
+        async function runControlAction(actionKey) {
+            try {
+                const response = await fetch(`/control/run/${actionKey}`, {
+                    method: 'POST'
+                });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Could not start action');
+                }
+                await loadJobs();
+            } catch (error) {
+                alert('Control panel error: ' + error.message);
+            }
+        }
+
+        async function stopJob(jobId) {
+            try {
+                const response = await fetch(`/control/stop/${jobId}`, {
+                    method: 'POST'
+                });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Could not stop job');
+                }
+                await loadJobs();
+            } catch (error) {
+                alert('Stop error: ' + error.message);
+            }
+        }
+
+        function formatRuntime(seconds) {
+            if (seconds == null) return 'n/a';
+            if (seconds < 60) return `${seconds.toFixed(1)}s`;
+            const mins = Math.floor(seconds / 60);
+            const sec = Math.round(seconds % 60);
+            return `${mins}m ${sec}s`;
+        }
+
+        function formatEta(seconds) {
+            if (seconds == null || Number.isNaN(Number(seconds))) return 'calculating...';
+            const whole = Math.max(0, Math.round(Number(seconds)));
+            if (whole < 60) return `${whole}s`;
+            const mins = Math.floor(whole / 60);
+            const sec = whole % 60;
+            if (mins < 60) return `${mins}m ${sec}s`;
+            const hours = Math.floor(mins / 60);
+            const remMins = mins % 60;
+            return `${hours}h ${remMins}m`;
+        }
+
+        function renderJobs(jobs) {
+            const container = document.getElementById('jobsList');
+            if (!jobs.length) {
+                container.innerHTML = '<div class="jobs-empty">No workflow jobs yet.</div>';
+                return;
+            }
+
+            container.innerHTML = jobs.map((job) => {
+                const latestLogs = (job.logs || []).slice(-10).join('\n');
+                const canStop = job.status === 'running' || job.status === 'starting';
+                const progress = Math.max(0, Math.min(100, Number(job.progress_pct || 0)));
+                const eta = (job.status === 'completed' || job.status === 'failed' || job.status === 'stopped')
+                    ? 'n/a'
+                    : formatEta(job.eta_seconds);
+                const stage = (job.progress_stage || 'pending').replace(/_/g, ' ');
+                return `
+                    <div class="job-card">
+                        <div class="job-top">
+                            <div>
+                                <strong>${job.label}</strong>
+                                <div class="job-meta">${job.script} • Runtime: ${formatRuntime(job.runtime_seconds)} • Exit: ${job.return_code ?? 'n/a'}</div>
+                            </div>
+                            <span class="job-status ${job.status}">${job.status}</span>
+                        </div>
+                        <div class="job-progress-wrap">
+                            <div class="job-progress-head">
+                                <span>Progress: ${progress.toFixed(1)}% • Stage: ${stage}</span>
+                                <span>Total ETA: ${eta}</span>
+                            </div>
+                            <div class="job-progress-track">
+                                <div class="job-progress-fill" style="width: ${progress}%"></div>
+                            </div>
+                        </div>
+                        <div class="job-log">${latestLogs || 'No logs yet.'}</div>
+                        ${canStop ? `<div class="job-actions"><button class="stop-btn" onclick="stopJob('${job.id}')"><i class='fas fa-stop-circle'></i> Stop</button></div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function loadJobs() {
+            try {
+                const response = await fetch('/control/jobs');
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Could not load jobs');
+                }
+                renderJobs(payload.jobs || []);
+            } catch (error) {
+                document.getElementById('jobsList').innerHTML = `<div class="jobs-empty">${error.message}</div>`;
+            }
+        }
+
+        function updateComputeIndicator(compute) {
+            const badge = document.getElementById('computeIndicator');
+            const textNode = document.getElementById('computeIndicatorText');
+            if (!badge || !textNode || !compute) return;
+
+            badge.classList.remove('gpu', 'cpu');
+            const backend = (compute.backend || 'CPU').toUpperCase();
+            if (backend === 'GPU') {
+                badge.classList.add('gpu');
+                const gpuCount = Number(compute.gpu_count || 0);
+                textNode.textContent = `GPU Active${gpuCount > 0 ? ` (${gpuCount})` : ''}`;
+            } else {
+                badge.classList.add('cpu');
+                textNode.textContent = 'CPU Only';
+            }
+        }
+
+        async function loadComputeInfo() {
+            try {
+                const response = await fetch('/control/system');
+                const payload = await response.json();
+                if (response.ok && payload.compute) {
+                    updateComputeIndicator(payload.compute);
+                }
+            } catch (error) {
+                // Keep last known state on transient failures.
+            }
+        }
+
+        function refreshControlPanel() {
+            loadJobs();
+            loadComputeInfo();
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshControlPanel();
+            jobsPollHandle = setInterval(() => {
+                refreshControlPanel();
+            }, 5000);
+        });
     </script>
 </body>
 </html>
