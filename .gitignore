@@ -13,3 +13,8 @@ uploads/*
 *.log
 *.tmp
 *.deb
+
+*.keras
+# Model artifacts
+*.keras
+models/*.keras
