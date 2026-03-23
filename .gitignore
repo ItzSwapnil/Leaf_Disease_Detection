@@ -18,3 +18,7 @@ uploads/*
 # Model artifacts
 *.keras
 models/*.keras
+
+# Model artifacts
+*.keras
+models/*.keras
