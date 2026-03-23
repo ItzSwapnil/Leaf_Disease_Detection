@@ -1,6 +1,6 @@
 # Evaluation Report
 
-- Generated: 2026-03-22T11:11:20
+- Generated: 2026-03-23T14:27:19
 - Model: /mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/models/leaf_disease_checkpoint.keras
 - Validation samples: 19419
 - Classes: 46

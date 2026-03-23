@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-03-22T11:11:20",
+  "generated_at": "2026-03-23T14:27:19",
   "model_path": "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/models/leaf_disease_checkpoint.keras",
   "validation_samples": 19419,
   "num_classes": 46,
   "metrics": {
-    "loss": 0.7143275141716003,
+    "loss": 0.7143290638923645,
     "accuracy": 0.9946444034576416,
     "macro_precision": 0.991205018745292,
     "macro_recall": 0.9893569925170373,

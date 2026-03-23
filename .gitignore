@@ -24,7 +24,7 @@ venv/
 dataset/
 
 # ── Model artefacts ───────────────────────────────────────────
-models/*.keras
+
 models/*.h5
 models/logs/
 
