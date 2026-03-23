@@ -10,16 +10,15 @@ flowchart LR
     classDef core fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
     classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d
 
-    USER[Farmer / Agricultural Specialist]
-    DB[Image and Training Database]
-    SYS((Leaf Disease Detection System))
-    REP[Disease Report Output]
-    MOD[(Model Storage)]
-azA 
-    USER -->|Leaf image| SYS
-    DB -->|Training data| SYS
-    SYS -->|Disease diagnosis + confidence| REP
-    SYS -->|Model updates + metrics| MOD
+    USER["Farmer / Agricultural Specialist"]
+    DB["Image and Training Database"]
+    SYS(("Leaf Disease Detection System"))
+    REP["Disease Report Output"]
+    MOD[("Model Storage")]
+    USER -->|"Leaf image"| SYS
+    DB -->|"Training data"| SYS
+    SYS -->|"Disease diagnosis + confidence"| REP
+    SYS -->|"Model updates + metrics"| MOD
 
     class USER,DB,REP ext
     class SYS core

@@ -1,27 +1,30 @@
 [project]
 name = "leaf-disease-detection"
-version = "0.1.0"
-description = "Plant leaf disease detection using deep learning with EfficientNetV2"
+version = "2.1.0"
+description = "Plant leaf disease detection using EfficientNetV2-S transfer learning with SOTA augmentation and training strategies"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
 	"tensorflow[and-cuda]>=2.21.0,<2.22",
-	"keras>=3.12.0,<3.13",
-	"numpy>=2.2.0,<3",
+	"tensorflow-hub>=0.16.1,<0.17",
+	"keras>=3.13.0,<3.15",
+	"keras-cv>=0.9.0,<0.10",
+	"numpy>=2.2.0,<2.4",
 	"Pillow>=11.0.0,<12",
 	"matplotlib>=3.10.0,<4",
 	"seaborn>=0.13.2,<1",
 	"scikit-learn>=1.6.0,<2",
 	"flask>=3.1.0,<4",
+	"tensorboard>=2.20.0",
 ]
 
 [project.scripts]
 leaf-disease = "main:main"
-leaf-disease-train = "train_model:main"
-leaf-disease-fine-tune = "fine_tune_model:main"
-leaf-disease-evaluate = "evaluate_model:main"
-leaf-disease-predict = "predict_cli:main"
-leaf-disease-figures = "generate_figures:main"
+leaf-disease-train = "model_training:main"
+leaf-disease-fine-tune = "model_fine_tuning:main"
+leaf-disease-evaluate = "model_evaluation:main"
+leaf-disease-predict = "predict:main"
+leaf-disease-figures = "visualization_pipeline:main"
 
 [tool.uv]
 link-mode = "copy"

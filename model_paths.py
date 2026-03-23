@@ -1,13 +1,12 @@
-"""Shared model-path resolution for .keras artifacts."""
+from __future__ import annotations
 
 import os
 from typing import Iterable, List, Optional
 
-from config import FINAL_MODEL_PATH, CHECKPOINT_PATH, MODELS_DIR
-
+from config import CHECKPOINT_PATH, FINAL_MODEL_PATH, MODELS_DIR
 
 def resolve_keras_model_path(preferred_paths: Optional[Iterable[str]] = None) -> str:
-    """Resolve the best available .keras model path with stable fallback order."""
+    
     candidates: List[str] = []
     if preferred_paths:
         for path in preferred_paths:
@@ -25,7 +24,7 @@ def resolve_keras_model_path(preferred_paths: Optional[Iterable[str]] = None) ->
     discovered: List[str] = []
     if os.path.isdir(MODELS_DIR):
         for name in sorted(os.listdir(MODELS_DIR)):
-            if name.endswith('.keras'):
+            if name.endswith(".keras"):
                 discovered.append(os.path.join(MODELS_DIR, name))
 
     if discovered:

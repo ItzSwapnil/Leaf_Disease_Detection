@@ -662,6 +662,23 @@
             margin-bottom: 20px;
         }
 
+        .archive-toggle {
+            margin-bottom: 16px;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            color: #cbd5e1;
+            font-size: 0.86rem;
+            background: rgba(15, 23, 42, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            padding: 10px 12px;
+        }
+
+        .archive-toggle input {
+            accent-color: #10b981;
+        }
+
         .control-action {
             border: 1px solid rgba(255, 255, 255, 0.12);
             background: rgba(15, 23, 42, 0.55);
@@ -818,6 +835,34 @@
             text-align: center;
             font-size: 0.9rem;
         }
+
+        .model-selector {
+            margin-top: 14px;
+            display: grid;
+            gap: 6px;
+            max-width: 420px;
+        }
+
+        .model-selector label {
+            font-size: 0.85rem;
+            color: #cbd5e1;
+            font-weight: 600;
+        }
+
+        .model-select {
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(15, 23, 42, 0.78);
+            color: #e2e8f0;
+            padding: 9px 12px;
+            font-size: 0.9rem;
+            outline: none;
+        }
+
+        .model-selector small {
+            color: #94a3b8;
+            font-size: 0.78rem;
+        }
     </style>
 </head>
 <body>
@@ -851,6 +896,16 @@
                     Browse Files
                 </button>
                 <input type="file" id="fileInput" accept="image/*">
+            </div>
+
+            <div class="model-selector">
+                <label for="modelSelect">Inference model</label>
+                <select id="modelSelect" class="model-select">
+                    {% for model_name in available_models %}
+                    <option value="{{ model_name }}" {% if active_model_name == model_name %}selected{% endif %}>{{ model_name }}</option>
+                    {% endfor %}
+                </select>
+                <small>Choose which trained model file to use for this prediction request.</small>
             </div>
 
             <!-- Preview -->
@@ -1011,6 +1066,11 @@
                 {% endfor %}
             </div>
 
+            <label class="archive-toggle" title="When enabled, each run also writes timestamped archive logs and manifests.">
+                <input type="checkbox" id="archiveLogsToggle">
+                <span>Archive this run (default is latest logs only)</span>
+            </label>
+
             <div id="jobsList" class="jobs-list">
                 <div class="jobs-empty">No workflow jobs yet.</div>
             </div>
@@ -1108,6 +1168,10 @@
             // Create form data
             const formData = new FormData();
             formData.append('file', selectedFile);
+            const modelSelect = document.getElementById('modelSelect');
+            if (modelSelect && modelSelect.value) {
+                formData.append('model_name', modelSelect.value);
+            }
 
             try {
                 const response = await fetch('/predict', {
@@ -1189,8 +1253,14 @@
 
         async function runControlAction(actionKey) {
             try {
+                const archiveToggle = document.getElementById('archiveLogsToggle');
+                const archiveLogs = !!(archiveToggle && archiveToggle.checked);
                 const response = await fetch(`/control/run/${actionKey}`, {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ archive_logs: archiveLogs })
                 });
                 const payload = await response.json();
                 if (!response.ok) {
@@ -1237,15 +1307,52 @@
             return `${hours}h ${remMins}m`;
         }
 
+        function captureLogScrollState() {
+            const state = {};
+            document.querySelectorAll('.job-card').forEach((card) => {
+                const jobId = card.getAttribute('data-job-id');
+                const logEl = card.querySelector('.job-log');
+                if (!jobId || !logEl) return;
+
+                const maxScrollTop = Math.max(0, logEl.scrollHeight - logEl.clientHeight);
+                const distanceFromBottom = maxScrollTop - logEl.scrollTop;
+
+                state[jobId] = {
+                    scrollTop: logEl.scrollTop,
+                    followTail: distanceFromBottom <= 24,
+                };
+            });
+            return state;
+        }
+
+        function restoreLogScrollState(container, state) {
+            requestAnimationFrame(() => {
+                container.querySelectorAll('.job-card').forEach((card) => {
+                    const jobId = card.getAttribute('data-job-id');
+                    const logEl = card.querySelector('.job-log');
+                    if (!jobId || !logEl) return;
+
+                    const prev = state[jobId];
+                    const maxScrollTop = Math.max(0, logEl.scrollHeight - logEl.clientHeight);
+                    if (!prev || prev.followTail) {
+                        logEl.scrollTop = maxScrollTop;
+                    } else {
+                        logEl.scrollTop = Math.min(prev.scrollTop, maxScrollTop);
+                    }
+                });
+            });
+        }
+
         function renderJobs(jobs) {
             const container = document.getElementById('jobsList');
+            const scrollState = captureLogScrollState();
             if (!jobs.length) {
                 container.innerHTML = '<div class="jobs-empty">No workflow jobs yet.</div>';
                 return;
             }
 
             container.innerHTML = jobs.map((job) => {
-                const latestLogs = (job.logs || []).slice(-10).join('\n');
+                const latestLogs = (job.logs || []).join('\n');
                 const canStop = job.status === 'running' || job.status === 'starting';
                 const progress = Math.max(0, Math.min(100, Number(job.progress_pct || 0)));
                 const eta = (job.status === 'completed' || job.status === 'failed' || job.status === 'stopped')
@@ -1253,11 +1360,11 @@
                     : formatEta(job.eta_seconds);
                 const stage = (job.progress_stage || 'pending').replace(/_/g, ' ');
                 return `
-                    <div class="job-card">
+                    <div class="job-card" data-job-id="${job.id}">
                         <div class="job-top">
                             <div>
                                 <strong>${job.label}</strong>
-                                <div class="job-meta">${job.script} • Runtime: ${formatRuntime(job.runtime_seconds)} • Exit: ${job.return_code ?? 'n/a'}</div>
+                                <div class="job-meta">${job.script} • Logs: ${job.archive_logs ? 'archive+latest' : 'latest-only'} • Runtime: ${formatRuntime(job.runtime_seconds)} • Exit: ${job.return_code ?? 'n/a'}</div>
                             </div>
                             <span class="job-status ${job.status}">${job.status}</span>
                         </div>
@@ -1275,6 +1382,8 @@
                     </div>
                 `;
             }).join('');
+
+            restoreLogScrollState(container, scrollState);
         }
 
         async function loadJobs() {
@@ -1328,7 +1437,7 @@
             refreshControlPanel();
             jobsPollHandle = setInterval(() => {
                 refreshControlPanel();
-            }, 5000);
+            }, 1000);
         });
     </script>
 </body>

@@ -1,9 +1,10 @@
 # Leaf Disease Detection System
 
-Deep learning-based plant leaf disease classification with EfficientNetV2B0, supporting web inference, CLI inference, and reproducible train/fine-tune/evaluate pipelines.
+Deep learning-based plant leaf disease classification using EfficientNetV2 transfer learning with SOTA augmentation strategies. Supports web inference, CLI inference, and reproducible train/fine-tune/evaluate pipelines.
 
 ![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)
 ![TensorFlow](https://img.shields.io/badge/TensorFlow-2.21%2B%20CUDA-orange.svg)
+![Keras](https://img.shields.io/badge/Keras-3.13%2B-red.svg)
 ![Classes](https://img.shields.io/badge/Classes-46-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
@@ -21,7 +22,6 @@ Deep learning-based plant leaf disease classification with EfficientNetV2B0, sup
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
 - [License](#license)
 - [Acknowledgments](#acknowledgments)
 - [Contact](#contact)
@@ -30,33 +30,34 @@ Deep learning-based plant leaf disease classification with EfficientNetV2B0, sup
 
 This project provides an end-to-end workflow for plant disease detection:
 
-1. Train and fine-tune an EfficientNetV2B0-based classifier on 46 classes.
-2. Evaluate with top-1, top-3, and macro metrics.
-3. Serve predictions through a Flask web app and CLI.
-4. Generate report-ready visualizations.
+1. Train and fine-tune an EfficientNetV2-S classifier on 46 disease classes.
+2. Evaluate with strict top-1 accuracy and macro-averaged metrics.
+3. Serve predictions through a Flask web app or CLI.
+4. Generate publication-ready visualisations.
 
 ```mermaid
 flowchart LR
-  A[Leaf Image] --> B[Preprocessing]
-  B --> C[EfficientNetV2B0 Inference]
-  C --> D[Class + Confidence]
-  D --> E[Actionable Disease Guidance]
+  A["Leaf Image"] --> B["Preprocessing"]
+  B --> C["EfficientNetV2-S Inference"]
+  C --> D["Class + Confidence"]
+  D --> E["Actionable Disease Guidance"]
 ```
 
 ## Highlights
 
-- Unified model fallback resolver across app, prediction, evaluation, and visualization.
-- Web control panel can trigger training/fine-tuning/evaluation/figure generation jobs.
-- Live progress emission with machine-readable progress events.
-- CPU and GPU compatible runtime with TensorFlow device detection and strategy selection.
-- Multiple interfaces: Flask app, CLI, and Python API.
+- **SOTA Training Pipeline**: Two-phase transfer learning with cosine annealing, MixUp, CutMix, label smoothing, and AdamW with EMA.
+- **Mixed Precision**: Automatic `mixed_float16` on NVIDIA GPUs for 2x memory efficiency.
+- **Multiple Interfaces**: Flask web app, CLI, and Python API.
+- **Live Progress Monitoring**: Machine-readable JSON progress events for the web control panel.
+- **Unified Model Resolver**: Deterministic fallback order across all scripts.
+- **Publication-Ready Figures**: Confusion matrix, learning curves, class distribution, and sample predictions.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.13+
-- Optional but recommended: NVIDIA GPU + CUDA runtime compatible with TensorFlow
+- NVIDIA GPU + CUDA runtime compatible with TensorFlow (recommended)
 - RAM: 8 GB minimum, 16 GB recommended for training
 
 ### Setup (Linux / WSL)
@@ -67,7 +68,7 @@ cd Leaf_Disease_Detection
 uv venv --python 3.13
 source .venv/bin/activate
 uv sync
-python -c "import tensorflow as tf; print(tf.__version__)"
+uv run python -c "import tensorflow as tf; print(tf.__version__)"
 ```
 
 ### Setup (Windows PowerShell)
@@ -78,7 +79,7 @@ cd Leaf_Disease_Detection
 uv venv --python 3.13
 ./.venv/Scripts/Activate.ps1
 uv sync
-python -c "import tensorflow as tf; print(tf.__version__)"
+uv run python -c "import tensorflow as tf; print(tf.__version__)"
 ```
 
 ## Usage
@@ -86,42 +87,45 @@ python -c "import tensorflow as tf; print(tf.__version__)"
 ### A) Web App (Recommended)
 
 ```bash
-python app.py
+uv run python app.py
 ```
 
-Open http://127.0.0.1:5000
+Open <http://127.0.0.1:5000>
 
-Features in the web UI:
+Features:
 
 - Leaf image upload and prediction
 - Disease details (description, symptoms, treatment, prevention)
-- Workflow control actions: Train, Fine Tune, Evaluate, Generate Figures
-- Job status and logs
+- Workflow control panel: Train, Fine-Tune, Evaluate, Generate Figures
+- Job status and live progress logs
 
-### B) Command Runner (Single Entry)
+### B) Command Runner
 
 ```bash
-python main.py serve
-python main.py train
-python main.py fine_tune
-python main.py evaluate
-python main.py visualize
+uv run python main.py serve
+uv run python main.py train
+uv run python main.py fine_tune
+uv run python main.py evaluate
+uv run python main.py visualize
+
+# Keep timestamped archive logs for a run
+uv run python main.py train --archive-logs
 ```
 
 ### C) Dedicated Scripts
 
 ```bash
-python train_model.py
-python fine_tune_model.py
-python evaluate_model.py
-python generate_figures.py
+uv run python model_training.py
+uv run python model_fine_tuning.py (optional)
+uv run python model_evaluation.py
+uv run python visualization_pipeline.py
 ```
 
 ### D) CLI Prediction
 
 ```bash
-python predict_cli.py --image dataset/test/<Class>/<image>.jpg --top_k 3
-python predict_cli.py --image path/to/folder
+uv run python predict.py --image path/to/leaf.jpg
+uv run python predict.py --image path/to/folder
 ```
 
 ### E) Python API
@@ -130,7 +134,7 @@ python predict_cli.py --image path/to/folder
 from predict import LeafDiseasePredictor
 
 predictor = LeafDiseasePredictor()
-result = predictor.predict("path/to/leaf_image.jpg", top_k=3)
+result = predictor.predict("path/to/leaf_image.jpg")
 print(result["disease"], result["confidence"])
 ```
 
@@ -140,7 +144,7 @@ print(result["disease"], result["confidence"])
 | --- | --- | --- |
 | `/` | GET | Main UI |
 | `/predict` | POST | Image upload + prediction |
-| `/health` | GET | App/model health |
+| `/health` | GET | App/model health check |
 | `/control/actions` | GET | List workflow actions |
 | `/control/run/<action_key>` | POST | Start workflow job |
 | `/control/jobs` | GET | List job history/status |
@@ -153,23 +157,33 @@ print(result["disease"], result["confidence"])
 
 ```text
 Input (224x224x3)
-  -> EfficientNetV2B0 (ImageNet pretrained, include_top=False)
+  -> EfficientNetV2-S (ImageNet pretrained, include_top=False)
   -> GlobalAveragePooling2D
   -> BatchNormalization
-  -> Dense(1024, relu)
-  -> Dropout(0.4)
-  -> Dense(46, softmax)
+  -> Dense(512, Swish) + Dropout(0.4)
+  -> Dense(256, Swish) + Dropout(0.2)
+  -> Dense(46, Softmax)
 ```
 
 ### Training Strategy
 
-1. Phase 1: train classification head with frozen backbone.
-2. Phase 2: unfreeze top layers and continue fine-tuning.
-3. Optional extended fine-tuning via `fine_tune_model.py`.
+1. **Phase 1**: Train classification head with frozen backbone (5 epochs).
+2. **Phase 2**: Unfreeze backbone and fine-tune with cosine LR schedule (10 epochs).
+3. **Optional**: Extended fine-tuning via `fine_tune_model.py`.
 
-### Model Artifact Resolution Order
+### SOTA Techniques
 
-Shared resolver order used by app and scripts:
+| Technique | Reference |
+| --- | --- |
+| EfficientNetV2-S backbone | Tan & Le, ICML 2021 |
+| MixUp augmentation | Zhang et al., ICLR 2018 |
+| CutMix augmentation | Yun et al., ICCV 2019 |
+| Label smoothing (0.1) | Szegedy et al., CVPR 2016 |
+| AdamW + EMA | Loshchilov & Hutter, ICLR 2019 |
+| Cosine annealing with warmup | Loshchilov & Hutter, ICLR 2017 |
+| Mixed precision (float16) | Micikevicius et al., ICLR 2018 |
+
+### Model Artefact Resolution Order
 
 1. `models/leaf_disease_classifier.keras`
 2. `models/leaf_disease_checkpoint.keras`
@@ -177,13 +191,13 @@ Shared resolver order used by app and scripts:
 
 ## Dataset
 
-Current local dataset stats (from this repository copy):
-
-- Classes: 46
-- Training images: 220,498
-- Validation images: 19,419
-- Test images: 19,218
-- Total images: 259,135
+| Split | Images |
+| --- | --- |
+| Training | 220,498 |
+| Validation | 19,419 |
+| Test | 19,218 |
+| **Total** | **259,135** |
+| Classes | 46 |
 
 ```text
 dataset/
@@ -192,16 +206,15 @@ dataset/
 └── test/     # 46 class folders
 ```
 
-Supported crop groups include Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, Cherry, Peach, Strawberry, Orange, Wheat, Squash, Blueberry, Raspberry, and Soybean categories.
+Supported crops: Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, Cherry, Peach, Strawberry, Orange, Wheat, Squash, Blueberry, Raspberry, and Soybean.
 
 ## Results
 
 | Metric | Value |
 | --- | --- |
-| Validation Accuracy (recent run) | 97.40% |
-| Validation Top-3 Accuracy (recent run) | 99.73% |
-| Macro F1 (recent run) | 0.9657 |
-| Number of Classes | 46 |
+| Validation Accuracy | 97.40% |
+| Macro F1-Score | 0.9657 |
+| Classes | 46 |
 
 ### Visual Outputs
 
@@ -214,35 +227,26 @@ Supported crop groups include Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, 
 
 ```text
 Leaf_Disease_Detection/
-├── app.py
-├── main.py
-├── config.py
-├── model_training.py
-├── model_fine_tuning.py
-├── model_evaluation.py
-├── predict.py
-├── visualization_pipeline.py
-├── train_model.py
-├── fine_tune_model.py
-├── evaluate_model.py
-├── generate_figures.py
-├── model_paths.py
-├── hardware.py
-├── training_progress.py
-├── dataset/
-├── docs/
-│   ├── architecture.md
-│   ├── DFD_Level0.md
-│   ├── DFD_Level1.md
-│   ├── run.md
-│   └── reports/
-│       ├── report.md
-│       ├── report.html
-│       └── training-result.md
-├── models/
-├── plots/
-├── templates/
-└── tests/
+├── app.py                      # Flask web application
+├── main.py                     # Unified task runner
+├── config.py                   # Central configuration
+├── model_training.py           # EfficientNetV2 training pipeline
+├── model_fine_tuning.py        # Fine-tuning pipeline
+├── model_evaluation.py         # Evaluation and reporting
+├── predict.py                  # Inference API and CLI
+├── visualization_pipeline.py   # Figure generation
+├── training_utils.py           # Shared training components
+├── training_progress.py        # Progress emission callbacks
+├── learning_curve_utils.py     # Metric timeline helpers
+├── preprocessing.py            # Input preprocessing
+├── model_paths.py              # Model path resolution
+├── hardware.py                 # GPU/CPU configuration
+├── dataset/                    # Train/val/test image data
+├── models/                     # Saved model artefacts
+├── plots/                      # Generated figures
+├── templates/                  # Flask HTML templates
+├── tests/                      # Unit tests
+└── docs/                       # Architecture and run documentation
 ```
 
 ## Documentation
@@ -251,26 +255,30 @@ Leaf_Disease_Detection/
 - System architecture: [docs/architecture.md](docs/architecture.md)
 - DFD context view: [docs/DFD_Level0.md](docs/DFD_Level0.md)
 - DFD detailed view: [docs/DFD_Level1.md](docs/DFD_Level1.md)
-- Reports: [docs/reports/report.md](docs/reports/report.md), [docs/reports/training-result.md](docs/reports/training-result.md)
 
 ## Configuration
 
-Key settings are in `config.py`:
+Key settings in `config.py`:
 
 ```python
-IMG_SIZE = 224
-BATCH_SIZE = 16
-NUM_CLASSES = 46
-EPOCHS_PHASE1 = 10
-EPOCHS_PHASE2 = 15
-LEARNING_RATE_PHASE1 = 0.002
-LEARNING_RATE_PHASE2 = 0.0001
-UNFREEZE_LAYERS = 50
+IMG_SIZE = 224                   # EfficientNetV2-S native resolution
+BATCH_SIZE = 64                  # Fits 8 GB VRAM at fp16
+BASE_MODEL = "EfficientNetV2S"   # ImageNet-pretrained backbone
+EPOCHS_PHASE1 = 5                # Head-only warm-up
+EPOCHS_PHASE2 = 10               # Full fine-tuning
+USE_MIXUP = True                 # MixUp regularisation
+USE_CUTMIX = True                # CutMix regularisation
+USE_OPTIMIZER_EMA = True         # Exponential Moving Average
+USE_FOCAL_LOSS = False           # CrossEntropy preferred
+LABEL_SMOOTHING = 0.1
 ```
 
-## Testing
+Runtime overrides:
 
-Run tests with:
+- `LEAF_SAVE_LOG_ARCHIVE=1` — enable timestamped archive logs
+- `LEAF_SAVE_RUN_MANIFESTS=1` — enable per-run manifest JSON files
+
+## Testing
 
 ```bash
 pytest
@@ -278,18 +286,10 @@ pytest
 
 ## Troubleshooting
 
-- Model not found: ensure at least one `.keras` model exists in `models/`.
-- GPU not detected: verify TensorFlow/CUDA compatibility and driver installation.
-- Upload errors: `/predict` accepts `.jpg`, `.jpeg`, `.png`, `.webp` and max upload size is 16 MB.
-- Slow first run on GPU: initial kernel compilation/warm-up can take longer.
-
-## Contributing
-
-1. Fork the repository.
-2. Create a feature branch.
-3. Commit your changes.
-4. Push the branch.
-5. Open a pull request.
+- **Model not found**: Ensure at least one `.keras` model exists in `models/`.
+- **GPU not detected**: Verify TensorFlow/CUDA compatibility. Note: AMD integrated GPUs (e.g., Radeon 860M) are not supported by TensorFlow — only NVIDIA GPUs with CUDA are usable.
+- **Upload errors**: `/predict` accepts `.jpg`, `.jpeg`, `.png`, `.webp` (max 16 MB).
+- **OOM during training**: Reduce `BATCH_SIZE` in `config.py` or enable gradient accumulation via `ACCUMULATION_STEPS`.
 
 ## License
 
@@ -298,8 +298,9 @@ Licensed under the MIT License. See [LICENSE](LICENSE).
 ## Acknowledgments
 
 - PlantVillage and related agricultural datasets
-- EfficientNetV2 research by Google
+- EfficientNetV2 (Tan & Le, 2021)
 - TensorFlow and Keras communities
 
 ## Contact
-Made by Swapnil: [@ItzSwapnil](https://github.com/ItzSwapnil)
+
+Made by Swapnil — [@ItzSwapnil](https://github.com/ItzSwapnil)

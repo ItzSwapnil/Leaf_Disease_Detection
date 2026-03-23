@@ -12,39 +12,39 @@ flowchart TB
     classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef out fill:#fef3c7,stroke:#d97706,color:#7c2d12
 
-    SRC[(Training Dataset)]
-    UIN[User Input Image]
+    SRC[("Training Dataset")]
+    UIN["User Input Image"]
 
-    subgraph P1[1.0 Data Preprocessing]
-        P11[1.1 Image Loading]
-        P12[1.2 Resize 224x224]
-        P13[1.3 Normalize / Preprocess]
-        P14[1.4 Data Augmentation]
+    subgraph P1 ["1.0 Data Preprocessing"]
+        P11["1.1 Image Loading"]
+        P12["1.2 Resize 224x224"]
+        P13["1.3 Normalize / Preprocess"]
+        P14["1.4 Data Augmentation"]
         P11 --> P12 --> P13 --> P14
     end
 
-    subgraph P2[2.0 Model Training]
-        T1[2.1 Feature Extraction]
-        T2[2.2 Fine-tuning]
-        T3[2.3 Precision Training]
-        T4[2.4 Model Export]
+    subgraph P2 ["2.0 Model Training"]
+        T1["2.1 Feature Extraction"]
+        T2["2.2 Fine-tuning"]
+        T3["2.3 Precision Training"]
+        T4["2.4 Model Export"]
         T1 --> T2 --> T3 --> T4
     end
 
-    subgraph P3[3.0 Model Storage]
-        D1[(Checkpoint Model)]
-        D2[(Final Model)]
-        D3[(Class Indices)]
+    subgraph P3 ["3.0 Model Storage"]
+        D1[("Checkpoint Model")]
+        D2[("Final Model")]
+        D3[("Class Indices")]
     end
 
-    subgraph P4[4.0 Inference Pipeline]
-        I1[4.1 Input Preprocessing]
-        I2[4.2 Model Prediction]
-        I3[4.3 Disease Diagnosis]
+    subgraph P4 ["4.0 Inference Pipeline"]
+        I1["4.1 Input Preprocessing"]
+        I2["4.2 Model Prediction"]
+        I3["4.3 Disease Diagnosis"]
         I1 --> I2 --> I3
     end
 
-    RES[Disease + Confidence]
+    RES["Disease + Confidence"]
 
     SRC --> P11
     P14 --> T1

@@ -1,6 +1,9 @@
-"""
-Leaf Disease Detection Web Application
-A modern Flask-based web interface for plant disease detection
+"""Flask web application for plant leaf disease detection and classification.
+
+Serves a web interface for uploading leaf images and receiving disease
+predictions with confidence scores, disease descriptions, treatment
+recommendations, and prevention guidelines. Also provides a control panel
+for triggering training, fine-tuning, evaluation, and figure generation jobs.
 """
 
 import os
@@ -8,6 +11,7 @@ import json
 import uuid
 import sys
 import time
+import glob
 import threading
 import subprocess
 import re
@@ -17,12 +21,13 @@ from werkzeug.utils import secure_filename
 import tensorflow as tf
 from keras.models import load_model
 from keras.preprocessing import image
-from keras.applications.efficientnet_v2 import preprocess_input
 import base64
 from PIL import Image
-from config import IMG_SIZE, FINAL_MODEL_PATH, CLASS_INDICES_PATH
+from config import IMG_SIZE, FINAL_MODEL_PATH, CLASS_INDICES_PATH, MODELS_DIR, BASE_MODEL
 from model_paths import resolve_keras_model_path
 from hardware import configure_tensorflow, get_compute_info
+from preprocessing import preprocess_array_for_model
+from training_utils import WarmupCosineSchedule
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -54,32 +59,40 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 model = None
 class_indices = None
 MODEL_LOAD_ERROR = None
+ACTIVE_MODEL_PATH = None
+MODEL_CACHE = {}
 
-JOB_LOG_LIMIT = 250
+# Keep complete per-job console history in memory for UI display.
+# Set to an integer to enable truncation if needed in low-memory environments.
+JOB_LOG_LIMIT = None
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+KERAS_BATCH_PROGRESS_RE = re.compile(r"^\d+/\d+\s+")
+
+TRAIN_SCRIPT = 'model_training.py'
+TRAIN_DESC = "Run baseline EfficientNet training pipeline."
 
 CONTROL_ACTIONS = {
     "train": {
         "label": "Train Model",
-        "script": "train_model.py",
-        "description": "Run base model training pipeline."
+        "script": TRAIN_SCRIPT,
+        "description": TRAIN_DESC,
     },
     "fine_tune": {
         "label": "Fine Tune Model",
-        "script": "fine_tune_model.py",
-        "description": "Continue training from a saved checkpoint."
+        "script": "model_fine_tuning.py",
+        "description": "continue training from a saved checkpoint"
     },
     "evaluate": {
         "label": "Evaluate Model",
-        "script": "evaluate_model.py",
-        "description": "Run validation and evaluation metrics."
+        "script": "model_evaluation.py",
+        "description": "run validation and eval metrics"
     },
     "generate_figures": {
         "label": "Generate Figures",
-        "script": "generate_figures.py",
-        "description": "Build plots and visual analysis artifacts."
+        "script": "visualization_pipeline.py",
+        "description": "build plots and analysis artifacts"
     }
 }
 
@@ -88,15 +101,73 @@ def _resolve_model_path():
     return resolve_keras_model_path([FINAL_MODEL_PATH])
 
 
+def _list_available_model_paths():
+    candidates = []
+    for path in glob.glob(os.path.join(MODELS_DIR, '*.keras')):
+        if os.path.isfile(path):
+            candidates.append(os.path.abspath(path))
+    return sorted(candidates)
+
+
+def _resolve_requested_model_path(model_name=None):
+    default_path = _resolve_model_path()
+    if not model_name:
+        return os.path.abspath(default_path)
+
+    model_name = str(model_name).strip()
+    if not model_name:
+        return os.path.abspath(default_path)
+
+    available_paths = _list_available_model_paths()
+    by_name = {os.path.basename(path): path for path in available_paths}
+    if model_name in by_name:
+        return by_name[model_name]
+
+    raise ValueError(
+        f"Unknown model '{model_name}'. Available: {', '.join(sorted(by_name.keys()))}"
+    )
+
+
+def _get_inference_model(model_name=None):
+    global model, ACTIVE_MODEL_PATH
+
+    target_path = _resolve_requested_model_path(model_name)
+    if target_path in MODEL_CACHE:
+        model = MODEL_CACHE[target_path]
+        ACTIVE_MODEL_PATH = target_path
+        return model, ACTIVE_MODEL_PATH
+
+    loaded = load_model(
+        target_path,
+        custom_objects={"WarmupCosineSchedule": WarmupCosineSchedule}
+    )
+    MODEL_CACHE[target_path] = loaded
+    model = loaded
+    ACTIVE_MODEL_PATH = target_path
+    return model, ACTIVE_MODEL_PATH
+
+
 def _is_allowed_upload(filename):
     ext = os.path.splitext(filename.lower())[1]
     return ext in ALLOWED_EXTENSIONS
 
 
-def _create_job(action_key):
+def _to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _create_job(action_key, archive_logs=False):
     action = CONTROL_ACTIONS[action_key]
     script = action["script"]
     command = [sys.executable, script]
+    env_overrides = {
+        'LEAF_SAVE_LOG_ARCHIVE': '1' if archive_logs else '0',
+        'LEAF_SAVE_RUN_MANIFESTS': '1' if archive_logs else '0',
+    }
     job_id = uuid.uuid4().hex
     now = time.time()
     job = {
@@ -106,6 +177,8 @@ def _create_job(action_key):
         "description": action["description"],
         "script": script,
         "command": " ".join(command),
+        "archive_logs": bool(archive_logs),
+        "env_overrides": env_overrides,
         "status": "starting",
         "start_time": now,
         "end_time": None,
@@ -137,13 +210,23 @@ def _append_job_log(job, line):
     if job["logs"] and job["logs"][-1] == cleaned:
         return
 
+    # Keras/TensorFlow batch progress emits carriage-return updates.
+    # Keep a single live-updating progress line instead of appending a new line for each step.
+    is_batch_progress = KERAS_BATCH_PROGRESS_RE.match(cleaned) is not None and "ms/step" in cleaned
+    if is_batch_progress and job["logs"]:
+        prev = job["logs"][-1]
+        prev_is_batch = KERAS_BATCH_PROGRESS_RE.match(prev) is not None and "ms/step" in prev
+        if prev_is_batch:
+            job["logs"][-1] = cleaned
+            return
+
     job["logs"].append(cleaned)
-    if len(job["logs"]) > JOB_LOG_LIMIT:
+    if isinstance(JOB_LOG_LIMIT, int) and JOB_LOG_LIMIT > 0 and len(job["logs"]) > JOB_LOG_LIMIT:
         job["logs"] = job["logs"][-JOB_LOG_LIMIT:]
 
 
 def _parse_progress_line(job, raw_line):
-    prefix = "COPILOT_PROGRESS "
+    prefix = "TRAINING_PROGRESS "
     line = (raw_line or "").strip()
     if not line.startswith(prefix):
         return False
@@ -164,10 +247,13 @@ def _parse_progress_line(job, raw_line):
 def _run_job(job):
     script_path = os.path.join(os.getcwd(), job["script"])
     command = [sys.executable, script_path]
+    child_env = dict(os.environ)
+    child_env.update(job.get("env_overrides") or {})
     try:
         process = subprocess.Popen(
             command,
             cwd=os.getcwd(),
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -219,6 +305,7 @@ def _job_response(job):
         "description": job["description"],
         "script": job["script"],
         "command": job["command"],
+        "archive_logs": bool(job.get("archive_logs", False)),
         "status": job["status"],
         "start_time": job["start_time"],
         "end_time": job["end_time"],
@@ -227,7 +314,7 @@ def _job_response(job):
         "progress_pct": round(float(job.get("progress_pct", 0.0)), 2),
         "eta_seconds": job.get("eta_seconds"),
         "progress_stage": job.get("progress_stage", "pending"),
-        "logs": job["logs"][-80:],
+        "logs": list(job["logs"]),
     }
 
 # Disease information database
@@ -605,37 +692,38 @@ DISEASE_INFO = {
 
 def load_model_and_classes():
     """Load the model and class indices"""
-    global model, class_indices, MODEL_LOAD_ERROR
+    global model, class_indices, MODEL_LOAD_ERROR, ACTIVE_MODEL_PATH
 
     model = None
     class_indices = None
     MODEL_LOAD_ERROR = None
+    ACTIVE_MODEL_PATH = None
 
-    print("🔄 Loading AI model...")
-    model_path = _resolve_model_path()
-    model = load_model(model_path)
-    print(f"✅ Loaded model file: {model_path}")
+    print("Loading model...")
+    model, model_path = _get_inference_model()
+    print(f"Loaded model file: {model_path}")
 
     with open(CLASS_INDICES_PATH, 'r') as f:
         class_indices = json.load(f)
 
     # Reverse the indices to get class names from predictions
     class_indices = {v: k for k, v in class_indices.items()}
-    print("✅ Model loaded successfully!")
+    print("Model loaded successfully.")
 
 
-def predict_disease(img_path):
+def predict_disease(img_path, inference_model=None):
     """Predict disease from image"""
-    if model is None or class_indices is None:
+    active_model = inference_model or model
+    if active_model is None or class_indices is None:
         raise RuntimeError("Model or class indices are not loaded.")
 
     img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
     img_array = image.img_to_array(img)
     img_array = np.expand_dims(img_array, axis=0)
-    img_array = preprocess_input(img_array)
+    img_array = preprocess_array_for_model(img_array)
     
     # Make prediction
-    predictions = model.predict(img_array, verbose=0)
+    predictions = active_model.predict(img_array, verbose=0)
     predicted_class_idx = np.argmax(predictions[0])
     confidence = float(predictions[0][predicted_class_idx]) * 100
 
@@ -774,10 +862,14 @@ def assess_leaf_likelihood(img_path):
 @app.route('/')
 def index():
     """Render the main page"""
+    available_model_names = [os.path.basename(path) for path in _list_available_model_paths()]
+    active_name = os.path.basename(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
     return render_template(
         'index.html',
         control_actions=CONTROL_ACTIONS,
         compute_info=get_compute_info(),
+        available_models=available_model_names,
+        active_model_name=active_name,
     )
 
 
@@ -801,6 +893,8 @@ def predict():
 
     if not _is_allowed_upload(filename_input):
         return jsonify({'error': 'Unsupported file type. Use JPG, PNG, or WEBP.'}), 400
+
+    selected_model_name = (request.form.get('model_name') or '').strip()
     
     if file:
         # Save file temporarily
@@ -811,8 +905,11 @@ def predict():
         file.save(filepath)
         
         try:
+            inference_model, active_model_path = _get_inference_model(selected_model_name)
+
             # Make prediction
-            result = predict_disease(filepath)
+            result = predict_disease(filepath, inference_model=inference_model)
+            result['model_name'] = os.path.basename(active_model_path)
             
             # Read image for preview
             with open(filepath, 'rb') as f:
@@ -822,6 +919,9 @@ def predict():
             
             return jsonify(result)
         
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
         except Exception as e:
             return jsonify({'error': str(e)}), 500
         
@@ -840,6 +940,8 @@ def health():
         'status': 'healthy',
         'model_loaded': model is not None and class_indices is not None,
         'model_error': MODEL_LOAD_ERROR,
+        'active_model': os.path.basename(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None,
+        'available_models': [os.path.basename(path) for path in _list_available_model_paths()],
     })
 
 
@@ -870,7 +972,12 @@ def control_run(action_key):
             if job["action"] == action_key and job["status"] in {"starting", "running"}:
                 return jsonify({"error": "This action is already running.", "job": _job_response(job)}), 409
 
-    job = _create_job(action_key)
+    payload = request.get_json(silent=True) or {}
+    archive_logs = _to_bool(payload.get('archive_logs'))
+    if not payload and request.form:
+        archive_logs = _to_bool(request.form.get('archive_logs'))
+
+    job = _create_job(action_key, archive_logs=archive_logs)
     thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
     thread.start()
 
@@ -921,10 +1028,10 @@ if __name__ == '__main__':
         load_model_and_classes()
     except Exception as exc:
         MODEL_LOAD_ERROR = str(exc)
-        print(f"⚠️ Model initialization skipped: {MODEL_LOAD_ERROR}")
-        print("ℹ️ The web app will still start, but prediction requests will return 503 until a model is available.")
-    print("\n🌿 Leaf Disease Detection Web App")
+        print(f"Model initialization skipped: {MODEL_LOAD_ERROR}")
+        print("The web app will still start, but prediction requests will return 503 until a model is available.")
+    print("\nLeaf Disease Detection Web App")
     print("=" * 40)
-    print("🌐 Open http://localhost:5000 in your browser")
+    print("Open http://localhost:5000 in your browser")
     print("=" * 40)
     app.run(host='0.0.0.0', port=5000, debug=False)
