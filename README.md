@@ -116,7 +116,7 @@ uv run python main.py train --archive-logs
 
 ```bash
 uv run python model_training.py
-uv run python model_fine_tuning.py (optional)
+uv run python model_fine_tuning.py  # optional full fine-tuning
 uv run python model_evaluation.py
 uv run python visualization_pipeline.py
 ```
@@ -212,8 +212,8 @@ Supported crops: Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, Cherry, Peach
 
 | Metric | Value |
 | --- | --- |
-| Validation Accuracy | 97.40% |
-| Macro F1-Score | 0.9657 |
+| Validation Accuracy | 99.46% |
+| Macro F1-Score | 0.9901 |
 | Classes | 46 |
 
 ### Visual Outputs
@@ -227,6 +227,8 @@ Supported crops: Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, Cherry, Peach
 
 ```text
 Leaf_Disease_Detection/
+├── pyproject.toml              # uv dependencies and metadata
+├── uv.lock                     # uv strict dependency lockfile
 ├── app.py                      # Flask web application
 ├── main.py                     # Unified task runner
 ├── config.py                   # Central configuration
