@@ -3,10 +3,10 @@ import json
 import os
 from datetime import datetime
 
-import keras
+import tensorflow.keras as keras
 import numpy as np
 import tensorflow as tf
-from keras.models import load_model
+from tensorflow.keras.models import load_model
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,

@@ -1,14 +1,15 @@
 import gc
+import random
 import json
 import os
 import time
 from datetime import datetime
 
-import keras
+import tensorflow.keras as keras
 import numpy as np
 import tensorflow as tf
-from keras.callbacks import CSVLogger, EarlyStopping, TensorBoard
-from keras.models import load_model
+from tensorflow.keras.callbacks import CSVLogger, EarlyStopping, TensorBoard
+from tensorflow.keras.models import load_model
 
 from config import (
     ACCUMULATION_STEPS,
@@ -129,6 +130,16 @@ def _unfreeze_top_layers(model, target_count: int) -> int:
 def main():
     
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+    # Allow overriding the run seed via RUN_SEED env var for multi-seed experiments
+    seed_env = os.environ.get("RUN_SEED")
+    try:
+        seed = int(seed_env) if seed_env is not None else 42
+    except Exception:
+        seed = 42
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    keras.utils.set_random_seed(seed)
+    print(f"Using run seed: {seed}")
     configure_tensorflow()
 
     # Setting precision directly for standard backbones

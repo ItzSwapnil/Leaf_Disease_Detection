@@ -4,7 +4,19 @@ import inspect
 import math
 from typing import Dict, Optional, Sequence
 
-import keras
+import tensorflow.keras as keras
+# Provide a compatible `register_keras_serializable` decorator across TF/Keras versions.
+try:
+    # Preferred import location
+    from tensorflow.keras.utils import register_keras_serializable
+except Exception:
+    try:
+        register_keras_serializable = keras.saving.register_keras_serializable  # type: ignore
+    except Exception:
+        def register_keras_serializable(package=None):
+            def decorator(obj):
+                return obj
+            return decorator
 import numpy as np
 
 from config import (
@@ -21,7 +33,7 @@ from config import (
 
 # Learning rate schedule
 
-@keras.saving.register_keras_serializable(package="training_utils")
+@register_keras_serializable(package="training_utils")
 class WarmupCosineSchedule(keras.optimizers.schedules.LearningRateSchedule):
     
 

@@ -3,14 +3,14 @@ import json
 import csv
 import re
 
-import keras
+import tensorflow.keras as keras
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
-from keras.models import load_model
+from tensorflow.keras.models import load_model
 from sklearn.metrics import classification_report, confusion_matrix
 
 from config import (
@@ -524,23 +524,20 @@ def generate_sample_predictions():
 # Main
 
 def main():
-    
-        print("generating plots...")
-    
+    print("generating plots...")
     generate_class_distribution()
     generate_learning_curves_from_logs()
     generate_model_architecture_diagram()
     generate_confusion_matrix()
     generate_sample_predictions()
-
-        print("All figures generated successfully.")
+    print("All figures generated successfully.")
     print(f"Output directory: {PLOTS_DIR}/")
     print("  - class_distribution.png")
     print("  - learning_curves.png")
     print("  - model_architecture.png")
     print("  - confusion_matrix.png")
     print("  - sample_predictions.png")
-    
+
 
 if __name__ == "__main__":
     main()

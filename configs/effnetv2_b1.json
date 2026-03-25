@@ -1,0 +1,14 @@
+{
+  "name": "effnetv2_b1",
+  "base_model": "EfficientNetV2B1",
+  "img_size": 240,
+  "batch_size": 24,
+  "epochs_phase1": 5,
+  "epochs_phase2": 20,
+  "learning_rate_phase1": 0.001,
+  "learning_rate_phase2": 0.0001,
+  "use_mixup": true,
+  "mixup_alpha": 0.2,
+  "use_cutmix": false,
+  "seeds": [42, 123, 999]
+}

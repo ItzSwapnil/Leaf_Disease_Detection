@@ -1,0 +1,20 @@
+[
+  {
+    "true": "Apple___Apple_scab",
+    "pred": "Apple___healthy",
+    "count": 1,
+    "copied": 1,
+    "sample_paths": [
+      "reports/misclassifications/Apple_Apple_scab__to__Apple_healthy/000_01f3deaa-6143-4b6c-9c22-620a46d8be04___FREC_Scab 3112_270deg.JPG"
+    ]
+  },
+  {
+    "true": "Tomato___Late_blight",
+    "pred": "Tomato___healthy",
+    "count": 1,
+    "copied": 1,
+    "sample_paths": [
+      "reports/misclassifications/Tomato_Late_blight__to__Tomato_healthy/000_005a2c1f-4e15-49e4-9e5c-61dc3ecf9708___RS_Late.B 5096.JPG"
+    ]
+  }
+]

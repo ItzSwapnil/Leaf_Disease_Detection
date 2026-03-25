@@ -3,12 +3,12 @@ import json
 import random
 import time
 import math
-import keras
+import tensorflow.keras as keras
 import tensorflow as tf
 import numpy as np
 from datetime import datetime
 
-from keras.applications import (
+from tensorflow.keras.applications import (
     EfficientNetV2B0,
     EfficientNetV2B1,
     EfficientNetV2B2,
@@ -17,10 +17,10 @@ from keras.applications import (
     EfficientNetV2M,
     EfficientNetV2L,
 )
-from keras.applications.efficientnet_v2 import preprocess_input
-from keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
-from keras.models import Model
-from keras.callbacks import EarlyStopping, TensorBoard, CSVLogger
+from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping, TensorBoard, CSVLogger
 
 from hardware import configure_tensorflow, get_training_strategy
 from training_progress import ProgressEmitter, IntervalMetricsLogger
@@ -78,15 +78,21 @@ def _resolve_backbone_factory(name: str):
 # Main training entrypoint
 
 def main():
-    
-        print("EfficientNetV2-S  |  SOTA Training Pipeline")
+    print("EfficientNetV2-S  |  SOTA Training Pipeline")
     print("Target: 99%+ top-1 accuracy on PlantVillage-46")
     
     # Reproducibility
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-    os.environ["PYTHONHASHSEED"] = "42"
-    random.seed(42)
-    keras.utils.set_random_seed(42)
+    # Allow overriding the run seed via RUN_SEED env var for multi-seed experiments
+    seed_env = os.environ.get("RUN_SEED")
+    try:
+        seed = int(seed_env) if seed_env is not None else 42
+    except Exception:
+        seed = 42
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    keras.utils.set_random_seed(seed)
+    print(f"Using run seed: {seed}")
     configure_tensorflow()
 
 

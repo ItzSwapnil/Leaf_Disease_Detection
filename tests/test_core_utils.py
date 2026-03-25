@@ -49,6 +49,19 @@ def test_resolve_keras_model_path_raises_when_nothing_exists(tmp_path, monkeypat
         model_paths.resolve_keras_model_path([])
 
 
+def test_resolve_keras_model_path_discover_h5(tmp_path, monkeypatch):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "saved_checkpoint.h5").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras"))
+    monkeypatch.setattr(model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras"))
+    monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
+
+    resolved = model_paths.resolve_keras_model_path([])
+    assert resolved.endswith("saved_checkpoint.h5")
+
+
 def test_progress_emitter_estimate_eta_math():
     emitter = ProgressEmitter(
         stage="phase1",
