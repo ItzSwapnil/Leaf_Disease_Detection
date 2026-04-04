@@ -70,7 +70,7 @@ JOBS_LOCK = threading.Lock()
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 KERAS_BATCH_PROGRESS_RE = re.compile(r"^\d+/\d+\s+")
 
-TRAIN_SCRIPT = 'model_training.py'
+TRAIN_SCRIPT = 'train_model.py'
 TRAIN_DESC = "Run baseline EfficientNet training pipeline."
 
 CONTROL_ACTIONS = {
@@ -81,17 +81,17 @@ CONTROL_ACTIONS = {
     },
     "fine_tune": {
         "label": "Fine Tune Model",
-        "script": "model_fine_tuning.py",
+        "script": "fine_tune_model.py",
         "description": "continue training from a saved checkpoint"
     },
     "evaluate": {
         "label": "Evaluate Model",
-        "script": "model_evaluation.py",
+        "script": "evaluate_model.py",
         "description": "run validation and eval metrics"
     },
     "generate_figures": {
         "label": "Generate Figures",
-        "script": "visualization_pipeline.py",
+        "script": "scripts/generate_figures.py",
         "description": "build plots and analysis artifacts"
     }
 }

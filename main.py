@@ -44,12 +44,12 @@ def main():
 
     command_map = {
         "serve": PROJECT_ROOT / "app.py",
-        "train": PROJECT_ROOT / "model_training.py",
-        "fine_tune": PROJECT_ROOT / "model_fine_tuning.py",
-        "evaluate": PROJECT_ROOT / "model_evaluation.py",
-        "visualize": PROJECT_ROOT / "visualization_pipeline.py",
-        "resume": PROJECT_ROOT / "model_fine_tuning.py",
-        "validate": PROJECT_ROOT / "model_evaluation.py",
+        "train": PROJECT_ROOT / "train_model.py",
+        "fine_tune": PROJECT_ROOT / "fine_tune_model.py",
+        "evaluate": PROJECT_ROOT / "evaluate_model.py",
+        "visualize": PROJECT_ROOT / "scripts" / "generate_figures.py",
+        "resume": PROJECT_ROOT / "fine_tune_model.py",
+        "validate": PROJECT_ROOT / "evaluate_model.py",
     }
     script_path = command_map[args.task]
     if not script_path.exists():

@@ -48,7 +48,6 @@ Thumbs.db
 *.log
 *.tmp
 *.deb
-/docs/journal/*
 *.aux
 *.out
 *.fls
@@ -66,3 +65,13 @@ env/
 logs/
 models/archived/
 uploads/
+reports/misclassifications/
+reports/deep_scan_*.txt
+
+# Keep plot PDFs ignored
+
+# Ignore build artifacts
+*.bbl
+*.blg
+*.synctex.gz
+

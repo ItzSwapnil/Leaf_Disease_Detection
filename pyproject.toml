@@ -20,11 +20,11 @@ dependencies = [
 
 [project.scripts]
 leaf-disease = "main:main"
-leaf-disease-train = "model_training:main"
-leaf-disease-fine-tune = "model_fine_tuning:main"
-leaf-disease-evaluate = "model_evaluation:main"
+leaf-disease-train = "train_model:main"
+leaf-disease-fine-tune = "fine_tune_model:main"
+leaf-disease-evaluate = "evaluate_model:main"
 leaf-disease-predict = "predict:main"
-leaf-disease-figures = "visualization_pipeline:main"
+leaf-disease-figures = "scripts.generate_figures:main"
 
 [tool.uv]
 link-mode = "copy"
