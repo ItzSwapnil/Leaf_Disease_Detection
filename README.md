@@ -369,7 +369,20 @@ uv run python scripts/generate_additional_figures.py
 
 Outputs are written to `plots/`. Reports and run metadata are written to `reports/` and `models/logs/`.
 
-### Diagrams (Mermaid)
+### User Interface
+
+<table>
+  <tr>
+    <td align="center"><b>Web UI</b></td>
+  </tr>
+  <tr>
+    <tr>
+    <td><a href="plots/Leaf_Disease_Detection_AI.png"><img src="plots/Leaf_Disease_Detection_AI.png" alt="plots/Leaf Disease Detection AI" width="400" height="500"></a></td>
+  </tr>
+</table>
+
+
+### Diagrams
 
 Training and system diagrams are rendered with Mermaid for easy editing. The project also includes pre-rendered PNG versions under `plots/`.
 
