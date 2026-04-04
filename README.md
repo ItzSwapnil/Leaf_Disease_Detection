@@ -1,5 +1,7 @@
 # Leaf Disease Detection System
 
+> Plant Leaf Disease classification with EfficientNetV2, strong augmentations, and a full train to deploy workflow.
+
 Deep learning-based plant leaf disease classification using EfficientNetV2 transfer learning with SOTA augmentation strategies. Supports web inference, CLI inference, and reproducible train/fine-tune/evaluate pipelines.
 
 ![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)
@@ -7,6 +9,18 @@ Deep learning-based plant leaf disease classification using EfficientNetV2 trans
 ![Keras](https://img.shields.io/badge/Keras-3.13%2B-red.svg)
 ![Classes](https://img.shields.io/badge/Classes-46-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+## At a Glance
+
+| Feature | What you get |
+| --- | --- |
+| End-to-end workflow | Train, fine-tune, evaluate, visualize, and serve from one codebase |
+| Robust training recipe | MixUp, CutMix, label smoothing, cosine schedule, AdamW + EMA |
+| Interfaces | Flask web app, CLI, and Python API |
+| Dataset scale | 259k+ images, 46 classes, 16 crops |
+| Figure outputs | Publication-ready plots + report artifacts in `plots/` and `reports/` |
+
+Quick links: [Quick Start](#quick-start) | [Usage](#usage) | [Results](#results) | [Visual Gallery](#visual-gallery) | [Project Structure](#project-structure)
 
 ## Table of Contents
 
@@ -259,76 +273,101 @@ Supported crops: Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, Cherry, Peach
 | Macro F1-Score | 0.9901 |
 | Classes | 46 |
 
-### Visual Outputs
+### Visual Gallery
 
-Representative figures are shown in the Gallery below. Full-size files are available in the `plots/` directory.
+This project generates a large set of analysis plots. Start with these high-signal visuals, then use the catalog to drill down.
 
-### Plots Catalog — categorized, captioned, and linked
+<table>
+  <tr>
+    <td align="center"><b>System Workflow</b></td>
+    <td align="center"><b>Training Dynamics</b></td>
+    <td align="center"><b>Confusion Matrix</b></td>
+  </tr>
+  <tr>
+    <tr>
+    <td><a href="plots/system_workflow.png"><img src="plots/system_workflow.png" alt="system workflow" width="360" height="220"></a></td>
+    <td><a href="plots/training_dynamics.png"><img src="plots/training_dynamics.png" alt="training dynamics" width="360" height="220"></a></td>
+    <td><a href="plots/confusion_matrix.png"><img src="plots/confusion_matrix.png" alt="confusion matrix" width="360" height="220"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><b>ROC All Crops</b></td>
+    <td align="center"><b>Label Smoothing</b></td>
+    <td align="center"><b>Class Imbalance</b></td>
+  </tr>
+  <tr>
+    <td><a href="plots/roc_all_crops_compiled.png"><img src="plots/roc_all_crops_compiled.png" alt="roc all crops" width="360" height="220"></a></td>
+    <td><a href="plots/label_smoothing.png"><img src="plots/label_smoothing.png" alt="label smoothing" width="360" height="220"></a></td>
+    <td><a href="plots/class_imbalance.png"><img src="plots/class_imbalance.png" alt="class imbalance" width="360" height="220"></a></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Sample Predictions</b></td>
+    <td align="center"><b>Case Gallery</b></td>
+    <td align="center"><b>Crop Distribution</b></td>
+  </tr>
+  <tr>
+    <td><a href="plots/sample_predictions.png"><img src="plots/sample_predictions.png" alt="sample predictions" width="360" height="220"></a></td>
+    <td><a href="plots/case_gallery.png"><img src="plots/case_gallery.png" alt="case gallery" width="360" height="220"></a></td>
+    <td><a href="plots/crop_distribution.png"><img src="plots/crop_distribution.png" alt="crop distribution" width="360" height="220"></a></td>
+  </tr>
+</table>
 
-There are many analysis artifacts in `plots/`. Below is a compact, readable catalog grouped by purpose with short context notes and links to the files. Thumbnails show representative items; use the links to inspect full-size images.
+### Plots Catalog
 
-#### Representative thumbnails
+#### Training and optimization
 
-- Learning curves
-  ![Learning curves](plots/learning_curves.png)
-- Confusion matrix
-  ![Confusion matrix](plots/confusion_matrix.png)
-- Case gallery
-  ![Case gallery](plots/case_gallery.png)
+| Plot | Purpose |
+| --- | --- |
+| [learning_curves.png](plots/learning_curves.png) | Training and validation trends with phase transitions and best-epoch markers |
+| [training_dynamics.png](plots/training_dynamics.png) | Extended dynamics view with additional timeline annotations |
+| [calibration_curves.png](plots/calibration_curves.png) | Confidence calibration behavior |
 
-#### Catalog (grouped)
+#### Confusion and error analysis
 
-- Training dynamics & diagnostics
-  - [learning_curves.png](plots/learning_curves.png): epoch-level training & validation accuracy/loss, phase boundaries and best-epoch markers.
-  - [training_dynamics.png](plots/training_dynamics.png): extended interval metrics and annotations (analysis export).
-  - [calibration_curves.png](plots/calibration_curves.png): predicted-confidence calibration per crop/class.
+| Plot | Purpose |
+| --- | --- |
+| [confusion_matrix.png](plots/confusion_matrix.png) | Global normalized confusion matrix |
+| [rice_confusion_matrix.png](plots/rice_confusion_matrix.png) | Crop-focused confusion matrix for rice classes |
+| [top_confusions.png](plots/top_confusions.png) | Most frequent confusion pairs |
+| [error_share_by_crop.png](plots/error_share_by_crop.png) | Relative error contribution by crop |
 
-- Confusion & error analysis
-  - [confusion_matrix.png](plots/confusion_matrix.png): overall normalized confusion matrix on the test set.
-  - [rice_confusion_matrix.png](plots/rice_confusion_matrix.png): crop-specific confusion focus (rice).
+#### ROC and per-class behavior
 
-- ROC / PR / calibration
-  - `plots/roc_<crop>.png`: ROC curves grouped by crop, with one colored line per disease and AUC values in the legend.
+| Plot | Purpose |
+| --- | --- |
+| [roc_all_crops_compiled.png](plots/roc_all_crops_compiled.png) | Multi-panel ROC dashboard across all crops |
+| [precision_recall_support.png](plots/precision_recall_support.png) | Per-class precision, recall, and support overview |
+| [per_class_f1_ranked.png](plots/per_class_f1_ranked.png) | Ranked per-class F1 performance |
+| [crop_level_f1.png](plots/crop_level_f1.png) | F1 breakdown at crop level |
+| [top_bottom_classes.png](plots/top_bottom_classes.png) | Best and hardest classes summary |
 
-- Class / crop distributions & rankings
-  - [class_distribution.png](plots/class_distribution.png): number of training images per class.
-  - [crop_distribution.png](plots/crop_distribution.png): crop-level distribution visualisation.
-  - [per_class_f1_ranked.png](plots/per_class_f1_ranked.png): per-class F1 ranking and short-list of hard classes.
-  - [class_imbalance.png](plots/class_imbalance.png): class imbalance heatmap and summary statistics.
+#### Dataset balance and visual inspections
 
-- Misclassifications & galleries
-  - [case_gallery.png](plots/case_gallery.png): curated case gallery used for error analysis.
-  - [misclassification_gallery.png](plots/misclassification_gallery.png): full misclassification gallery for visual review.
-  - [hard_class_gallery.png](plots/hard_class_gallery.png): gallery focused on frequently-misclassified classes.
-  - [crop_gallery.png](plots/crop_gallery.png): crop-specific gallery used for per-crop visual inspection.
+| Plot | Purpose |
+| --- | --- |
+| [class_distribution.png](plots/class_distribution.png) | Number of samples per class |
+| [crop_distribution.png](plots/crop_distribution.png) | Number of samples per crop |
+| [class_imbalance.png](plots/class_imbalance.png) | Imbalance profile and summary statistics |
+| [crop_gallery.png](plots/crop_gallery.png) | Representative crop-level visual gallery |
+| [case_gallery.png](plots/case_gallery.png) | Curated qualitative analysis cases |
+| [misclassification_gallery.png](plots/misclassification_gallery.png) | Misclassified sample gallery |
+| [hard_class_gallery.png](plots/hard_class_gallery.png) | Gallery focused on difficult classes |
+| [sample_predictions.png](plots/sample_predictions.png) | Model predictions with confidence overlays |
 
-- Per-class / crop analysis (tables & ranked outputs)
-  - [precision_recall_support.png](plots/precision_recall_support.png): per-class precision/recall/support heatmap/table.
-  - [top_confusions.png](plots/top_confusions.png): highest-frequency confusion pairs.
-  - [top_bottom_classes.png](plots/top_bottom_classes.png): top and bottom performing classes summary.
-  - [crop_level_f1.png](plots/crop_level_f1.png): crop-level F1 breakdown.
-  - [error_share_by_crop.png](plots/error_share_by_crop.png): error-share analysis across crops.
+#### System and architecture visuals
 
-- Model & system visuals
-  - [model_architecture.png](plots/model_architecture.png): schematic of backbone + head.
-  - [system_workflow.png](plots/system_workflow.png): system/data/workflow diagram (exported image).
-  - [artifact_lineage.png](plots/artifact_lineage.png): file lineage / artifact provenance diagram.
+| Plot | Purpose |
+| --- | --- |
+| [model_architecture.png](plots/model_architecture.png) | Backbone and classification head schematic |
+| [system_workflow.png](plots/system_workflow.png) | End-to-end data and inference workflow |
 
-- Misc / example outputs
-  - [sample_predictions.png](plots/sample_predictions.png): examples with predicted label + confidence and correctness cue.
-
-> Note: filenames with a common prefix are additional analysis exports — they are produced alongside the main `scripts/generate_figures.py` outputs.
-
-#### How to regenerate and explore
-
-- Regenerate all plots with:
+### Regenerate Figures
 
 ```bash
-python scripts/generate_figures.py
+uv run python scripts/generate_figures.py
+uv run python scripts/generate_additional_figures.py
 ```
 
-- The script reads dataset splits in `dataset/` and the selected model via `model_paths.resolve_keras_model_path()`.
-- Output files are placed in `plots/`; CSV logs and run manifests are stored in `reports/` and `models/logs/`.
+Outputs are written to `plots/`. Reports and run metadata are written to `reports/` and `models/logs/`.
 
 ### Diagrams (Mermaid)
 
@@ -400,7 +439,7 @@ Cross-entropy with label smoothing (smoothing parameter $\varepsilon$):
 
 $$
 \ell(y, \hat{y}) = -\sum_{i=1}^{K} \tilde{y}_i \log \hat{y}_i, \quad
-  ilde{y}_i = (1 - \varepsilon) y_i + \frac{\varepsilon}{K}
+\tilde{y}_i = (1 - \varepsilon) y_i + \frac{\varepsilon}{K}
 $$
 
 Cosine annealing learning rate (with period $T$ and step $t$):

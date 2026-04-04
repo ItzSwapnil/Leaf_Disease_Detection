@@ -37,14 +37,13 @@ FIG_DPI = 800
 
 
 def canonical_label(label: str) -> str:
-    label = str(label).strip()
+    label = label.strip()
     label = label.replace(" ", "_")
     label = re.sub(r"_+", "_", label)
     return label.lower()
 
 
 def pretty_label(label: str) -> str:
-    label = str(label)
     if "___" in label:
         crop, disease = label.split("___", 1)
         crop = crop.replace(",", "").replace("_", " ")
@@ -73,19 +72,18 @@ def load_class_order() -> list[str]:
 
 
 def load_history() -> list[dict]:
-    rows: list[dict] = []
     with TRAIN_HISTORY_PATH.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        for row in reader:
-            rows.append(
-                {
-                    "epoch": int(row["epoch"]) + 1,
-                    "accuracy": float(row["accuracy"]),
-                    "loss": float(row["loss"]),
-                    "val_accuracy": float(row["val_accuracy"]),
-                    "val_loss": float(row["val_loss"]),
-                }
-            )
+        rows = [
+            {
+                "epoch": int(row["epoch"]) + 1,
+                "accuracy": float(row["accuracy"]),
+                "loss": float(row["loss"]),
+                "val_accuracy": float(row["val_accuracy"]),
+                "val_loss": float(row["val_loss"]),
+            }
+            for row in reader
+        ]
     return rows
 
 
@@ -94,10 +92,10 @@ def resolve_dataset_class(split_counts: dict, split_dir: Path, target_label: str
     for class_name in split_counts:
         if canonical_label(class_name) == target and (split_dir / class_name).is_dir():
             return class_name
-    for child in sorted(split_dir.iterdir()):
-        if child.is_dir() and canonical_label(child.name) == target:
-            return child.name
-    return None
+    return next(
+        (child.name for child in sorted(split_dir.iterdir()) if child.is_dir() and canonical_label(child.name) == target),
+        None,
+    )
 
 
 def class_color_map(labels: list[str]) -> dict[str, tuple]:
@@ -367,9 +365,7 @@ def pick_image_from_class(split_dir: Path, class_name: str) -> Path | None:
     if not class_dir.is_dir():
         return None
     candidates = [p for p in sorted(class_dir.iterdir()) if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
-    if not candidates:
-        return None
-    return candidates[len(candidates) // 2]
+    return candidates[len(candidates) // 2] if candidates else None
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -567,34 +563,6 @@ def plot_system_workflow() -> None:
     save_plot(PLOTS_DIR / "system_workflow.png")
 
 
-def plot_artifact_lineage() -> None:
-    fig, ax = plt.subplots(figsize=(13, 7))
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.axis("off")
-
-    draw_box(ax, (0.04, 0.66), 0.20, 0.14, "config.py\ntraining_utils.py\nmodel_paths.py", "#cfe8ff")
-    draw_box(ax, (0.29, 0.66), 0.18, 0.14, "models/logs/\ntrain_history.csv", "#d8f3dc")
-    draw_box(ax, (0.52, 0.66), 0.18, 0.14, "reports/evaluation_report.json\nvalidation summary", "#d8f3dc")
-    draw_box(ax, (0.75, 0.66), 0.20, 0.14, "plots/\nconfusion_matrix.png\nlearning_curves.png", "#d8f3dc")
-
-    draw_box(ax, (0.20, 0.34), 0.24, 0.14, "tools/reporting/generate_report_tables.py\nscripts/generate_publication_figures.py", "#ffe8d6")
-    draw_box(ax, (0.56, 0.34), 0.24, 0.14, "report build pipeline\nlatexmk", "#ffe8d6")
-    draw_box(ax, (0.38, 0.08), 0.24, 0.14, "reports/source archive\npackaged outputs", "#f1c0e8")
-
-    draw_arrow(ax, (0.24, 0.73), (0.29, 0.73))
-    draw_arrow(ax, (0.24, 0.70), (0.52, 0.70))
-    draw_arrow(ax, (0.24, 0.67), (0.75, 0.67))
-    draw_arrow(ax, (0.38, 0.66), (0.32, 0.48))
-    draw_arrow(ax, (0.61, 0.66), (0.40, 0.48))
-    draw_arrow(ax, (0.84, 0.66), (0.44, 0.48))
-    draw_arrow(ax, (0.44, 0.41), (0.56, 0.41))
-    draw_arrow(ax, (0.68, 0.34), (0.50, 0.22))
-
-    ax.text(0.5, 0.92, "Artifact Lineage for the Report Build", ha="center", va="center", fontsize=16, fontweight="bold")
-    save_plot(PLOTS_DIR / "artifact_lineage.png")
-
-
 def main() -> None:
     counts = load_counts()
     report = load_report()
@@ -616,7 +584,6 @@ def main() -> None:
     build_misclassification_gallery()
     build_case_gallery(counts)
     plot_system_workflow()
-    plot_artifact_lineage()
 
 
 if __name__ == "__main__":
