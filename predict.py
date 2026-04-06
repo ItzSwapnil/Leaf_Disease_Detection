@@ -8,9 +8,20 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 from PIL import Image
 
-from config import IMG_SIZE, FINAL_MODEL_PATH, CLASS_INDICES_PATH, MODELS_DIR, BASE_MODEL
-from hardware import configure_tensorflow, get_compute_info
+from config import (
+    IMG_SIZE,
+    CLASS_INDICES_PATH,
+    CONFIDENCE_REJECT_THRESHOLD,
+    ENTROPY_REJECT_THRESHOLD,
+    OOD_MSP_THRESHOLD,
+)
+from hardware import configure_tensorflow
 from model_paths import resolve_keras_model_path
+from inference_guard import (
+    assess_leaf_likelihood,
+    compute_prediction_diagnostics,
+    evaluate_inference_safety,
+)
 from preprocessing import preprocess_array_for_model
 from training_utils import WarmupCosineSchedule
 
@@ -71,9 +82,47 @@ class LeafDiseasePredictor:
         img_array = self.preprocess_image(img_path)
         predictions = self.model.predict(img_array, verbose=0)[0]
 
-        top_idx = int(np.argmax(predictions))
+        diagnostics = compute_prediction_diagnostics(predictions)
+        top_idx = int(diagnostics["top1_index"])
         class_name = self.idx_to_class[top_idx]
-        confidence = float(predictions[top_idx])
+        confidence = float(diagnostics["top1_prob"])
+        confidence_margin = float(diagnostics["confidence_margin"])
+        entropy_bits = float(diagnostics["entropy_bits"])
+
+        leaf_validation = assess_leaf_likelihood(img_path, self.img_size)
+        safety = evaluate_inference_safety(
+            diagnostics=diagnostics,
+            leaf_validation=leaf_validation,
+            confidence_threshold=CONFIDENCE_REJECT_THRESHOLD,
+            entropy_threshold_bits=ENTROPY_REJECT_THRESHOLD,
+            msp_threshold=OOD_MSP_THRESHOLD,
+            min_margin=0.12,
+        )
+
+        if safety["reject"]:
+            reason = ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+            return {
+                "image_path": img_path,
+                "disease": "Unknown",
+                "confidence": confidence * 100,
+                "prediction": {
+                    "class": "Unknown",
+                    "plant": "Unknown",
+                    "disease": "Unknown / needs human review",
+                    "confidence": confidence,
+                    "confidence_percent": f"{confidence * 100:.2f}%",
+                    "rejected": True,
+                    "rejection_reason": reason,
+                    "raw_top_class": class_name,
+                    "validation": {
+                        "leaf_score": leaf_validation["leaf_score"],
+                        "vegetation_ratio": leaf_validation["vegetation_ratio"],
+                        "confidence_margin": round(confidence_margin * 100, 2),
+                        "entropy_bits": round(entropy_bits, 4),
+                        "uncertainty_score": int(safety["uncertainty_score"]),
+                    },
+                },
+            }
 
         parts = class_name.split("___")
         plant = parts[0].replace("_", " ") if len(parts) > 0 else "Unknown"
@@ -89,6 +138,14 @@ class LeafDiseasePredictor:
                 "disease": disease,
                 "confidence": confidence,
                 "confidence_percent": f"{confidence * 100:.2f}%",
+                "rejected": False,
+                "validation": {
+                    "leaf_score": leaf_validation["leaf_score"],
+                    "vegetation_ratio": leaf_validation["vegetation_ratio"],
+                    "confidence_margin": round(confidence_margin * 100, 2),
+                    "entropy_bits": round(entropy_bits, 4),
+                    "uncertainty_score": int(safety["uncertainty_score"]),
+                },
             },
         }
 
@@ -135,6 +192,9 @@ class LeafDiseasePredictor:
         print(f"{'=' * 80}")
         print(f"  {pred['class']}")
         print(f"  Confidence: {pred['confidence_percent']}")
+        if pred.get("rejected"):
+            print("  Status: Rejected by safety gate")
+            print(f"  Reason: {pred.get('rejection_reason', 'low trust score')}")
         print()
 
     def predict_batch(self, image_folder: str, output_file: str = "predictions.json"):

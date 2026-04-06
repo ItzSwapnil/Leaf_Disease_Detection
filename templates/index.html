@@ -1071,6 +1071,16 @@
                 <span>Archive this run (default is latest logs only)</span>
             </label>
 
+            <div class="model-selector" style="margin-top: 1rem;">
+                <label for="trainBackboneSelect">Training backbone</label>
+                <select id="trainBackboneSelect" class="model-select">
+                    {% for backbone_name in training_backbones %}
+                    <option value="{{ backbone_name }}" {% if backbone_name == 'EfficientNetV2S' %}selected{% endif %}>{{ backbone_name }}</option>
+                    {% endfor %}
+                </select>
+                <small>Select the backbone used when starting a training run.</small>
+            </div>
+
             <div id="jobsList" class="jobs-list">
                 <div class="jobs-empty">No workflow jobs yet.</div>
             </div>
@@ -1255,16 +1265,22 @@
             try {
                 const archiveToggle = document.getElementById('archiveLogsToggle');
                 const archiveLogs = !!(archiveToggle && archiveToggle.checked);
+                const backboneSelect = document.getElementById('trainBackboneSelect');
+                const baseModel = backboneSelect ? backboneSelect.value : '';
+                const requestBody = { archive_logs: archiveLogs };
+                if (actionKey === 'train' && baseModel) {
+                    requestBody.base_model = baseModel;
+                }
                 const response = await fetch(`/control/run/${actionKey}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ archive_logs: archiveLogs })
+                    body: JSON.stringify(requestBody)
                 });
-                const payload = await response.json();
+                const responsePayload = await response.json();
                 if (!response.ok) {
-                    throw new Error(payload.error || 'Could not start action');
+                    throw new Error(responsePayload.error || 'Could not start action');
                 }
                 await loadJobs();
             } catch (error) {

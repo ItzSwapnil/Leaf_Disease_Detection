@@ -22,12 +22,25 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 import base64
-from PIL import Image
-from config import IMG_SIZE, FINAL_MODEL_PATH, CLASS_INDICES_PATH, MODELS_DIR, BASE_MODEL
+from config import (
+    IMG_SIZE,
+    FINAL_MODEL_PATH,
+    CLASS_INDICES_PATH,
+    MODELS_DIR,
+    CONFIDENCE_REJECT_THRESHOLD,
+    ENTROPY_REJECT_THRESHOLD,
+    OOD_MSP_THRESHOLD,
+)
 from model_paths import resolve_keras_model_path
 from hardware import configure_tensorflow, get_compute_info
 from preprocessing import preprocess_array_for_model
 from training_utils import WarmupCosineSchedule
+from backbones import list_backbone_names
+from inference_guard import (
+    assess_leaf_likelihood,
+    compute_prediction_diagnostics,
+    evaluate_inference_safety,
+)
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -72,6 +85,7 @@ KERAS_BATCH_PROGRESS_RE = re.compile(r"^\d+/\d+\s+")
 
 TRAIN_SCRIPT = 'train_model.py'
 TRAIN_DESC = "Run baseline EfficientNet training pipeline."
+TRAIN_BACKBONES = list_backbone_names()
 
 CONTROL_ACTIONS = {
     "train": {
@@ -160,7 +174,7 @@ def _to_bool(value):
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
 
 
-def _create_job(action_key, archive_logs=False):
+def _create_job(action_key, archive_logs=False, base_model=None):
     action = CONTROL_ACTIONS[action_key]
     script = action["script"]
     command = [sys.executable, script]
@@ -168,6 +182,8 @@ def _create_job(action_key, archive_logs=False):
         'LEAF_SAVE_LOG_ARCHIVE': '1' if archive_logs else '0',
         'LEAF_SAVE_RUN_MANIFESTS': '1' if archive_logs else '0',
     }
+    if base_model:
+        env_overrides['LEAF_BASE_MODEL'] = str(base_model)
     job_id = uuid.uuid4().hex
     now = time.time()
     job = {
@@ -178,6 +194,7 @@ def _create_job(action_key, archive_logs=False):
         "script": script,
         "command": " ".join(command),
         "archive_logs": bool(archive_logs),
+        "base_model": base_model,
         "env_overrides": env_overrides,
         "status": "starting",
         "start_time": now,
@@ -724,42 +741,40 @@ def predict_disease(img_path, inference_model=None):
     
     # Make prediction
     predictions = active_model.predict(img_array, verbose=0)
-    predicted_class_idx = np.argmax(predictions[0])
-    confidence = float(predictions[0][predicted_class_idx]) * 100
-
-    # Top-2 margin helps detect ambiguous predictions.
-    top_two = np.argsort(predictions[0])[-2:]
-    top1_prob = float(predictions[0][top_two[-1]])
-    top2_prob = float(predictions[0][top_two[-2]])
-    confidence_margin = (top1_prob - top2_prob) * 100
+    diagnostics = compute_prediction_diagnostics(predictions[0])
+    predicted_class_idx = int(diagnostics["top1_index"])
+    confidence = float(diagnostics["top1_prob"]) * 100.0
+    confidence_margin = float(diagnostics["confidence_margin"]) * 100.0
+    entropy_bits = float(diagnostics["entropy_bits"])
     
     # Get class name
     class_name = class_indices.get(predicted_class_idx, "Unknown")
 
-    leaf_validation = assess_leaf_likelihood(img_path)
-    low_confidence = confidence < 45.0
-    low_margin = confidence_margin < 12.0
-
-    appears_non_leaf = (
-        leaf_validation["leaf_score"] < 0.23
-        and leaf_validation["vegetation_ratio"] < 0.08
+    leaf_validation = assess_leaf_likelihood(img_path, IMG_SIZE)
+    safety = evaluate_inference_safety(
+        diagnostics=diagnostics,
+        leaf_validation=leaf_validation,
+        confidence_threshold=CONFIDENCE_REJECT_THRESHOLD,
+        entropy_threshold_bits=ENTROPY_REJECT_THRESHOLD,
+        msp_threshold=OOD_MSP_THRESHOLD,
+        min_margin=0.12,
     )
 
-    weak_leaf_signal = leaf_validation["leaf_score"] < 0.35
-    uncertain_prediction = low_confidence or low_margin
-
-    if appears_non_leaf or (uncertain_prediction and weak_leaf_signal):
+    if safety["reject"]:
         guidance = "Upload a clear, close-up image of a single leaf under good lighting."
         if leaf_validation["reason"]:
             guidance = f"{leaf_validation['reason']} {guidance}"
+        else:
+            safety_reason = ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+            guidance = f"Inference was rejected due to {safety_reason}. {guidance}"
 
         return {
             "class_name": "Unknown",
             "confidence": round(confidence, 2),
             "plant": "Unknown",
-            "disease": "Not a valid leaf image",
-            "description": "The uploaded photo does not appear to be a plant leaf, or the model is not confident enough to classify it safely.",
-            "symptoms": "No disease analysis was performed because leaf validation failed.",
+            "disease": "Unknown / needs human review",
+            "description": "The uploaded photo was rejected by the runtime safety gate because the image appears out-of-domain or prediction confidence is not trustworthy.",
+            "symptoms": "No disease analysis was performed because inference quality checks failed.",
             "treatment": guidance,
             "prevention": "Use a plain background and make sure the leaf fills most of the frame.",
             "is_healthy": False,
@@ -768,6 +783,9 @@ def predict_disease(img_path, inference_model=None):
                 "leaf_score": leaf_validation["leaf_score"],
                 "vegetation_ratio": leaf_validation["vegetation_ratio"],
                 "confidence_margin": round(confidence_margin, 2),
+                "entropy_bits": round(entropy_bits, 4),
+                "uncertainty_score": int(safety["uncertainty_score"]),
+                "rejection_reasons": safety["reasons"],
             },
         }
     
@@ -796,67 +814,10 @@ def predict_disease(img_path, inference_model=None):
             "leaf_score": leaf_validation["leaf_score"],
             "vegetation_ratio": leaf_validation["vegetation_ratio"],
             "confidence_margin": round(confidence_margin, 2),
+            "entropy_bits": round(entropy_bits, 4),
+            "rejection_reasons": [],
         },
     }
-
-
-def assess_leaf_likelihood(img_path):
-    """Heuristic leaf plausibility check to reject obvious non-leaf uploads."""
-    try:
-        with Image.open(img_path) as img:
-            arr = np.asarray(img.convert("RGB").resize((IMG_SIZE, IMG_SIZE)), dtype=np.float32)
-
-        if arr.size == 0:
-            return {
-                "leaf_score": 0.0,
-                "vegetation_ratio": 0.0,
-                "reason": "Image content could not be analyzed.",
-            }
-
-        arr_norm = arr / 255.0
-        maxc = np.max(arr_norm, axis=2)
-        minc = np.min(arr_norm, axis=2)
-        delta = np.maximum(maxc - minc, 1e-8)
-
-        hue = np.zeros_like(maxc)
-        r = arr_norm[:, :, 0]
-        g = arr_norm[:, :, 1]
-        b = arr_norm[:, :, 2]
-
-        r_mask = maxc == r
-        g_mask = maxc == g
-        b_mask = maxc == b
-
-        hue[r_mask] = (60.0 * ((g[r_mask] - b[r_mask]) / delta[r_mask]) + 360.0) % 360.0
-        hue[g_mask] = (60.0 * ((b[g_mask] - r[g_mask]) / delta[g_mask]) + 120.0) % 360.0
-        hue[b_mask] = (60.0 * ((r[b_mask] - g[b_mask]) / delta[b_mask]) + 240.0) % 360.0
-
-        sat = np.where(maxc <= 0.0, 0.0, delta / maxc)
-        val = maxc
-
-        vegetation_mask = (hue >= 20.0) & (hue <= 140.0) & (sat >= 0.15) & (val >= 0.15)
-        vegetation_ratio = float(np.mean(vegetation_mask))
-        contrast = float(np.std(arr_norm))
-
-        leaf_score = min(1.0, vegetation_ratio * 1.7 + contrast * 0.6)
-
-        reason = ""
-        if vegetation_ratio < 0.08:
-            reason = "Very little leaf-like color/texture was detected."
-        elif leaf_score < 0.35:
-            reason = "Leaf signal is weak in this image."
-
-        return {
-            "leaf_score": round(leaf_score, 3),
-            "vegetation_ratio": round(vegetation_ratio, 3),
-            "reason": reason,
-        }
-    except Exception as exc:
-        return {
-            "leaf_score": 0.0,
-            "vegetation_ratio": 0.0,
-            "reason": f"Image validation failed: {exc}",
-        }
 
 
 @app.route('/')
@@ -870,6 +831,7 @@ def index():
         compute_info=get_compute_info(),
         available_models=available_model_names,
         active_model_name=active_name,
+        training_backbones=TRAIN_BACKBONES,
     )
 
 
@@ -974,10 +936,15 @@ def control_run(action_key):
 
     payload = request.get_json(silent=True) or {}
     archive_logs = _to_bool(payload.get('archive_logs'))
+    base_model = (payload.get('base_model') or '').strip() if payload else ''
     if not payload and request.form:
         archive_logs = _to_bool(request.form.get('archive_logs'))
+        base_model = (request.form.get('base_model') or '').strip()
 
-    job = _create_job(action_key, archive_logs=archive_logs)
+    if base_model and action_key not in {"train", "resume"}:
+        return jsonify({"error": "Base model selection is only available for training actions."}), 400
+
+    job = _create_job(action_key, archive_logs=archive_logs, base_model=base_model or None)
     thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
     thread.start()
 

@@ -3,6 +3,8 @@ tensorflow[and-cuda]>=2.21.0,<2.22
 tensorflow-hub>=0.16.1,<0.17
 keras>=3.13.0,<3.15
 keras-cv>=0.9.0,<0.10
+keras-hub>=0.19.0
+huggingface-hub>=0.34.0,<1
 
 # Data processing and numerical computing
 numpy>=2.2.0,<2.4
@@ -14,6 +16,7 @@ seaborn>=0.13.2,<1
 
 # ML evaluation metrics
 scikit-learn>=1.6.0,<2
+statsmodels>=0.14.4,<0.15
 
 # Web application
 flask>=3.1.0,<4

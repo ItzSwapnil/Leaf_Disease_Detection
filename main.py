@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from backbones import list_backbone_names
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 def _run_command(command, cwd, env=None):
@@ -37,10 +39,19 @@ def main():
         action="store_true",
         help="Keep only latest logs (default behaviour).",
     )
+    parser.add_argument(
+        "--base-model",
+        choices=list_backbone_names(),
+        default=None,
+        help="Backbone to use for train/resume tasks (passed through to train_model.py).",
+    )
     args = parser.parse_args()
 
     if args.archive_logs and args.latest_logs_only:
         parser.error("Use either --archive-logs or --latest-logs-only, not both.")
+
+    if args.base_model and args.task not in {"train", "resume"}:
+        parser.error("--base-model can only be used with train or resume.")
 
     command_map = {
         "serve": PROJECT_ROOT / "app.py",
@@ -63,6 +74,9 @@ def main():
     elif args.latest_logs_only:
         child_env["LEAF_SAVE_LOG_ARCHIVE"] = "0"
         child_env["LEAF_SAVE_RUN_MANIFESTS"] = "0"
+
+    if args.base_model:
+        child_env["LEAF_BASE_MODEL"] = args.base_model
 
     raise SystemExit(_run_command(command, PROJECT_ROOT, env=child_env))
 

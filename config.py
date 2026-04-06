@@ -38,6 +38,54 @@ def _env_bool(name: str, default: bool) -> bool:
     return bool(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse an integer from an environment variable with a safe fallback."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return int(default)
+    try:
+        return int(raw_value.strip())
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float from an environment variable with a safe fallback."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return float(default)
+    try:
+        return float(raw_value.strip())
+    except Exception:
+        return float(default)
+
+
+def _env_csv(name: str) -> list[str]:
+    """Parse a comma-separated list from an environment variable."""
+    raw_value = os.getenv(name, "")
+    return [token.strip() for token in raw_value.split(",") if token.strip()]
+
+
+def _env_float_list(name: str, default_csv: str) -> tuple[float, ...]:
+    """Parse a comma-separated float list with fallback defaults."""
+    raw_value = os.getenv(name, default_csv)
+    values: list[float] = []
+    for token in raw_value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            values.append(float(token))
+        except Exception:
+            continue
+
+    if not values:
+        fallback = [part.strip() for part in default_csv.split(",") if part.strip()]
+        values = [float(part) for part in fallback]
+
+    return tuple(values)
+
+
 # ============================================================
 #                    IMAGE & CLASS SETTINGS
 # ============================================================
@@ -65,7 +113,7 @@ OPTIMIZER = "AdamW"
 WEIGHT_DECAY = 0.01
 LR_SCHEDULER = "cosine"
 WARMUP_EPOCHS = 1
-ACCUMULATION_STEPS = 1            # No gradient accumulation needed at BS=64
+ACCUMULATION_STEPS = _env_int("LEAF_ACCUMULATION_STEPS", 1)
 
 # Regularisation
 DROPOUT_RATE = 0.4
@@ -76,6 +124,9 @@ USE_MIXUP = True
 MIXUP_ALPHA = 0.3
 USE_CUTMIX = True
 CUTMIX_ALPHA = 1.0
+MIXUP_PROB = _env_float("LEAF_MIXUP_PROB", 0.4)
+CUTMIX_PROB = _env_float("LEAF_CUTMIX_PROB", 0.4)
+NORMAL_PROB = _env_float("LEAF_NORMAL_PROB", 0.2)
 
 # Exponential Moving Average of weights for better generalisation
 USE_OPTIMIZER_EMA = True
@@ -89,6 +140,31 @@ RANDAUGMENT_MAGNITUDE = 9
 # Test-Time Augmentation for inference
 USE_TTA = True
 TTA_AUGMENTS = 5
+
+# Evaluation and uncertainty analysis
+CALIBRATION_BINS = _env_int("LEAF_CALIBRATION_BINS", 10)
+TEMPERATURE_SCALING_STEPS = _env_int("LEAF_TEMPERATURE_SCALING_STEPS", 400)
+TEMPERATURE_SCALING_LR = _env_float("LEAF_TEMPERATURE_SCALING_LR", 0.01)
+BOOTSTRAP_SAMPLES = _env_int("LEAF_BOOTSTRAP_SAMPLES", 2000)
+BOOTSTRAP_SEED = _env_int("LEAF_BOOTSTRAP_SEED", 42)
+CONFIDENCE_REJECT_THRESHOLD = _env_float("LEAF_CONFIDENCE_REJECT_THRESHOLD", 0.92)
+ENTROPY_REJECT_THRESHOLD = _env_float("LEAF_ENTROPY_REJECT_THRESHOLD", 0.7)
+OOD_MSP_THRESHOLD = _env_float("LEAF_OOD_MSP_THRESHOLD", 0.75)
+OOD_MAX_SAMPLES = _env_int("LEAF_OOD_MAX_SAMPLES", 2048)
+OOD_MAHALANOBIS_REG = _env_float("LEAF_OOD_MAHALANOBIS_REG", 1e-3)
+MC_DROPOUT_ENABLED = _env_bool("LEAF_MC_DROPOUT_ENABLED", True)
+MC_DROPOUT_PASSES = _env_int("LEAF_MC_DROPOUT_PASSES", 10)
+MC_DROPOUT_MAX_SAMPLES = _env_int("LEAF_MC_DROPOUT_MAX_SAMPLES", 2048)
+ROBUSTNESS_EVAL_ENABLED = _env_bool("LEAF_ROBUSTNESS_EVAL_ENABLED", True)
+ROBUSTNESS_MAX_SAMPLES = _env_int("LEAF_ROBUSTNESS_MAX_SAMPLES", 512)
+ROBUSTNESS_SEED = _env_int("LEAF_ROBUSTNESS_SEED", 42)
+ROBUSTNESS_BLUR_SIGMAS = _env_float_list("LEAF_ROBUSTNESS_BLUR_SIGMAS", "0.5,1.0,2.0")
+ROBUSTNESS_BRIGHTNESS_FACTORS = _env_float_list(
+    "LEAF_ROBUSTNESS_BRIGHTNESS_FACTORS", "0.8,0.6,1.2"
+)
+ROBUSTNESS_NOISE_SIGMAS = _env_float_list("LEAF_ROBUSTNESS_NOISE_SIGMAS", "0.01,0.03,0.05")
+ROBUSTNESS_FOG_LEVELS = _env_float_list("LEAF_ROBUSTNESS_FOG_LEVELS", "0.1,0.2")
+ROBUSTNESS_OCCLUSION_FRACS = _env_float_list("LEAF_ROBUSTNESS_OCCLUSION_FRACS", "0.1,0.2")
 
 # Logging behaviour
 SAVE_LOG_ARCHIVE = _env_bool("LEAF_SAVE_LOG_ARCHIVE", False)
@@ -113,6 +189,12 @@ MODELS_DIR = BASE_DIR / "models"
 CHECKPOINT_MODEL_PATH = MODELS_DIR / "leaf_disease_checkpoint.keras"
 FINAL_MODEL_FILE_PATH = MODELS_DIR / "leaf_disease_classifier.keras"
 CLASS_INDICES_PATH = MODELS_DIR / "class_indices.json"
+MCNEMAR_BASELINE_MODEL_PATH = os.getenv(
+  "LEAF_MCNEMAR_BASELINE_MODEL_PATH",
+  str(MODELS_DIR / "leaf_disease_effnetv2b1.keras"),
+)
+ENSEMBLE_MODEL_PATHS = _env_csv("LEAF_ENSEMBLE_MODELS")
+OOD_DIR = os.getenv("LEAF_OOD_DIR", str(BASE_DIR / "dataset" / "ood"))
 
 # Output directories
 PLOTS_DIR = BASE_DIR / "plots"
@@ -142,13 +224,13 @@ UNFREEZE_LAYERS = -1
 
 
 # Fine-tuning strategy
-FINE_TUNE_UNFREEZE_LAYERS = -1
-FINE_TUNE_EPOCHS = 10
-FINE_TUNE_BATCH_SIZE = 64
-FINE_TUNE_LEARNING_RATE = 5e-5
-FINE_TUNE_DATA_FRACTION = 1.0
-FINE_TUNE_MAX_STEPS_PER_EPOCH = 0
-FINE_TUNE_VAL_MAX_STEPS = 0
+FINE_TUNE_UNFREEZE_LAYERS = _env_int("LEAF_FINE_TUNE_UNFREEZE_LAYERS", -1)
+FINE_TUNE_EPOCHS = _env_int("LEAF_FINE_TUNE_EPOCHS", 10)
+FINE_TUNE_BATCH_SIZE = _env_int("LEAF_FINE_TUNE_BATCH_SIZE", 64)
+FINE_TUNE_LEARNING_RATE = _env_float("LEAF_FINE_TUNE_LEARNING_RATE", 5e-5)
+FINE_TUNE_DATA_FRACTION = _env_float("LEAF_FINE_TUNE_DATA_FRACTION", 1.0)
+FINE_TUNE_MAX_STEPS_PER_EPOCH = _env_int("LEAF_FINE_TUNE_MAX_STEPS_PER_EPOCH", 0)
+FINE_TUNE_VAL_MAX_STEPS = _env_int("LEAF_FINE_TUNE_VAL_MAX_STEPS", 0)
 
 # ============================================================
 #                       CALLBACKS

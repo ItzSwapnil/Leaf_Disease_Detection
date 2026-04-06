@@ -23,16 +23,19 @@ class ProgressEmitter(keras.callbacks.Callback):
         self.run_start_time = run_start_time or time.time()
         self.min_emit_interval = float(min_emit_interval)
         self._current_epoch = 0
+        self._initial_epoch = 0
         self._steps_in_epoch = None
         self._last_emit_time = 0.0
 
     def _emit(self, progress_pct: float, eta_seconds: float, epoch_done: int):
+        clamped_epoch_done = max(0, min(int(epoch_done), int(self.total_epochs)))
+        clamped_progress = max(0.0, min(float(progress_pct), 100.0))
         payload = {
             "stage": self.stage,
-            "progress_pct": round(float(progress_pct), 2),
+            "progress_pct": round(clamped_progress, 2),
             "eta_seconds": max(0.0, float(eta_seconds)),
             "eta_scope": "whole_process",
-            "epoch_done": int(epoch_done),
+            "epoch_done": clamped_epoch_done,
             "total_epochs": int(self.total_epochs),
             "timestamp": round(time.time(), 2),
         }
@@ -48,6 +51,7 @@ class ProgressEmitter(keras.callbacks.Callback):
 
     def on_train_begin(self, logs=None):
         self._steps_in_epoch = self.params.get("steps")
+        self._initial_epoch = int(self.params.get("initial_epoch") or 0)
         self._last_emit_time = 0.0
         initial_pct = (self.completed_epochs_before / self.total_epochs) * 100.0
         self._emit(initial_pct, 0.0, self.completed_epochs_before)
@@ -63,14 +67,18 @@ class ProgressEmitter(keras.callbacks.Callback):
             return
 
         epoch_fraction = min(1.0, float(batch + 1) / float(self._steps_in_epoch))
-        completed = self.completed_epochs_before + self._current_epoch + epoch_fraction
+        relative_epoch = max(0.0, float(self._current_epoch - self._initial_epoch))
+        completed = self.completed_epochs_before + relative_epoch + epoch_fraction
+        completed = min(float(self.total_epochs), completed)
         progress_pct = (completed / self.total_epochs) * 100.0
         eta = self._estimate_eta(completed)
         self._emit(progress_pct, eta, int(completed))
         self._last_emit_time = now
 
     def on_epoch_end(self, epoch, logs=None):
-        epoch_done = self.completed_epochs_before + epoch + 1
+        relative_epoch = max(0, int(epoch) - int(self._initial_epoch))
+        epoch_done = self.completed_epochs_before + relative_epoch + 1
+        epoch_done = min(int(self.total_epochs), int(epoch_done))
         progress_pct = (epoch_done / self.total_epochs) * 100.0
         eta = self._estimate_eta(float(epoch_done))
         self._emit(progress_pct, eta, epoch_done)

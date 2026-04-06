@@ -3,25 +3,28 @@ import json
 import random
 import time
 import math
+import argparse
 import tensorflow.keras as keras
 import tensorflow as tf
 import numpy as np
 from datetime import datetime
 
-from tensorflow.keras.applications import (
-    EfficientNetV2B0,
-    EfficientNetV2B1,
-    EfficientNetV2B2,
-    EfficientNetV2B3,
-    EfficientNetV2S,
-    EfficientNetV2M,
-    EfficientNetV2L,
+from tensorflow.keras.layers import (
+    Dense,
+    GlobalAveragePooling1D,
+    GlobalAveragePooling2D,
+    Dropout,
+    BatchNormalization,
 )
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import EarlyStopping, TensorBoard, CSVLogger
 
+from backbones import (
+    list_backbone_names,
+    resolve_backbone_factory,
+    resolve_backbone_name,
+    resolve_preprocess_function,
+)
 from hardware import configure_tensorflow, get_training_strategy
 from training_progress import ProgressEmitter, IntervalMetricsLogger
 from training_utils import (
@@ -31,6 +34,7 @@ from training_utils import (
     build_loss,
     compute_class_weights_from_flow,
     mixup_cutmix_generator,
+    randaugment_generator,
     resolve_step_count,
     tensorboard_available,
 )
@@ -44,7 +48,9 @@ from config import (
     CLASS_INDICES_PATH, BASE_MODEL,
     SAVE_LOG_ARCHIVE, SAVE_RUN_MANIFESTS,
     USE_MIXUP, MIXUP_ALPHA,
+    USE_RANDAUGMENT, RANDAUGMENT_NUM_LAYERS, RANDAUGMENT_MAGNITUDE,
     WARMUP_EPOCHS,
+    MIXUP_PROB, CUTMIX_PROB, NORMAL_PROB,
 )
 
 # Import optional sota augmentation flags with safe fallbacks
@@ -54,31 +60,38 @@ except ImportError:
     USE_CUTMIX = False
     CUTMIX_ALPHA = 1.0
 
-# Backbone registry
-
-_BACKBONE_REGISTRY = {
-    "EfficientNetV2B0": EfficientNetV2B0,
-    "EfficientNetV2B1": EfficientNetV2B1,
-    "EfficientNetV2B2": EfficientNetV2B2,
-    "EfficientNetV2B3": EfficientNetV2B3,
-    "EfficientNetV2S": EfficientNetV2S,
-    "EfficientNetV2M": EfficientNetV2M,
-    "EfficientNetV2L": EfficientNetV2L,
-}
-
-def _resolve_backbone_factory(name: str):
-    
-    if name in _BACKBONE_REGISTRY:
-        return _BACKBONE_REGISTRY[name]
-    supported = ", ".join(sorted(_BACKBONE_REGISTRY.keys()))
-    raise ValueError(
-        f"Supported backbones: {supported}. "
-    )
-
 # Main training entrypoint
 
 def main():
-    print("EfficientNetV2-S  |  SOTA Training Pipeline")
+    parser = argparse.ArgumentParser(description="Leaf Disease Detection training pipeline")
+    parser.add_argument(
+        "--base-model",
+        choices=list_backbone_names(),
+        default=None,
+        help="Backbone to use for training (defaults to LEAF_BASE_MODEL or EfficientNetV2S).",
+    )
+    args = parser.parse_args()
+
+    backbone_name = resolve_backbone_name(
+        args.base_model or os.getenv("LEAF_BASE_MODEL"),
+        default=BASE_MODEL,
+    )
+    preprocess_fn = resolve_preprocess_function(backbone_name)
+
+    env_batch_size = os.getenv("LEAF_BATCH_SIZE")
+    batch_size = int(BATCH_SIZE)
+    if env_batch_size is not None:
+        try:
+            batch_size = max(1, int(env_batch_size))
+        except Exception:
+            batch_size = int(BATCH_SIZE)
+    elif backbone_name == "DINOv3" and batch_size > 8:
+        # ViT backbones are significantly more memory-hungry than EfficientNet.
+        # Auto-downshift avoids common OOM failures on 8 GB laptop GPUs.
+        batch_size = 8
+        print("Auto-adjusted batch size to 8 for DINOv3. Override via LEAF_BATCH_SIZE if needed.")
+
+    print(f"Training pipeline  |  Backbone: {backbone_name}")
     print("Target: 99%+ top-1 accuracy on PlantVillage-46")
     
     # Reproducibility
@@ -114,7 +127,7 @@ def main():
     ImageDataGenerator = tf.keras.preprocessing.image.ImageDataGenerator
 
     train_datagen = ImageDataGenerator(
-        preprocessing_function=preprocess_input,
+        preprocessing_function=preprocess_fn,
         rotation_range=40,
         horizontal_flip=True,
         vertical_flip=True,
@@ -126,22 +139,22 @@ def main():
         channel_shift_range=20.0,
         fill_mode="reflect",
     )
-    val_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
+    val_datagen = ImageDataGenerator(preprocessing_function=preprocess_fn)
 
     print(f"\nLoading training data from: {TRAIN_DIR}")
-    print(f"Image size: {IMG_SIZE}x{IMG_SIZE}  |  Batch size: {BATCH_SIZE}")
+    print(f"Image size: {IMG_SIZE}x{IMG_SIZE}  |  Batch size: {batch_size}")
 
     train_gen = train_datagen.flow_from_directory(
         TRAIN_DIR,
         target_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         class_mode="categorical",
         shuffle=True,
     )
     val_gen = val_datagen.flow_from_directory(
         VAL_DIR,
         target_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         class_mode="categorical",
         shuffle=False,
     )
@@ -153,7 +166,7 @@ def main():
     # ── model construction ────────────────────────────────────────────────
     strategy = get_training_strategy()
     with strategy.scope():
-        backbone_factory = _resolve_backbone_factory(BASE_MODEL)
+        backbone_factory = resolve_backbone_factory(backbone_name)
         base_model = backbone_factory(
             input_shape=(IMG_SIZE, IMG_SIZE, 3),
             include_top=False,
@@ -162,7 +175,18 @@ def main():
         base_model.trainable = False
 
         x = base_model.output
-        x = GlobalAveragePooling2D()(x)
+        output_shape = getattr(base_model, "output_shape", None)
+        output_rank = len(output_shape) if isinstance(output_shape, tuple) else None
+        if output_rank == 4:
+            x = GlobalAveragePooling2D()(x)
+        elif output_rank == 3:
+            x = GlobalAveragePooling1D()(x)
+        elif output_rank == 2:
+            pass
+        else:
+            raise ValueError(
+                f"Unsupported backbone output shape for {backbone_name}: {output_shape}"
+            )
         x = BatchNormalization(dtype="float32")(x)
         x = Dense(DENSE_UNITS, activation="swish")(x)
         x = Dropout(DROPOUT_RATE)(x)
@@ -171,13 +195,13 @@ def main():
         outputs = Dense(NUM_CLASSES, activation="softmax", dtype="float32")(x)
         model = Model(inputs=base_model.input, outputs=outputs)
 
-    print(f"\nBackbone: {BASE_MODEL}")
+    print(f"\nBackbone: {backbone_name}")
     print(f"Total parameters: {model.count_params():,}")
     trainable_params = sum(p.numpy().size for p in model.trainable_weights)
     print(f"Trainable parameters (phase 1): {trainable_params:,}")
 
-    steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_gen.samples, BATCH_SIZE)
-    validation_steps = resolve_step_count(VALIDATION_STEPS, val_gen.samples, BATCH_SIZE)
+    steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_gen.samples, batch_size)
+    validation_steps = resolve_step_count(VALIDATION_STEPS, val_gen.samples, batch_size)
 
     phase1_epochs = max(0, int(EPOCHS_PHASE1))
     phase2_epochs = max(0, int(EPOCHS_PHASE2))
@@ -202,6 +226,17 @@ def main():
 
     # ── mixup / cutmix ───────────────────────────────────────────────────
     train_source = train_gen
+    if USE_RANDAUGMENT:
+        print(
+            "Augmentation: "
+            f"RandAugment(layers={RANDAUGMENT_NUM_LAYERS}, magnitude={RANDAUGMENT_MAGNITUDE})"
+        )
+        train_source = randaugment_generator(
+            train_source,
+            num_layers=int(RANDAUGMENT_NUM_LAYERS),
+            magnitude=float(RANDAUGMENT_MAGNITUDE),
+        )
+
     if USE_MIXUP or USE_CUTMIX:
         augmentation_desc = []
         if USE_MIXUP:
@@ -209,12 +244,19 @@ def main():
         if USE_CUTMIX:
             augmentation_desc.append(f"CutMix(alpha={CUTMIX_ALPHA})")
         print(f"Augmentation: {' + '.join(augmentation_desc)}")
+        print(
+            "Batch routing probabilities: "
+            f"MixUp={MIXUP_PROB:.2f}, CutMix={CUTMIX_PROB:.2f}, Normal={NORMAL_PROB:.2f}"
+        )
         train_source = mixup_cutmix_generator(
             train_gen,
             mixup_alpha=float(MIXUP_ALPHA),
             cutmix_alpha=float(CUTMIX_ALPHA),
             use_mixup=USE_MIXUP,
             use_cutmix=USE_CUTMIX,
+            mixup_prob=float(MIXUP_PROB),
+            cutmix_prob=float(CUTMIX_PROB),
+            normal_prob=float(NORMAL_PROB),
         )
         if fit_class_weight:
             print("MixUp/CutMix active: disabling class_weight to avoid label-mix conflicts.")
@@ -430,7 +472,8 @@ def main():
         "train_history_archive": train_history_archive_path if SAVE_LOG_ARCHIVE else None,
         "train_interval_latest": train_interval_latest_path,
         "train_interval_archive": train_interval_archive_path if SAVE_LOG_ARCHIVE else None,
-        "base_model": BASE_MODEL,
+        "base_model": backbone_name,
+        "batch_size": int(batch_size),
         "use_mixup": USE_MIXUP,
         "use_cutmix": USE_CUTMIX,
         "epochs_phase1": phase1_epochs,

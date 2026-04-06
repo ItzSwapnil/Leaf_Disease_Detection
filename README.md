@@ -1,8 +1,8 @@
 # Leaf Disease Detection System
 
-> Plant Leaf Disease classification with EfficientNetV2, strong augmentations, and a full train to deploy workflow.
+> Plant Leaf Disease classification with EfficientNetV2 or DINOv3 (experimental), strong augmentations, and a full train to deploy workflow.
 
-Deep learning-based plant leaf disease classification using EfficientNetV2 transfer learning with SOTA augmentation strategies. Supports web inference, CLI inference, and reproducible train/fine-tune/evaluate pipelines.
+Deep learning-based plant leaf disease classification using EfficientNetV2 transfer learning and optional DINOv3 (experimental) with SOTA augmentation strategies. Supports web inference, CLI inference, and reproducible train/fine-tune/evaluate pipelines.
 
 ![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)
 ![TensorFlow](https://img.shields.io/badge/TensorFlow-2.21%2B%20CUDA-orange.svg)
@@ -16,6 +16,11 @@ Deep learning-based plant leaf disease classification using EfficientNetV2 trans
 | --- | --- |
 | End-to-end workflow | Train, fine-tune, evaluate, visualize, and serve from one codebase |
 | Robust training recipe | MixUp, CutMix, label smoothing, cosine schedule, AdamW + EMA |
+| Backbone options | EfficientNetV2 family + DINOv3 (experimental) |
+| Calibration + reliability | ECE/MCE/Brier, reliability diagrams, temperature scaling |
+| Statistical validation | Bootstrap confidence intervals + McNemar significance test |
+| Uncertainty + safety | Confidence/entropy rejection, MC Dropout, OOD detection |
+| Robustness stress tests | Blur, brightness shift, Gaussian noise, fog, occlusion evaluation |
 | Interfaces | Flask web app, CLI, and Python API |
 | Dataset scale | 259k+ images, 46 classes, 16 crops |
 | Figure outputs | Publication-ready plots + report artifacts in `plots/` and `reports/` |
@@ -48,6 +53,8 @@ This project provides an end-to-end workflow for plant disease detection:
 3. Serve predictions through a Flask web app or CLI.
 4. Generate publication-ready visualisations.
 
+You can also train with DINOv3 as an experimental backbone selection.
+
 ```mermaid
 flowchart LR
   A["Leaf Image"] --> B["Preprocessing"]
@@ -75,9 +82,7 @@ flowchart LR
 
 ### Setup
 
-There are two supported ways to prepare the environment: using the `uv` tool (recommended for reproducible installs with `pyproject.toml` and `uv.lock`) or a standard `venv` + `pip` workflow.
-
-Recommended (using `uv`):
+This project uses `uv` for dependency and command workflows.
 
 ```bash
 git clone https://github.com/ItzSwapnil/Leaf_Disease_Detection.git
@@ -90,19 +95,6 @@ uv sync
 uv run python -c "import tensorflow as tf; print(tf.__version__); print(tf.config.list_physical_devices('GPU'))"
 ```
 
-Alternative (standard `venv` + `pip`):
-
-```bash
-git clone https://github.com/ItzSwapnil/Leaf_Disease_Detection.git
-cd Leaf_Disease_Detection
-python3.13 -m venv .venv
-source .venv/bin/activate          # PowerShell: .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-# verify TensorFlow and GPU available
-python -c "import tensorflow as tf; print(tf.__version__); print(tf.config.list_physical_devices('GPU'))"
-```
-
 ## Usage
 
 ### A) Web App (Recommended)
@@ -111,12 +103,6 @@ Run the Flask app directly or via the project runner. With `uv`:
 
 ```bash
 uv run python app.py
-```
-
-Or with an activated `venv`:
-
-```bash
-python app.py
 ```
 
 Open <http://127.0.0.1:5000>
@@ -141,6 +127,7 @@ Features:
 | Generate core figures | `scripts/generate_figures.py` | `uv run python scripts/generate_figures.py` |
 | Generate publication figures | `scripts/generate_publication_figures.py` | `uv run python scripts/generate_publication_figures.py` |
 | Build report tables | `tools/reporting/generate_report_tables.py` | `uv run python tools/reporting/generate_report_tables.py` |
+| Run multi-seed experiment (5 seeds) | `tools/run_multi_seed_experiment.py` | `uv run leaf-disease-multi-seed` |
 | Count dataset per split/class | `tools/dataset/count_dataset.py` | `uv run python tools/dataset/count_dataset.py` |
 
 ### B) Command Runner
@@ -149,29 +136,30 @@ The unified CLI dispatcher is `main.py` and provides the same tasks used by the 
 
 ```bash
 # Start the web app via runner
-python main.py serve
+uv run python main.py serve
 
 # Training / evaluation / visualization
-python main.py train
-python main.py fine_tune
-python main.py evaluate
-python main.py visualize
+uv run python main.py train
+uv run python main.py fine_tune
+uv run python main.py evaluate
+uv run python main.py visualize
 
 # Keep timestamped archive logs for a run
-python main.py train --archive-logs
+uv run python main.py train --archive-logs
 ```
 
 If you install the package via `pyproject`/`uv`, the following console entrypoints are available as well: `leaf-disease`, `leaf-disease-train`, `leaf-disease-fine-tune`, `leaf-disease-evaluate`, `leaf-disease-predict`, `leaf-disease-figures` (see `[project.scripts]` in `pyproject.toml`).
 
 ### C) Dedicated Scripts
 
-You can run each pipeline script directly (activated `venv`), for example:
+You can run each pipeline script directly via `uv`, for example:
 
 ```bash
-python train_model.py
-python fine_tune_model.py  # optional full fine-tuning
-python evaluate_model.py
-python scripts/generate_figures.py
+uv run python train_model.py
+uv run python train_model.py --base-model DINOv3
+uv run python fine_tune_model.py  # optional full fine-tuning
+uv run python evaluate_model.py
+uv run python scripts/generate_figures.py
 ```
 
 ### D) CLI Prediction
@@ -224,6 +212,12 @@ Input (224x224x3)
 2. **Phase 2**: Unfreeze backbone and fine-tune with cosine LR schedule (10 epochs).
 3. **Optional**: Extended fine-tuning via `fine_tune_model.py`.
 
+Backbone selection:
+
+- Default: `EfficientNetV2S`
+- Alternatives: `EfficientNetV2B0/B1/B2/B3/S/M/L`
+- Experimental: `DINOv3` (requires `keras-hub`; set `LEAF_DINOV3_PRESET` for custom presets)
+
 ### SOTA Techniques
 
 | Technique | Reference |
@@ -235,6 +229,26 @@ Input (224x224x3)
 | AdamW + EMA | Loshchilov & Hutter, ICLR 2019 |
 | Cosine annealing with warmup | Loshchilov & Hutter, ICLR 2017 |
 | Mixed precision (float16) | Micikevicius et al., ICLR 2018 |
+
+### Evaluation, Reliability, and Safety Features
+
+- Calibration metrics: ECE, MCE, and Brier score.
+- Reliability diagrams for uncalibrated and temperature-scaled predictions.
+- Temperature scaling fitted on validation logits.
+- Bootstrap confidence intervals for accuracy, macro precision, macro recall, and macro F1.
+- McNemar statistical test versus a baseline model.
+- Confidence-threshold and entropy-based rejection metrics for deployment triage.
+- OOD detection via MSP and Mahalanobis distance with combined AUROC score.
+- MC Dropout uncertainty summary (mean variance and entropy for correct vs incorrect predictions).
+- Optional ensemble evaluation from multiple model paths.
+- Adverse-condition robustness suite on blur, brightness shift, Gaussian noise, fog, and occlusion.
+
+Primary implementation modules:
+
+- `evaluation/calibration.py`
+- `evaluation/reliability_plot.py`
+- `evaluation/robustness.py`
+- `evaluate_model.py`
 
 ### Model Artefact Resolution Order
 
@@ -272,6 +286,8 @@ Supported crops: Apple, Tomato, Corn, Grape, Potato, Rice, Pepper, Cherry, Peach
 | Validation Accuracy | 99.46% |
 | Macro F1-Score | 0.9901 |
 | Classes | 46 |
+
+Generated report artifacts now include reliability, statistical, OOD, uncertainty, and robustness sections in `reports/evaluation_report.json` and `reports/evaluation_report.md`.
 
 ### Visual Gallery
 
@@ -512,19 +528,32 @@ EPOCHS_PHASE1 = 5                # Head-only warm-up
 EPOCHS_PHASE2 = 10               # Full fine-tuning
 USE_MIXUP = True                 # MixUp regularisation
 USE_CUTMIX = True                # CutMix regularisation
+MIXUP_PROB = 0.4                 # Batch routing probability
+CUTMIX_PROB = 0.4                # Batch routing probability
+NORMAL_PROB = 0.2                # Batch routing probability
 USE_OPTIMIZER_EMA = True         # Exponential Moving Average
 USE_FOCAL_LOSS = False           # CrossEntropy preferred
 LABEL_SMOOTHING = 0.1
+CONFIDENCE_REJECT_THRESHOLD = 0.92
+ENTROPY_REJECT_THRESHOLD = 0.7
+OOD_MSP_THRESHOLD = 0.75
+MC_DROPOUT_PASSES = 10
+ROBUSTNESS_EVAL_ENABLED = True
 ```
 
 Runtime overrides:
 
 - `LEAF_SAVE_LOG_ARCHIVE=1` — enable timestamped archive logs
 - `LEAF_SAVE_RUN_MANIFESTS=1` — enable per-run manifest JSON files
+- `LEAF_MIXUP_PROB`, `LEAF_CUTMIX_PROB`, `LEAF_NORMAL_PROB` — augmentation routing probabilities
+- `LEAF_CONFIDENCE_REJECT_THRESHOLD`, `LEAF_ENTROPY_REJECT_THRESHOLD` — deployment rejection policy
+- `LEAF_OOD_MSP_THRESHOLD`, `LEAF_OOD_MAX_SAMPLES`, `LEAF_OOD_MAHALANOBIS_REG` — OOD controls
+- `LEAF_MC_DROPOUT_ENABLED`, `LEAF_MC_DROPOUT_PASSES`, `LEAF_MC_DROPOUT_MAX_SAMPLES` — uncertainty controls
+- `LEAF_ROBUSTNESS_EVAL_ENABLED`, `LEAF_ROBUSTNESS_MAX_SAMPLES`, `LEAF_ROBUSTNESS_*` — robustness suite controls
 
 ## Contributing
 
-- Run the unit tests: `pytest`
+- Run the unit tests: `uv run pytest`
 - Follow existing code style and add tests for new features.
 - If you modify the training pipeline, include run manifests by setting `LEAF_SAVE_RUN_MANIFESTS=1`.
 
@@ -537,7 +566,7 @@ Runtime overrides:
 ## Testing
 
 ```bash
-pytest
+uv run pytest
 ```
 
 ## Troubleshooting
@@ -546,6 +575,8 @@ pytest
 - **GPU not detected**: Verify TensorFlow/CUDA compatibility. Note: AMD integrated GPUs (e.g., Radeon 860M) are not supported by TensorFlow — only NVIDIA GPUs with CUDA are usable.
 - **Upload errors**: `/predict` accepts `.jpg`, `.jpeg`, `.png`, `.webp` (max 16 MB).
 - **OOM during training**: Reduce `BATCH_SIZE` in `config.py` or enable gradient accumulation via `ACCUMULATION_STEPS`.
+- **OOM with DINOv3**: Use a smaller batch size override, for example `LEAF_BATCH_SIZE=8 uv run python train_model.py --base-model DINOv3`.
+- **Long DINO runs with modest gains**: If validation metrics plateau for 2-3 epochs, stop and evaluate the latest checkpoint before continuing.
 
 ## License
 

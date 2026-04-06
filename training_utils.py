@@ -5,6 +5,7 @@ import math
 from typing import Dict, Optional, Sequence
 
 import tensorflow.keras as keras
+import tensorflow as tf
 # Provide a compatible `register_keras_serializable` decorator across TF/Keras versions.
 try:
     # Preferred import location
@@ -262,24 +263,106 @@ def cutmix_numpy_batch(
     mixed_labels = labels * lam_adj + labels[indices] * (1.0 - lam_adj)
     return mixed_images, mixed_labels
 
+
+def _build_randaugment_layer(num_layers: int, magnitude: float):
+    import keras_cv
+
+    kwargs = {
+        "value_range": (-1.0, 1.0),
+        "magnitude": float(magnitude),
+    }
+
+    candidates = [
+        {**kwargs, "augmentations_per_image": int(num_layers)},
+        {**kwargs, "num_layers": int(num_layers)},
+        kwargs,
+    ]
+    last_error = None
+    for candidate in candidates:
+        try:
+            return keras_cv.layers.RandAugment(**candidate)
+        except TypeError as exc:
+            last_error = exc
+
+    raise TypeError(f"Could not initialize RandAugment layer: {last_error}")
+
+
+def randaugment_generator(
+    base_generator,
+    num_layers: int = 2,
+    magnitude: float = 9.0,
+):
+    """Apply RandAugment to each batch yielded by a numpy generator."""
+    layer = _build_randaugment_layer(num_layers=int(num_layers), magnitude=float(magnitude))
+    while True:
+        images, labels = next(base_generator)
+        images_tf = tf.convert_to_tensor(images, dtype=tf.float32)
+        aug_images = layer(images_tf, training=True)
+        yield aug_images.numpy(), labels
+
+
+def resolve_augmentation_probabilities(
+    use_mixup: bool,
+    use_cutmix: bool,
+    mixup_prob: float,
+    cutmix_prob: float,
+    normal_prob: float,
+) -> tuple[float, float, float]:
+    """Resolve and normalize batch routing probabilities."""
+    mix = max(0.0, float(mixup_prob)) if use_mixup else 0.0
+    cut = max(0.0, float(cutmix_prob)) if use_cutmix else 0.0
+    normal = max(0.0, float(normal_prob))
+    total = mix + cut + normal
+    if total <= 0.0:
+        return 0.0, 0.0, 1.0
+    return mix / total, cut / total, normal / total
+
+
+def sample_augmentation_route(
+    use_mixup: bool,
+    use_cutmix: bool,
+    mixup_prob: float,
+    cutmix_prob: float,
+    normal_prob: float,
+) -> str:
+    """Sample one augmentation route: mixup, cutmix, or normal."""
+    mix_p, cut_p, _ = resolve_augmentation_probabilities(
+        use_mixup=use_mixup,
+        use_cutmix=use_cutmix,
+        mixup_prob=mixup_prob,
+        cutmix_prob=cutmix_prob,
+        normal_prob=normal_prob,
+    )
+    route_sample = np.random.random()
+    if route_sample < mix_p:
+        return "mixup"
+    if route_sample < (mix_p + cut_p):
+        return "cutmix"
+    return "normal"
+
 def mixup_cutmix_generator(
     base_generator,
     mixup_alpha: float = 0.3,
     cutmix_alpha: float = 1.0,
     use_mixup: bool = True,
     use_cutmix: bool = True,
+    mixup_prob: float = 0.4,
+    cutmix_prob: float = 0.4,
+    normal_prob: float = 0.2,
 ):
     
     while True:
         images, labels = next(base_generator)
-        if use_mixup and use_cutmix:
-            if np.random.random() < 0.5:
-                images, labels = mixup_numpy_batch(images, labels, alpha=mixup_alpha)
-            else:
-                images, labels = cutmix_numpy_batch(images, labels, alpha=cutmix_alpha)
-        elif use_mixup:
+        route = sample_augmentation_route(
+            use_mixup=use_mixup,
+            use_cutmix=use_cutmix,
+            mixup_prob=mixup_prob,
+            cutmix_prob=cutmix_prob,
+            normal_prob=normal_prob,
+        )
+        if route == "mixup":
             images, labels = mixup_numpy_batch(images, labels, alpha=mixup_alpha)
-        elif use_cutmix:
+        elif route == "cutmix":
             images, labels = cutmix_numpy_batch(images, labels, alpha=cutmix_alpha)
         yield images, labels
 
