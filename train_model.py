@@ -119,6 +119,13 @@ def main():
     random.seed(seed)
     keras.utils.set_random_seed(seed)
     print(f"Using run seed: {seed}")
+
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(INTRA_OP_THREADS)
+        tf.config.threading.set_inter_op_parallelism_threads(INTER_OP_THREADS)
+    except RuntimeError as exc:
+        print(f"TensorFlow threading config skipped: {exc}")
+
     configure_tensorflow()
 
 
@@ -130,8 +137,6 @@ def main():
     else:
         keras.mixed_precision.set_global_policy("float32")
 
-    tf.config.threading.set_intra_op_parallelism_threads(INTRA_OP_THREADS)
-    tf.config.threading.set_inter_op_parallelism_threads(INTER_OP_THREADS)
     os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
     logs_dir = os.path.join(os.path.dirname(CHECKPOINT_PATH), "logs")
     os.makedirs(logs_dir, exist_ok=True)
