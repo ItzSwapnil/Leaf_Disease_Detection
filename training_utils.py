@@ -335,7 +335,13 @@ def _build_randaugment_layer(
             keras.layers.RandomContrast(contrast_factor),
             keras.layers.Lambda(
                 lambda images: tf.clip_by_value(
-                    images + tf.random.uniform(tf.shape(images), -brightness_factor, brightness_factor),
+                    tf.cast(images, tf.float32)
+                    + tf.random.uniform(
+                        tf.shape(images),
+                        -brightness_factor,
+                        brightness_factor,
+                        dtype=tf.float32,
+                    ),
                     value_range[0],
                     value_range[1],
                 )
