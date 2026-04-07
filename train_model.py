@@ -29,7 +29,6 @@ from backbones import (
     list_backbone_names,
     resolve_backbone_factory,
     resolve_backbone_name,
-    resolve_preprocess_function,
 )
 from hardware import configure_tensorflow, get_training_strategy
 from training_progress import ProgressEmitter, IntervalMetricsLogger
@@ -38,12 +37,16 @@ from training_utils import (
     WarmupCosineSchedule,
     build_adamw_optimizer,
     build_loss,
-    compute_class_weights_from_flow,
-    mixup_cutmix_generator,
-    randaugment_generator,
+    compute_class_weights_from_directory,
+    count_class_samples_from_directory,
+    _build_randaugment_layer,
+    cutmix_batch_tf,
+    mixup_batch_tf,
+    resolve_augmentation_probabilities,
     resolve_step_count,
     tensorboard_available,
 )
+from preprocessing import preprocess_batch_for_model_tf
 from config import (
     IMG_SIZE, BATCH_SIZE, STEPS_PER_EPOCH, VALIDATION_STEPS,
     EPOCHS_PHASE1, EPOCHS_PHASE2, TRAIN_DIR, VAL_DIR,
@@ -82,20 +85,24 @@ def main():
         args.base_model or os.getenv("LEAF_BASE_MODEL"),
         default=BASE_MODEL,
     )
-    preprocess_fn = resolve_preprocess_function(backbone_name)
 
     env_batch_size = os.getenv("LEAF_BATCH_SIZE")
     batch_size = int(BATCH_SIZE)
+    gpu_count = len(tf.config.list_physical_devices("GPU"))
     if env_batch_size is not None:
         try:
             batch_size = max(1, int(env_batch_size))
         except Exception:
             batch_size = int(BATCH_SIZE)
     elif backbone_name == "DINOv3" and batch_size > 8:
-        # ViT backbones are significantly more memory-hungry than EfficientNet.
-        # Auto-downshift avoids common OOM failures on 8 GB laptop GPUs.
-        batch_size = 8
-        print("Auto-adjusted batch size to 8 for DINOv3. Override via LEAF_BATCH_SIZE if needed.")
+        target_batch = 32 if gpu_count > 1 else 16
+        if batch_size > target_batch:
+            batch_size = target_batch
+            print(
+                "Auto-adjusted batch size to "
+                f"{batch_size} for DINOv3 on {gpu_count} GPU(s). "
+                "Override via LEAF_BATCH_SIZE if needed."
+            )
 
     print(f"Training pipeline  |  Backbone: {backbone_name}")
     print("Target: 99%+ top-1 accuracy on PlantVillage-46")
@@ -130,44 +137,86 @@ def main():
     os.makedirs(logs_dir, exist_ok=True)
 
     # ── data loading ──────────────────────────────────────────────────────
-    ImageDataGenerator = tf.keras.preprocessing.image.ImageDataGenerator
-
-    train_datagen = ImageDataGenerator(
-        preprocessing_function=preprocess_fn,
-        rotation_range=40,
-        horizontal_flip=True,
-        vertical_flip=True,
-        width_shift_range=0.15,
-        height_shift_range=0.15,
-        zoom_range=0.25,
-        brightness_range=(0.7, 1.3),
-        shear_range=0.15,
-        channel_shift_range=20.0,
-        fill_mode="reflect",
-    )
-    val_datagen = ImageDataGenerator(preprocessing_function=preprocess_fn)
+    autotune = tf.data.AUTOTUNE
 
     print(f"\nLoading training data from: {TRAIN_DIR}")
     print(f"Image size: {IMG_SIZE}x{IMG_SIZE}  |  Batch size: {batch_size}")
 
-    train_gen = train_datagen.flow_from_directory(
+    train_ds = keras.utils.image_dataset_from_directory(
         TRAIN_DIR,
-        target_size=(IMG_SIZE, IMG_SIZE),
+        labels="inferred",
+        label_mode="categorical",
+        image_size=(IMG_SIZE, IMG_SIZE),
         batch_size=batch_size,
-        class_mode="categorical",
         shuffle=True,
+        seed=seed,
     )
-    val_gen = val_datagen.flow_from_directory(
+    val_ds = keras.utils.image_dataset_from_directory(
         VAL_DIR,
-        target_size=(IMG_SIZE, IMG_SIZE),
+        labels="inferred",
+        label_mode="categorical",
+        image_size=(IMG_SIZE, IMG_SIZE),
         batch_size=batch_size,
-        class_mode="categorical",
         shuffle=False,
     )
 
-    print(f"Training samples: {train_gen.samples}")
-    print(f"Validation samples: {val_gen.samples}")
+    train_class_names = list(train_ds.class_names) if getattr(train_ds, "class_names", None) else []
+    if not train_class_names:
+        train_class_names = sorted(
+            entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
+        )
+
+    class_indices = {name: idx for idx, name in enumerate(train_class_names)}
+    _, train_samples = count_class_samples_from_directory(str(TRAIN_DIR), train_class_names)
+    _, val_samples = count_class_samples_from_directory(str(VAL_DIR), train_class_names)
+
+    print(f"Training samples: {train_samples}")
+    print(f"Validation samples: {val_samples}")
     print(f"Number of classes: {NUM_CLASSES}")
+
+    train_options = tf.data.Options()
+    train_options.experimental_deterministic = False
+    train_ds = train_ds.with_options(train_options)
+
+    if USE_RANDAUGMENT:
+        print(
+            "Augmentation: "
+            f"RandAugment(layers={RANDAUGMENT_NUM_LAYERS}, magnitude={RANDAUGMENT_MAGNITUDE})"
+        )
+        randaugment_layer = None
+        try:
+            from training_utils import _build_randaugment_layer
+
+            randaugment_layer = _build_randaugment_layer(
+                num_layers=int(RANDAUGMENT_NUM_LAYERS),
+                magnitude=float(RANDAUGMENT_MAGNITUDE),
+                value_range=(0.0, 255.0),
+            )
+        except Exception as exc:
+            print(f"RandAugment unavailable; continuing without it: {exc}")
+
+        if randaugment_layer is not None:
+            train_ds = train_ds.map(
+                lambda images, labels: (randaugment_layer(images, training=True), labels),
+                num_parallel_calls=autotune,
+            )
+
+    train_ds = train_ds.map(
+        lambda images, labels: (
+            preprocess_batch_for_model_tf(images, backbone_name=backbone_name),
+            labels,
+        ),
+        num_parallel_calls=autotune,
+    )
+    val_ds = val_ds.map(
+        lambda images, labels: (
+            preprocess_batch_for_model_tf(images, backbone_name=backbone_name),
+            labels,
+        ),
+        num_parallel_calls=autotune,
+    )
+
+    val_ds = val_ds.prefetch(autotune)
 
     # ── model construction ────────────────────────────────────────────────
     strategy = get_training_strategy()
@@ -205,9 +254,8 @@ def main():
     print(f"Total parameters: {model.count_params():,}")
     trainable_params = sum(p.numpy().size for p in model.trainable_weights)
     print(f"Trainable parameters (phase 1): {trainable_params:,}")
-
-    steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_gen.samples, batch_size)
-    validation_steps = resolve_step_count(VALIDATION_STEPS, val_gen.samples, batch_size)
+    steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_samples, batch_size)
+    validation_steps = resolve_step_count(VALIDATION_STEPS, val_samples, batch_size)
 
     phase1_epochs = max(0, int(EPOCHS_PHASE1))
     phase2_epochs = max(0, int(EPOCHS_PHASE2))
@@ -215,13 +263,13 @@ def main():
 
     # Persist class-to-index mapping for inference
     with open(CLASS_INDICES_PATH, "w", encoding="utf-8") as class_file:
-        json.dump(train_gen.class_indices, class_file, indent=2)
+        json.dump(class_indices, class_file, indent=2)
 
     # ── class weighting and loss ──────────────────────────────────────────
-    class_weight = compute_class_weights_from_flow(train_gen)
+    class_weight = compute_class_weights_from_directory(str(TRAIN_DIR), train_class_names)
     if class_weight:
         print("Class-balanced weighting enabled (inverse-sqrt frequency).")
-        class_names_by_idx = {idx: name for name, idx in train_gen.class_indices.items()}
+        class_names_by_idx = {idx: name for name, idx in class_indices.items()}
         top = sorted(class_weight.items(), key=lambda item: item[1], reverse=True)[:6]
         print(
             "Highest class weights: "
@@ -231,18 +279,6 @@ def main():
     selected_loss, fit_class_weight = build_loss(class_weight)
 
     # ── mixup / cutmix ───────────────────────────────────────────────────
-    train_source = train_gen
-    if USE_RANDAUGMENT:
-        print(
-            "Augmentation: "
-            f"RandAugment(layers={RANDAUGMENT_NUM_LAYERS}, magnitude={RANDAUGMENT_MAGNITUDE})"
-        )
-        train_source = randaugment_generator(
-            train_source,
-            num_layers=int(RANDAUGMENT_NUM_LAYERS),
-            magnitude=float(RANDAUGMENT_MAGNITUDE),
-        )
-
     if USE_MIXUP or USE_CUTMIX:
         augmentation_desc = []
         if USE_MIXUP:
@@ -250,23 +286,51 @@ def main():
         if USE_CUTMIX:
             augmentation_desc.append(f"CutMix(alpha={CUTMIX_ALPHA})")
         print(f"Augmentation: {' + '.join(augmentation_desc)}")
-        print(
-            "Batch routing probabilities: "
-            f"MixUp={MIXUP_PROB:.2f}, CutMix={CUTMIX_PROB:.2f}, Normal={NORMAL_PROB:.2f}"
-        )
-        train_source = mixup_cutmix_generator(
-            train_gen,
-            mixup_alpha=float(MIXUP_ALPHA),
-            cutmix_alpha=float(CUTMIX_ALPHA),
+        mixup_prob, cutmix_prob, normal_prob = resolve_augmentation_probabilities(
             use_mixup=USE_MIXUP,
             use_cutmix=USE_CUTMIX,
             mixup_prob=float(MIXUP_PROB),
             cutmix_prob=float(CUTMIX_PROB),
             normal_prob=float(NORMAL_PROB),
         )
+        print(
+            "Batch routing probabilities: "
+            f"MixUp={mixup_prob:.2f}, CutMix={cutmix_prob:.2f}, Normal={normal_prob:.2f}"
+        )
         if fit_class_weight:
             print("MixUp/CutMix active: disabling class_weight to avoid label-mix conflicts.")
             fit_class_weight = None
+
+        def _apply_batch_augmentation(images, labels):
+            route_sample = tf.random.uniform([])
+            if USE_MIXUP and USE_CUTMIX:
+                return tf.cond(
+                    route_sample < mixup_prob,
+                    lambda: mixup_batch_tf(images, labels, alpha=float(MIXUP_ALPHA)),
+                    lambda: tf.cond(
+                        route_sample < (mixup_prob + cutmix_prob),
+                        lambda: cutmix_batch_tf(images, labels, alpha=float(CUTMIX_ALPHA)),
+                        lambda: (images, labels),
+                    ),
+                )
+            if USE_MIXUP:
+                return tf.cond(
+                    route_sample < mixup_prob,
+                    lambda: mixup_batch_tf(images, labels, alpha=float(MIXUP_ALPHA)),
+                    lambda: (images, labels),
+                )
+            return tf.cond(
+                route_sample < cutmix_prob,
+                lambda: cutmix_batch_tf(images, labels, alpha=float(CUTMIX_ALPHA)),
+                lambda: (images, labels),
+            )
+
+        train_ds = train_ds.map(_apply_batch_augmentation, num_parallel_calls=autotune)
+
+    train_ds = train_ds.prefetch(autotune)
+
+    train_source = train_ds
+    val_source = val_ds
 
     # ── callbacks ─────────────────────────────────────────────────────────
     checkpoint = BestModelSaver(
@@ -371,7 +435,7 @@ def main():
             run_start_time=run_start_time,
         )
 
-        print(f"\n--- Phase 1: warm-up on {train_gen.samples} training images ---")
+        print(f"\n--- Phase 1: warm-up on {train_samples} training images ---")
         phase1_callbacks: list[keras.callbacks.Callback] = [
             checkpoint, early_stopping,
             *csv_loggers_phase1, *interval_loggers_phase1,
@@ -383,7 +447,7 @@ def main():
         phase1_history = model.fit(
             train_source,
             steps_per_epoch=steps_per_epoch,
-            validation_data=val_gen,
+            validation_data=val_source,
             validation_steps=validation_steps,
             epochs=phase1_epochs,
             callbacks=phase1_callbacks,
@@ -449,7 +513,7 @@ def main():
         model.fit(
             train_source,
             steps_per_epoch=steps_per_epoch,
-            validation_data=val_gen,
+            validation_data=val_source,
             validation_steps=validation_steps,
             initial_epoch=completed_phase1_epochs,
             epochs=completed_phase1_epochs + phase2_epochs,

@@ -192,22 +192,30 @@ def compute_class_weights_from_flow(train_flow) -> Optional[Dict[int, float]]:
     inv = np.clip(inv, 0.5, 3.0)
     return {int(idx): float(w) for idx, w in enumerate(inv)}
 
+
+def count_class_samples_from_directory(
+    train_dir: str, class_names: Sequence[str]
+) -> tuple[Dict[int, int], int]:
+    """Count samples per class directory and return both per-class and total counts."""
+    import os
+
+    counts: Dict[int, int] = {}
+    total = 0
+    for class_index, class_name in enumerate(class_names):
+        class_dir = os.path.join(train_dir, class_name)
+        if not os.path.isdir(class_dir):
+            counts[int(class_index)] = 0
+            continue
+        sample_count = sum(1 for entry in os.scandir(class_dir) if entry.is_file())
+        counts[int(class_index)] = int(sample_count)
+        total += int(sample_count)
+    return counts, int(total)
+
 def compute_class_weights_from_directory(
     train_dir: str, class_names: Sequence[str]
 ) -> Optional[Dict[int, float]]:
-    
-    import os
-
-    counts = []
-    for class_name in class_names:
-        class_dir = os.path.join(train_dir, class_name)
-        if not os.path.isdir(class_dir):
-            counts.append(0.0)
-            continue
-        sample_count = sum(1 for entry in os.scandir(class_dir) if entry.is_file())
-        counts.append(float(sample_count))
-
-    count_arr = np.array(counts, dtype=np.float64)
+    counts_by_class, _ = count_class_samples_from_directory(train_dir, class_names)
+    count_arr = np.array([float(counts_by_class[idx]) for idx in sorted(counts_by_class)], dtype=np.float64)
     if count_arr.size == 0 or np.any(count_arr <= 0.0):
         return None
 
@@ -264,11 +272,55 @@ def cutmix_numpy_batch(
     return mixed_images, mixed_labels
 
 
-def _build_randaugment_layer(num_layers: int, magnitude: float):
+def cutmix_batch_tf(images, labels, alpha: float = 1.0):
+    """TensorFlow CutMix for batched image tensors."""
+    import tensorflow as tf
+
+    if alpha <= 0:
+        return images, labels
+
+    batch_size = tf.shape(images)[0]
+    lam = tf.random.gamma(shape=[], alpha=alpha)
+    indices = tf.random.shuffle(tf.range(batch_size))
+
+    height = tf.shape(images)[1]
+    width = tf.shape(images)[2]
+    cut_ratio = tf.sqrt(1.0 - lam)
+    cut_h = tf.cast(tf.cast(height, tf.float32) * cut_ratio, tf.int32)
+    cut_w = tf.cast(tf.cast(width, tf.float32) * cut_ratio, tf.int32)
+    cy = tf.random.uniform([], 0, height, dtype=tf.int32)
+    cx = tf.random.uniform([], 0, width, dtype=tf.int32)
+
+    y1 = tf.maximum(0, cy - cut_h // 2)
+    y2 = tf.minimum(height, cy + cut_h // 2)
+    x1 = tf.maximum(0, cx - cut_w // 2)
+    x2 = tf.minimum(width, cx + cut_w // 2)
+
+    row_mask = tf.logical_and(tf.range(height) >= y1, tf.range(height) < y2)
+    col_mask = tf.logical_and(tf.range(width) >= x1, tf.range(width) < x2)
+    box_mask = tf.cast(tf.logical_and(row_mask[:, None], col_mask[None, :]), images.dtype)
+    box_mask = tf.reshape(box_mask, [1, height, width, 1])
+    box_mask = tf.broadcast_to(box_mask, tf.shape(images))
+
+    shuffled = tf.gather(images, indices)
+    mixed_images = images * (1.0 - box_mask) + shuffled * box_mask
+
+    cut_area = tf.cast((y2 - y1) * (x2 - x1), tf.float32)
+    image_area = tf.cast(height * width, tf.float32)
+    lam_adj = 1.0 - cut_area / tf.maximum(image_area, 1.0)
+    mixed_labels = labels * lam_adj + tf.gather(labels, indices) * (1.0 - lam_adj)
+    return mixed_images, mixed_labels
+
+
+def _build_randaugment_layer(
+    num_layers: int,
+    magnitude: float,
+    value_range: tuple[float, float] = (-1.0, 1.0),
+):
     import keras_cv
 
     kwargs = {
-        "value_range": (-1.0, 1.0),
+        "value_range": value_range,
         "magnitude": float(magnitude),
     }
 
@@ -291,9 +343,14 @@ def randaugment_generator(
     base_generator,
     num_layers: int = 2,
     magnitude: float = 9.0,
+    value_range: tuple[float, float] = (-1.0, 1.0),
 ):
     """Apply RandAugment to each batch yielded by a numpy generator."""
-    layer = _build_randaugment_layer(num_layers=int(num_layers), magnitude=float(magnitude))
+    layer = _build_randaugment_layer(
+        num_layers=int(num_layers),
+        magnitude=float(magnitude),
+        value_range=value_range,
+    )
     while True:
         images, labels = next(base_generator)
         images_tf = tf.convert_to_tensor(images, dtype=tf.float32)
