@@ -43,7 +43,6 @@ def _build_dinov3_backbone(input_shape=(224, 224, 3), include_top: bool = False,
         # Keep HF URIs as optional fallbacks if user provides working access.
         "hf://facebook/dinov3-vit-base-patch16-224",
         "hf://facebook/dinov3-vit-small-patch16-224",
-        "hf://facebook/dinov2-vit-base-patch14-224",
     ]
     preset_candidates = [p for p in preset_candidates if p]
 

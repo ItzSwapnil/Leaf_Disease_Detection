@@ -4,6 +4,12 @@ import random
 import time
 import math
 import argparse
+
+# Some notebook environments export an inline backend string that may be
+# unsupported in script mode. Normalize before TensorFlow imports Keras.
+if (os.getenv("MPLBACKEND") or "").startswith("module://matplotlib_inline"):
+    os.environ["MPLBACKEND"] = "Agg"
+
 import tensorflow.keras as keras
 import tensorflow as tf
 import numpy as np
