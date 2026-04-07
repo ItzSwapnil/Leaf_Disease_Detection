@@ -315,35 +315,41 @@ def cutmix_batch_tf(images, labels, alpha: float = 1.0):
 def _build_randaugment_layer(
     num_layers: int,
     magnitude: float,
-    value_range: tuple[float, float] = (-1.0, 1.0),
+    value_range: tuple[float, float] = (0.0, 255.0),
 ):
-    import keras_cv
+    """Build a lightweight augmentation stack without external tfds/keras_cv dependencies."""
 
-    kwargs = {
-        "value_range": value_range,
-        "magnitude": float(magnitude),
-    }
+    magnitude = float(np.clip(magnitude, 0.0, 1.0))
+    rotation_factor = 0.08 * magnitude
+    translation_factor = 0.10 * magnitude
+    zoom_factor = 0.08 * magnitude
+    contrast_factor = 0.15 * magnitude
+    brightness_factor = 0.10 * magnitude
 
-    candidates = [
-        {**kwargs, "augmentations_per_image": int(num_layers)},
-        {**kwargs, "num_layers": int(num_layers)},
-        kwargs,
-    ]
-    last_error = None
-    for candidate in candidates:
-        try:
-            return keras_cv.layers.RandAugment(**candidate)
-        except TypeError as exc:
-            last_error = exc
-
-    raise TypeError(f"Could not initialize RandAugment layer: {last_error}")
+    return keras.Sequential(
+        [
+            keras.layers.RandomFlip("horizontal_and_vertical"),
+            keras.layers.RandomRotation(rotation_factor),
+            keras.layers.RandomTranslation(translation_factor, translation_factor),
+            keras.layers.RandomZoom(-zoom_factor, zoom_factor),
+            keras.layers.RandomContrast(contrast_factor),
+            keras.layers.Lambda(
+                lambda images: tf.clip_by_value(
+                    images + tf.random.uniform(tf.shape(images), -brightness_factor, brightness_factor),
+                    value_range[0],
+                    value_range[1],
+                )
+            ),
+        ],
+        name=f"randaugment_like_{int(num_layers)}",
+    )
 
 
 def randaugment_generator(
     base_generator,
     num_layers: int = 2,
     magnitude: float = 9.0,
-    value_range: tuple[float, float] = (-1.0, 1.0),
+    value_range: tuple[float, float] = (0.0, 255.0),
 ):
     """Apply RandAugment to each batch yielded by a numpy generator."""
     layer = _build_randaugment_layer(

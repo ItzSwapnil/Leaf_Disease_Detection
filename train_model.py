@@ -186,25 +186,17 @@ def main():
     if USE_RANDAUGMENT:
         print(
             "Augmentation: "
-            f"RandAugment(layers={RANDAUGMENT_NUM_LAYERS}, magnitude={RANDAUGMENT_MAGNITUDE})"
+            f"RandomFlip+RandomRotation+RandomTranslation+RandomZoom+RandomContrast"
         )
-        randaugment_layer = None
-        try:
-            from training_utils import _build_randaugment_layer
-
-            randaugment_layer = _build_randaugment_layer(
-                num_layers=int(RANDAUGMENT_NUM_LAYERS),
-                magnitude=float(RANDAUGMENT_MAGNITUDE),
-                value_range=(0.0, 255.0),
-            )
-        except Exception as exc:
-            print(f"RandAugment unavailable; continuing without it: {exc}")
-
-        if randaugment_layer is not None:
-            train_ds = train_ds.map(
-                lambda images, labels: (randaugment_layer(images, training=True), labels),
-                num_parallel_calls=autotune,
-            )
+        randaugment_layer = _build_randaugment_layer(
+            num_layers=int(RANDAUGMENT_NUM_LAYERS),
+            magnitude=float(RANDAUGMENT_MAGNITUDE),
+            value_range=(0.0, 255.0),
+        )
+        train_ds = train_ds.map(
+            lambda images, labels: (randaugment_layer(images, training=True), labels),
+            num_parallel_calls=autotune,
+        )
 
     train_ds = train_ds.map(
         lambda images, labels: (
