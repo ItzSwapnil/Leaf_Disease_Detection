@@ -1,19 +1,19 @@
 import gc
-import random
 import json
 import os
+import random
 import time
 from datetime import datetime
 
-import tensorflow.keras as keras
-import numpy as np
 import tensorflow as tf
+import tensorflow.keras as keras
 from tensorflow.keras.callbacks import CSVLogger, EarlyStopping, TensorBoard
 from tensorflow.keras.models import load_model
 
 from config import (
     ACCUMULATION_STEPS,
     CHECKPOINT_PATH,
+    EARLY_STOPPING_PATIENCE,
     EMA_MOMENTUM,
     FINAL_MODEL_PATH,
     FINE_TUNE_BATCH_SIZE,
@@ -27,22 +27,25 @@ from config import (
     INTER_OP_THREADS,
     INTRA_OP_THREADS,
     LR_SCHEDULER,
+    MIXUP_ALPHA,
+    OVERFITTING_STOP_ENABLED,
+    OVERFITTING_STOP_MIN_GAP,
+    OVERFITTING_STOP_PATIENCE,
     SAVE_LOG_ARCHIVE,
     SAVE_RUN_MANIFESTS,
     TRAIN_DIR,
     UNFREEZE_LAYERS,
     USE_MIXUP,
-    MIXUP_ALPHA,
     USE_OPTIMIZER_EMA,
     VAL_DIR,
     WEIGHT_DECAY,
 )
 from hardware import configure_tensorflow, get_training_strategy
-from preprocessing import preprocess_batch_for_model
+from preprocessing import preprocess_batch_for_model_tf
 from training_progress import IntervalMetricsLogger, ProgressEmitter
 from training_utils import (
     BestModelSaver,
-    OverfittingStopper,
+    PreOverfitRestorer,
     WarmupCosineSchedule,
     build_loss,
     compute_class_weights_from_directory,
@@ -52,17 +55,65 @@ from training_utils import (
 
 # Internal helpers
 
+
 def _resolve_model_path(*candidates: str) -> str:
-    
+
     for path in candidates:
         if path and os.path.exists(path):
             return path
     raise FileNotFoundError(f"No model file found in candidates: {candidates}")
 
+
+def _patch_vit_layer_init_for_compat() -> bool:
+    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
+    try:
+        from keras_hub.src.models.vit import vit_layers
+
+        layer_cls = vit_layers.ViTPatchingAndEmbedding
+    except Exception:
+        return False
+
+    if getattr(layer_cls, "_leaf_compat_patched", False):
+        return True
+
+    original_init = layer_cls.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        kwargs.pop("num_patches", None)
+        kwargs.pop("num_positions", None)
+        return original_init(self, *args, **kwargs)
+
+    layer_cls.__init__ = _patched_init
+    layer_cls._leaf_compat_patched = True
+    return True
+
+
+def _load_model_robust(model_path: str):
+    """Load model with compatibility fallbacks for DINO/KerasHub checkpoints."""
+    try:
+        return load_model(model_path, compile=False)
+    except TypeError as exc:
+        error_text = str(exc)
+        if "ViTPatchingAndEmbedding" not in error_text:
+            raise
+
+        if not _patch_vit_layer_init_for_compat():
+            raise RuntimeError(
+                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch. "
+                "Install a compatible keras-hub version or retrain with current stack."
+            ) from exc
+
+        print(
+            "Detected KerasHub ViT checkpoint compatibility mismatch; "
+            "retrying load with compatibility shim."
+        )
+        return load_model(model_path, compile=False)
+
+
 def _evaluate_val_accuracy(model_path, val_ds, validation_steps, strategy):
-    
+
     with strategy.scope():
-        eval_model = load_model(model_path)
+        eval_model = _load_model_robust(model_path)
     metrics = eval_model.evaluate(
         val_ds, steps=validation_steps, verbose=0, return_dict=True
     )
@@ -71,8 +122,9 @@ def _evaluate_val_accuracy(model_path, val_ds, validation_steps, strategy):
     gc.collect()
     return acc
 
+
 def _cardinality_int(ds):
-    
+
     card = tf.data.experimental.cardinality(ds)
     if card in (
         tf.data.experimental.UNKNOWN_CARDINALITY,
@@ -81,8 +133,15 @@ def _cardinality_int(ds):
         return None
     return int(card.numpy())
 
-def _prepare_subset(ds, fraction: float, max_batches: int, dataset_name: str):
-    
+
+def _prepare_subset(
+    ds,
+    fraction: float,
+    max_batches: int,
+    dataset_name: str,
+    repeat: bool = False,
+):
+
     total_batches = _cardinality_int(ds)
     max_batches = int(max_batches)
 
@@ -99,10 +158,14 @@ def _prepare_subset(ds, fraction: float, max_batches: int, dataset_name: str):
         f"  {dataset_name} subset: {chosen_batches} batch(es) "
         f"(fraction={fraction:.2f}, max={max_batches})"
     )
-    return ds.take(chosen_batches).repeat(), chosen_batches
+    subset = ds.take(chosen_batches)
+    if repeat:
+        subset = subset.repeat()
+    return subset, chosen_batches
+
 
 def _unfreeze_top_layers(model, target_count: int) -> int:
-    
+
     if int(target_count) < 0:
         for layer in model.layers:
             layer.trainable = True
@@ -125,10 +188,37 @@ def _unfreeze_top_layers(model, target_count: int) -> int:
 
     return changed
 
+
+def _infer_backbone_from_model(model) -> str:
+    """Best-effort backbone name from loaded model/layer names."""
+    model_name = str(getattr(model, "name", "")).lower()
+    layer_names = [str(getattr(layer, "name", "")).lower() for layer in model.layers]
+    haystack = " ".join([model_name, *layer_names])
+
+    if "dinov3" in haystack or "vit" in haystack:
+        return "DINOv3"
+    if "efficientnetv2b0" in haystack:
+        return "EfficientNetV2B0"
+    if "efficientnetv2b1" in haystack:
+        return "EfficientNetV2B1"
+    if "efficientnetv2b2" in haystack:
+        return "EfficientNetV2B2"
+    if "efficientnetv2b3" in haystack:
+        return "EfficientNetV2B3"
+    if "efficientnetv2s" in haystack:
+        return "EfficientNetV2S"
+    if "efficientnetv2m" in haystack:
+        return "EfficientNetV2M"
+    if "efficientnetv2l" in haystack:
+        return "EfficientNetV2L"
+    return "Unknown"
+
+
 # Main fine-tuning entrypoint
 
+
 def main():
-    
+
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     # Allow overriding the run seed via RUN_SEED env var for multi-seed experiments
     seed_env = os.environ.get("RUN_SEED")
@@ -141,6 +231,7 @@ def main():
     keras.utils.set_random_seed(seed)
     print(f"Using run seed: {seed}")
     configure_tensorflow()
+    gpu_count = len(tf.config.list_physical_devices("GPU"))
 
     # Setting precision directly for standard backbones
     if tf.config.list_physical_devices("GPU"):
@@ -149,8 +240,11 @@ def main():
     else:
         keras.mixed_precision.set_global_policy("float32")
 
-    tf.config.threading.set_intra_op_parallelism_threads(INTRA_OP_THREADS)
-    tf.config.threading.set_inter_op_parallelism_threads(INTER_OP_THREADS)
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(INTRA_OP_THREADS)
+        tf.config.threading.set_inter_op_parallelism_threads(INTER_OP_THREADS)
+    except RuntimeError as exc:
+        print(f"TensorFlow threading config skipped: {exc}")
     logs_dir = os.path.join(os.path.dirname(FINAL_MODEL_PATH), "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
@@ -158,13 +252,36 @@ def main():
     keras.backend.clear_session()
 
     print("SOTA Fine-Tuning Pipeline")
-    
+
     # ── load checkpoint ───────────────────────────────────────────────────
     checkpoint_source = _resolve_model_path(CHECKPOINT_PATH, FINAL_MODEL_PATH)
     print(f"Loading checkpoint: {checkpoint_source}")
     strategy = get_training_strategy()
     with strategy.scope():
-        model = load_model(checkpoint_source)
+        model = _load_model_robust(checkpoint_source)
+
+    latest_runs_path = os.path.join(logs_dir, "latest_runs.json")
+    configured_base_model = None
+    if os.path.exists(latest_runs_path):
+        try:
+            with open(latest_runs_path, "r", encoding="utf-8") as in_file:
+                latest_runs = json.load(in_file)
+            configured_base_model = (latest_runs.get("train") or {}).get("base_model")
+        except Exception:
+            configured_base_model = None
+    detected_backbone = _infer_backbone_from_model(model)
+    if detected_backbone == "Unknown":
+        raise ValueError(
+            "Unable to infer backbone from loaded fine-tune model. "
+            "Aborting to avoid incorrect preprocessing."
+        )
+    if configured_base_model:
+        print(
+            "Fine-tune backbone: "
+            f"{detected_backbone} (last train run recorded: {configured_base_model})"
+        )
+    else:
+        print(f"Fine-tune backbone: {detected_backbone}")
 
     # ── layer unfreezing ──────────────────────────────────────────────────
     if int(FINE_TUNE_UNFREEZE_LAYERS) < 0 or int(UNFREEZE_LAYERS) < 0:
@@ -179,6 +296,16 @@ def main():
 
     # ── data pipeline ─────────────────────────────────────────────────────
     batch_size = int(FINE_TUNE_BATCH_SIZE)
+    env_ft_batch_size = os.getenv("LEAF_FINE_TUNE_BATCH_SIZE")
+    if env_ft_batch_size is None and detected_backbone == "DINOv3" and batch_size > 8:
+        target_batch = 32 if gpu_count > 1 else 16
+        if batch_size > target_batch:
+            batch_size = target_batch
+            print(
+                "Auto-adjusted fine-tune batch size to "
+                f"{batch_size} for DINOv3 on {gpu_count} GPU(s). "
+                "Override via LEAF_FINE_TUNE_BATCH_SIZE if needed."
+            )
     autotune = tf.data.AUTOTUNE
 
     train_ds = keras.utils.image_dataset_from_directory(
@@ -188,6 +315,7 @@ def main():
         image_size=(IMG_SIZE, IMG_SIZE),
         batch_size=batch_size,
         shuffle=True,
+        seed=seed,
     )
     val_ds = keras.utils.image_dataset_from_directory(
         VAL_DIR,
@@ -200,7 +328,10 @@ def main():
 
     def _prep(ds, training=False):
         mapped = ds.map(
-            lambda x, y: (preprocess_batch_for_model(x), y),
+            lambda x, y: (
+                preprocess_batch_for_model_tf(x, backbone_name=detected_backbone),
+                y,
+            ),
             num_parallel_calls=autotune,
         )
         if training and USE_MIXUP:
@@ -218,6 +349,7 @@ def main():
         fraction=float(FINE_TUNE_DATA_FRACTION),
         max_batches=int(FINE_TUNE_MAX_STEPS_PER_EPOCH),
         dataset_name="train",
+        repeat=False,
     )
     val_gen, validation_steps = _prepare_subset(
         val_gen,
@@ -267,12 +399,13 @@ def main():
             "use_ema": USE_OPTIMIZER_EMA,
             "ema_momentum": EMA_MOMENTUM,
         }
-        if "gradient_accumulation_steps" in inspect.signature(
-            keras.optimizers.AdamW
-        ).parameters:
-            optimizer_kwargs["gradient_accumulation_steps"] = max(
-                1, int(ACCUMULATION_STEPS)
-            )
+        accumulation_steps = int(ACCUMULATION_STEPS)
+        if (
+            accumulation_steps >= 2
+            and "gradient_accumulation_steps"
+            in inspect.signature(keras.optimizers.AdamW).parameters
+        ):
+            optimizer_kwargs["gradient_accumulation_steps"] = accumulation_steps
 
         if USE_OPTIMIZER_EMA:
             print(f"AdamW EMA enabled (momentum={EMA_MOMENTUM}).")
@@ -303,13 +436,25 @@ def main():
     )
     early_stopping = EarlyStopping(
         monitor="val_accuracy",
-        patience=3,
+        patience=int(EARLY_STOPPING_PATIENCE),
         min_delta=0.001,
         mode="max",
         restore_best_weights=True,
         verbose=1,
     )
-    overfit_stopper = OverfittingStopper(min_gap=0.05, patience=2, verbose=1)
+    overfit_stopper = None
+    if OVERFITTING_STOP_ENABLED:
+        overfit_stopper = PreOverfitRestorer(
+            min_gap=float(OVERFITTING_STOP_MIN_GAP),
+            patience=int(OVERFITTING_STOP_PATIENCE),
+            verbose=1,
+            save_path=FINAL_MODEL_PATH,
+        )
+        print(
+            "Overfitting stop enabled: "
+            f"min_gap={OVERFITTING_STOP_MIN_GAP:.3f}, "
+            f"patience={int(OVERFITTING_STOP_PATIENCE)}"
+        )
 
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_id = f"fine_tune_{run_stamp}"
@@ -319,8 +464,6 @@ def main():
     ft_interval_archive = os.path.join(
         logs_dir, f"fine_tune_interval_history_{run_stamp}.csv"
     )
-    latest_runs_path = os.path.join(logs_dir, "latest_runs.json")
-
     latest_runs = {}
     if os.path.exists(latest_runs_path):
         try:
@@ -336,15 +479,19 @@ def main():
 
     interval_loggers = [
         IntervalMetricsLogger(
-            ft_interval_latest, points_per_epoch=12,
-            stage="fine_tuning", run_id=run_id,
+            ft_interval_latest,
+            points_per_epoch=12,
+            stage="fine_tuning",
+            run_id=run_id,
         ),
     ]
     if SAVE_LOG_ARCHIVE:
         interval_loggers.append(
             IntervalMetricsLogger(
-                ft_interval_archive, points_per_epoch=12,
-                stage="fine_tuning", run_id=run_id,
+                ft_interval_archive,
+                points_per_epoch=12,
+                stage="fine_tuning",
+                run_id=run_id,
             )
         )
 
@@ -358,7 +505,9 @@ def main():
     if tensorboard_available():
         tensorboard = TensorBoard(
             log_dir=os.path.join(logs_dir, "fine_tune_tensorboard"),
-            histogram_freq=1, update_freq="epoch", write_graph=False,
+            histogram_freq=1,
+            update_freq="epoch",
+            write_graph=False,
         )
     else:
         print("TensorBoard not installed; skipping TensorBoard callback.")
@@ -384,9 +533,13 @@ def main():
         callbacks=[
             cb
             for cb in [
-                checkpoint, early_stopping, overfit_stopper,
-                *csv_loggers, *interval_loggers,
-                tensorboard, progress,
+                checkpoint,
+                early_stopping,
+                overfit_stopper,
+                *csv_loggers,
+                *interval_loggers,
+                tensorboard,
+                progress,
             ]
             if cb is not None
         ],
@@ -397,7 +550,7 @@ def main():
     # ── finalise ──────────────────────────────────────────────────────────
     gc.collect()
     best_model_source = _resolve_model_path(FINAL_MODEL_PATH)
-    model = load_model(best_model_source)
+    model = _load_model_robust(best_model_source)
     model.save(FINAL_MODEL_PATH)
 
     fine_tune_manifest = {
@@ -421,14 +574,15 @@ def main():
     if SAVE_RUN_MANIFESTS or SAVE_LOG_ARCHIVE:
         with open(
             os.path.join(logs_dir, f"fine_tune_run_manifest_{run_stamp}.json"),
-            "w", encoding="utf-8",
+            "w",
+            encoding="utf-8",
         ) as out_file:
             json.dump(fine_tune_manifest, out_file, indent=2)
     with open(latest_runs_path, "w", encoding="utf-8") as out_file:
         json.dump(latest_runs, out_file, indent=2)
     print("Fine-tuning complete")
     print(f"Best model saved to: {FINAL_MODEL_PATH}")
-    
+
 
 if __name__ == "__main__":
     main()

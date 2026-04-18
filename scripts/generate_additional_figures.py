@@ -6,6 +6,9 @@ This script produces PNG-only outputs with no synthetic fallback data.
 
 from __future__ import annotations
 
+import argparse
+import csv
+import json
 import math
 import random
 import sys
@@ -24,8 +27,8 @@ import seaborn as sns
 import tensorflow as tf
 from PIL import Image
 from sklearn.metrics import auc, roc_curve
-from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
+from tensorflow.keras.models import load_model
 
 from config import (
     CUTMIX_ALPHA,
@@ -33,19 +36,18 @@ from config import (
     IMG_SIZE,
     LABEL_SMOOTHING,
     MIXUP_ALPHA,
-    TEST_DIR,
     TRAIN_DIR,
     USE_CUTMIX,
     USE_MIXUP,
     VAL_DIR,
 )
 from model_paths import resolve_keras_model_path
-from preprocessing import preprocess_batch_for_model
+from preprocessing import preprocess_batch_for_model_tf
 from training_utils import (
     WarmupCosineSchedule,
     cutmix_numpy_batch,
-    mixup_numpy_batch,
     mixup_cutmix_generator,
+    mixup_numpy_batch,
 )
 
 PLOTS_DIR = ROOT / "plots"
@@ -55,6 +57,7 @@ MAX_DPI = 600
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 sns.set_theme(style="whitegrid")
 RNG = random.Random(42)
+MODEL_PATH_OVERRIDE: str | None = None
 
 
 def _save(fig: plt.Figure, name: str) -> None:
@@ -119,7 +122,9 @@ def _train_flow_for_labels(batch_size: int = 256):
     )
 
 
-def _load_training_flow_batch(batch_size: int = 8) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def _load_training_flow_batch(
+    batch_size: int = 8,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Load one training-style batch from the exact datagen pipeline."""
     image_datagen = tf.keras.preprocessing.image.ImageDataGenerator(
         preprocessing_function=preprocess_input,
@@ -230,23 +235,35 @@ def _slugify(text: str) -> str:
     return "".join(ch.lower() if ch.isalnum() else "_" for ch in text).strip("_")
 
 
-def _load_same_class_batch(batch_size: int = 8) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def _load_same_class_batch(
+    batch_size: int = 8,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Load a batch from a single class so shape/style remain comparable."""
     class_dirs = [p for p in sorted(DATASET_TRAIN.iterdir()) if p.is_dir()]
     eligible = []
     for class_dir in class_dirs:
-        files = [f for f in class_dir.iterdir() if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
+        files = [
+            f
+            for f in class_dir.iterdir()
+            if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ]
         if len(files) >= batch_size:
             eligible.append((class_dir, files))
     if not eligible:
-        raise SystemExit("No class has enough images for same-class augmentation preview.")
+        raise SystemExit(
+            "No class has enough images for same-class augmentation preview."
+        )
 
     class_dir, files = RNG.choice(eligible)
     chosen = RNG.sample(files, batch_size)
 
     images = []
     for path in chosen:
-        img = Image.open(path).convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.Resampling.BICUBIC)
+        img = (
+            Image.open(path)
+            .convert("RGB")
+            .resize((IMG_SIZE, IMG_SIZE), Image.Resampling.BICUBIC)
+        )
         images.append(np.asarray(img, dtype=np.float32))
     images_np = np.stack(images, axis=0)
 
@@ -274,8 +291,11 @@ def _load_eval_data(split_dir: Path):
     return tf.concat(images, axis=0), tf.concat(labels, axis=0), ds.class_names
 
 
-def _predict_eval_split(model, split_dir: Path, batch_size: int = 32) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def _predict_eval_split(
+    model, split_dir: Path, batch_size: int = 32
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Run evaluation prediction in batches to avoid large host/GPU allocations."""
+    backbone_name = _infer_backbone_from_model(model)
     ds = tf.keras.utils.image_dataset_from_directory(
         split_dir,
         labels="inferred",
@@ -288,7 +308,10 @@ def _predict_eval_split(model, split_dir: Path, batch_size: int = 32) -> tuple[n
     pred_batches = []
     label_batches = []
     for batch_images, batch_labels in ds:
-        batch_preds = model.predict(preprocess_batch_for_model(batch_images), verbose=0)
+        batch_preds = model.predict(
+            preprocess_batch_for_model_tf(batch_images, backbone_name=backbone_name),
+            verbose=0,
+        )
         pred_batches.append(batch_preds.astype(np.float32))
         label_batches.append(batch_labels.numpy().astype(np.float32))
 
@@ -297,12 +320,63 @@ def _predict_eval_split(model, split_dir: Path, batch_size: int = 32) -> tuple[n
     return predictions, labels, ds.class_names
 
 
+def _patch_vit_layer_init_for_compat() -> bool:
+    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
+    try:
+        from keras_hub.src.models.vit import vit_layers
+
+        layer_cls = vit_layers.ViTPatchingAndEmbedding
+    except Exception:
+        return False
+
+    if getattr(layer_cls, "_leaf_compat_patched", False):
+        return True
+
+    original_init = layer_cls.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        kwargs.pop("num_patches", None)
+        kwargs.pop("num_positions", None)
+        return original_init(self, *args, **kwargs)
+
+    layer_cls.__init__ = _patched_init
+    layer_cls._leaf_compat_patched = True
+    return True
+
+
 def _load_model():
-    model_path = resolve_keras_model_path([FINAL_MODEL_PATH])
-    return load_model(
-        model_path,
-        custom_objects={"WarmupCosineSchedule": WarmupCosineSchedule},
+    path_candidates = (
+        [MODEL_PATH_OVERRIDE] if MODEL_PATH_OVERRIDE else [FINAL_MODEL_PATH]
     )
+    model_path = resolve_keras_model_path(path_candidates)
+    custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
+    try:
+        return load_model(model_path, custom_objects=custom_objects)
+    except TypeError as exc:
+        if "ViTPatchingAndEmbedding" not in str(exc):
+            raise
+        if not _patch_vit_layer_init_for_compat():
+            raise RuntimeError(
+                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch."
+            ) from exc
+        print("Detected KerasHub ViT compatibility mismatch; retrying with shim.")
+        return load_model(model_path, custom_objects=custom_objects)
+
+
+def _infer_backbone_from_model(model) -> str:
+    name = str(getattr(model, "name", "") or "").lower()
+    if "dino" in name or "vit" in name:
+        return "DINOv3"
+
+    for layer in model.layers:
+        layer_name = str(getattr(layer, "name", "") or "").lower()
+        class_name = layer.__class__.__name__.lower()
+        if "dino" in layer_name or "vit" in layer_name:
+            return "DINOv3"
+        if "vit" in class_name:
+            return "DINOv3"
+
+    return "EfficientNetV2S"
 
 
 def _make_cutout(images: np.ndarray, size_ratio: float = 0.35) -> np.ndarray:
@@ -445,8 +519,12 @@ def _load_aligned_train_batch(batch_size: int = 8):
 
 def plot_augmentation_overview() -> None:
     images_np, labels_np, class_names = _load_training_flow_batch(batch_size=8)
-    cut_images, cut_labels = cutmix_numpy_batch(images_np.copy(), labels_np.copy(), alpha=float(CUTMIX_ALPHA))
-    mix_images, mix_labels = mixup_numpy_batch(images_np.copy(), labels_np.copy(), alpha=float(MIXUP_ALPHA))
+    cut_images, cut_labels = cutmix_numpy_batch(
+        images_np.copy(), labels_np.copy(), alpha=float(CUTMIX_ALPHA)
+    )
+    mix_images, mix_labels = mixup_numpy_batch(
+        images_np.copy(), labels_np.copy(), alpha=float(MIXUP_ALPHA)
+    )
 
     show_idx = [0, 1]
     fig, axes = plt.subplots(2, 3, figsize=(18, 12), constrained_layout=True)
@@ -479,7 +557,10 @@ def plot_augmentation_overview() -> None:
             ax.set_yticks([])
         axes[row, 0].set_ylabel(f"Sample {row + 1}", fontsize=12)
 
-    fig.suptitle("Augmentation Overview: 2 Originals with their CutMix and MixUp versions", fontsize=16)
+    fig.suptitle(
+        "Augmentation Overview: 2 Originals with their CutMix and MixUp versions",
+        fontsize=16,
+    )
     _save(fig, "augmentations_overview.png")
 
 
@@ -488,7 +569,9 @@ def plot_mixup_examples() -> None:
         print("Skipping mixup figure: USE_MIXUP is disabled in config.")
         return
     images_np, labels_np, class_names = _load_training_flow_batch(batch_size=8)
-    mix_images, mix_labels = mixup_numpy_batch(images_np.copy(), labels_np.copy(), alpha=float(MIXUP_ALPHA))
+    mix_images, mix_labels = mixup_numpy_batch(
+        images_np.copy(), labels_np.copy(), alpha=float(MIXUP_ALPHA)
+    )
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     for ax, image, target in zip(axes.flat, mix_images, mix_labels):
@@ -505,13 +588,17 @@ def plot_cutmix_examples() -> None:
         print("Skipping cutmix figure: USE_CUTMIX is disabled in config.")
         return
     images_np, labels_np, class_names = _load_training_flow_batch(batch_size=8)
-    cut_images, cut_labels = cutmix_numpy_batch(images_np.copy(), labels_np.copy(), alpha=float(CUTMIX_ALPHA))
+    cut_images, cut_labels = cutmix_numpy_batch(
+        images_np.copy(), labels_np.copy(), alpha=float(CUTMIX_ALPHA)
+    )
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     for ax, image, target in zip(axes.flat, cut_images, cut_labels):
         ax.imshow(_to_display_image(image))
         pred_idx = int(np.argmax(target))
-        ax.set_title(f"CutMix target: {_class_name(class_names, pred_idx)}", fontsize=11)
+        ax.set_title(
+            f"CutMix target: {_class_name(class_names, pred_idx)}", fontsize=11
+        )
         ax.set_xticks([])
         ax.set_yticks([])
     _save(fig, "cutmix.png")
@@ -524,7 +611,10 @@ def plot_cutout_examples() -> None:
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     for ax, image, target in zip(axes.flat, cut_images, labels_np):
         ax.imshow(_to_display_image(image))
-        ax.set_title(f"Cutout (not in training): {_class_name(class_names, int(np.argmax(target)))}", fontsize=11)
+        ax.set_title(
+            f"Cutout (not in training): {_class_name(class_names, int(np.argmax(target)))}",
+            fontsize=11,
+        )
         ax.set_xticks([])
         ax.set_yticks([])
     _save(fig, "cutout.png")
@@ -532,7 +622,9 @@ def plot_cutout_examples() -> None:
 
 def plot_label_smoothing() -> None:
     flow = _train_flow_for_labels(batch_size=256)
-    class_names = [name for name, _ in sorted(flow.class_indices.items(), key=lambda item: item[1])]
+    class_names = [
+        name for name, _ in sorted(flow.class_indices.items(), key=lambda item: item[1])
+    ]
     class_ids = np.asarray(flow.classes, dtype=np.int32)
     num_classes = len(class_names)
     epsilon = float(LABEL_SMOOTHING)
@@ -547,11 +639,28 @@ def plot_label_smoothing() -> None:
 
     fig, ax = plt.subplots(figsize=(20, 8))
     indices = np.arange(num_classes)
-    ax.bar(indices - 0.2, hard_mean, width=0.4, label="One-hot targets (dataset mean)", color="#2a9d8f")
-    ax.bar(indices + 0.2, smooth_mean, width=0.4, label="Smoothed targets (dataset mean)", color="#e76f51")
+    ax.bar(
+        indices - 0.2,
+        hard_mean,
+        width=0.4,
+        label="One-hot targets (dataset mean)",
+        color="#2a9d8f",
+    )
+    ax.bar(
+        indices + 0.2,
+        smooth_mean,
+        width=0.4,
+        label="Smoothed targets (dataset mean)",
+        color="#e76f51",
+    )
     ax.set_xlim(-1, num_classes)
     ax.set_xticks(indices)
-    ax.set_xticklabels([c.replace("___", " / ").replace("_", " ") for c in class_names], rotation=75, ha="right", fontsize=7)
+    ax.set_xticklabels(
+        [c.replace("___", " / ").replace("_", " ") for c in class_names],
+        rotation=75,
+        ha="right",
+        fontsize=7,
+    )
     ax.set_ylabel("Mean target probability")
     ax.set_title(f"Label smoothing on full training labels (epsilon={epsilon:.3f})")
     ax.legend(frameon=False)
@@ -592,13 +701,17 @@ def plot_calibration_curve() -> None:
 
 def plot_roc_pr_per_class() -> None:
     model = _load_model()
-    predictions, y_true, class_names = _predict_eval_split(model, VAL_DIR, batch_size=32)
+    predictions, y_true, class_names = _predict_eval_split(
+        model, VAL_DIR, batch_size=32
+    )
 
     crop_names = sorted({_crop_name(name) for name in class_names})
     per_crop_curves: list[dict] = []
 
     for crop in crop_names:
-        class_indices = [index for index, name in enumerate(class_names) if _crop_name(name) == crop]
+        class_indices = [
+            index for index, name in enumerate(class_names) if _crop_name(name) == crop
+        ]
         if not class_indices:
             continue
 
@@ -635,7 +748,9 @@ def plot_roc_pr_per_class() -> None:
 
         fig_width = 11 + max(0, len(curves) - 4) * 0.4
         fig, ax = plt.subplots(figsize=(fig_width, 8.5))
-        ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1.2, color="#8e8e8e", alpha=0.8)
+        ax.plot(
+            [0, 1], [0, 1], linestyle="--", linewidth=1.2, color="#8e8e8e", alpha=0.8
+        )
 
         for curve in curves:
             ax.plot(
@@ -678,7 +793,9 @@ def plot_roc_pr_per_class() -> None:
     n_crops = len(per_crop_curves)
     n_cols = 3
     n_rows = int(math.ceil(n_crops / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 9, n_rows * 7), constrained_layout=True)
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=(n_cols * 9, n_rows * 7), constrained_layout=True
+    )
     axes = np.asarray(axes).reshape(-1)
 
     for ax_idx, crop_data in enumerate(per_crop_curves):
@@ -687,7 +804,9 @@ def plot_roc_pr_per_class() -> None:
         auc_values = [curve["auc"] for curve in curves]
         axis = axes[ax_idx]
 
-        axis.plot([0, 1], [0, 1], linestyle="--", linewidth=1.0, color="#8e8e8e", alpha=0.8)
+        axis.plot(
+            [0, 1], [0, 1], linestyle="--", linewidth=1.0, color="#8e8e8e", alpha=0.8
+        )
         for curve in curves:
             axis.plot(
                 curve["fpr"],
@@ -704,7 +823,13 @@ def plot_roc_pr_per_class() -> None:
         axis.set_xlabel("FPR", fontsize=9)
         axis.set_ylabel("TPR", fontsize=9)
         axis.tick_params(axis="both", labelsize=8)
-        axis.legend(loc="lower right", frameon=False, fontsize=6, title="Class (AUC)", title_fontsize=7)
+        axis.legend(
+            loc="lower right",
+            frameon=False,
+            fontsize=6,
+            title="Class (AUC)",
+            title_fontsize=7,
+        )
         axis.text(
             0.02,
             0.02,
@@ -719,17 +844,208 @@ def plot_roc_pr_per_class() -> None:
     for axis in axes[n_crops:]:
         axis.axis("off")
 
-    fig.suptitle("ROC curves grouped by crop (all classes together)", fontsize=15, fontweight="bold")
+    fig.suptitle(
+        "ROC curves grouped by crop (all classes together)",
+        fontsize=15,
+        fontweight="bold",
+    )
     _save(fig, "roc_all_crops_compiled.png")
 
 
+def plot_training_phase_timeline() -> None:
+    logs_dir = ROOT / "models" / "logs"
+    latest_runs_path = logs_dir / "latest_runs.json"
+
+    latest_runs = {}
+    if latest_runs_path.exists():
+        try:
+            latest_runs = json.loads(latest_runs_path.read_text(encoding="utf-8"))
+        except Exception:
+            latest_runs = {}
+
+    phase_defs = [
+        (
+            "train",
+            "Training",
+            logs_dir / "train_history.csv",
+            int((latest_runs.get("train") or {}).get("epochs_phase1") or 0)
+            + int((latest_runs.get("train") or {}).get("epochs_phase2") or 0),
+            1,
+        ),
+        (
+            "fine_tune",
+            "Fine-tuning",
+            logs_dir / "fine_tune_history.csv",
+            int((latest_runs.get("fine_tune") or {}).get("fine_tune_epochs") or 0),
+            1,
+        ),
+        (
+            "refine",
+            "Refining",
+            logs_dir / "refine_history.csv",
+            int((latest_runs.get("refine") or {}).get("epochs") or 0),
+            1,
+        ),
+    ]
+
+    rows = []
+    phase_offsets = {}
+    phase_lengths = {}
+    cursor = 0
+
+    for phase_key, phase_label, path, _, _ in phase_defs:
+        phase_offsets[phase_key] = cursor
+        local_rows = []
+        if path.exists():
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    try:
+                        local_epoch = int(row["epoch"]) + 1
+                        local_rows.append(
+                            {
+                                "epoch": cursor + local_epoch,
+                                "local_epoch": local_epoch,
+                                "phase": phase_key,
+                                "phase_label": phase_label,
+                                "accuracy": float(row.get("accuracy", "nan")),
+                                "val_accuracy": float(row.get("val_accuracy", "nan")),
+                                "loss": float(row.get("loss", "nan")),
+                                "val_loss": float(row.get("val_loss", "nan")),
+                            }
+                        )
+                    except Exception:
+                        continue
+        phase_lengths[phase_key] = len(local_rows)
+        rows.extend(local_rows)
+        cursor += len(local_rows)
+
+    if not rows:
+        return
+
+    epochs = np.array([row["epoch"] for row in rows], dtype=np.float64)
+    val_acc = np.array([row["val_accuracy"] for row in rows], dtype=np.float64)
+    val_loss = np.array([row["val_loss"] for row in rows], dtype=np.float64)
+
+    global_best_epoch = (
+        int(rows[int(np.nanargmax(val_acc))]["epoch"])
+        if np.any(np.isfinite(val_acc))
+        else None
+    )
+
+    phase_best_epochs = {}
+    for phase_key, phase_label, _, _, _ in phase_defs:
+        phase_rows = [row for row in rows if row["phase"] == phase_key]
+        if not phase_rows:
+            continue
+        best = max(phase_rows, key=lambda row: row["val_accuracy"])
+        phase_best_epochs[phase_key] = int(best["epoch"])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    ax1.plot(
+        epochs, val_acc, color="#d62828", linewidth=2.2, label="Validation Accuracy"
+    )
+    ax2.plot(epochs, val_loss, color="#264653", linewidth=2.2, label="Validation Loss")
+
+    phase_start_colors = {
+        "train": "#577590",
+        "fine_tune": "#f8961e",
+        "refine": "#9c89b8",
+    }
+
+    for phase_key, phase_label, _, cfg_epochs, warmup_epochs in phase_defs:
+        length = phase_lengths.get(phase_key, 0)
+        if length <= 0:
+            continue
+        start = phase_offsets[phase_key] + 1
+        warmup_end = phase_offsets[phase_key] + min(int(warmup_epochs), length)
+        phase_best = phase_best_epochs.get(phase_key)
+
+        for axis in (ax1, ax2):
+            axis.axvline(
+                start,
+                color=phase_start_colors.get(phase_key, "#6c757d"),
+                linestyle="--",
+                alpha=0.7,
+                linewidth=1.2,
+                label=f"{phase_label} Start",
+            )
+            axis.axvline(
+                warmup_end,
+                color="#7b2cbf",
+                linestyle="-.",
+                alpha=0.7,
+                linewidth=1.1,
+                label=f"{phase_label} Warmup End",
+            )
+            if phase_best is not None:
+                axis.axvline(
+                    phase_best,
+                    color="#2a9d8f",
+                    linestyle=":",
+                    alpha=0.85,
+                    linewidth=1.2,
+                    label=f"{phase_label} Best",
+                )
+            if cfg_epochs > 0 and length < cfg_epochs:
+                axis.axvline(
+                    phase_offsets[phase_key] + length,
+                    color="#c1121f",
+                    linestyle="--",
+                    alpha=0.8,
+                    linewidth=1.3,
+                    label=f"{phase_label} Restore Event",
+                )
+
+    if global_best_epoch is not None:
+        for axis in (ax1, ax2):
+            axis.axvline(
+                global_best_epoch,
+                color="#ff6d00",
+                linestyle="-",
+                alpha=0.9,
+                linewidth=1.5,
+                label=f"Global Best (epoch {global_best_epoch})",
+            )
+
+    ax1.set_title("Validation Accuracy Across All Training Phases")
+    ax1.set_xlabel("Global Epoch")
+    ax1.set_ylabel("Accuracy")
+    ax1.set_ylim(0.0, 1.0)
+    ax1.grid(True, alpha=0.3)
+
+    ax2.set_title("Validation Loss Across All Training Phases")
+    ax2.set_xlabel("Global Epoch")
+    ax2.set_ylabel("Loss")
+    ax2.grid(True, alpha=0.3)
+
+    handles, labels = ax1.get_legend_handles_labels()
+    dedup = {}
+    for handle, label in zip(handles, labels):
+        dedup[label] = handle
+    ax1.legend(dedup.values(), dedup.keys(), fontsize=8, loc="best")
+
+    _save(fig, "training_phase_timeline.png")
+
+
 def main() -> None:
+    global MODEL_PATH_OVERRIDE
+    parser = argparse.ArgumentParser(description="Generate additional figures.")
+    parser.add_argument(
+        "--model-path",
+        default=None,
+        help="Optional explicit model path for calibration/ROC plots.",
+    )
+    args = parser.parse_args()
+    MODEL_PATH_OVERRIDE = args.model_path
+
     plot_augmentation_overview()
     plot_mixup_examples()
     plot_cutmix_examples()
     plot_label_smoothing()
     plot_calibration_curve()
     plot_roc_pr_per_class()
+    plot_training_phase_timeline()
 
 
 if __name__ == "__main__":

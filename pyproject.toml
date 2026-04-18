@@ -1,7 +1,7 @@
 [project]
 name = "leaf-disease-detection"
 version = "2.1.0"
-description = "Plant leaf disease detection using EfficientNetV2-S transfer learning with SOTA augmentation and training strategies"
+description = "Plant leaf disease detection using EfficientNetV2-B0 transfer learning with SOTA augmentation and training strategies"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -25,6 +25,7 @@ dependencies = [
 leaf-disease = "main:main"
 leaf-disease-train = "train_model:main"
 leaf-disease-fine-tune = "fine_tune_model:main"
+leaf-disease-refine = "refine_model:main"
 leaf-disease-evaluate = "evaluate_model:main"
 leaf-disease-predict = "predict:main"
 leaf-disease-figures = "scripts.generate_figures:main"
@@ -36,4 +37,36 @@ link-mode = "copy"
 [dependency-groups]
 dev = [
 	"pytest>=8.4.2,<9",
+	"ruff>=0.15.10",
 ]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+"scripts/*_backup.py" = ["F841"]
+"scripts/*_v2.py" = ["F841"]
+"scripts/generate_ablation_figures.py" = ["E741", "F841"]
+"scripts/generate_evidence_figures.py" = ["F841"]
+"scripts/generate_phd_evidence_figures.py" = ["F841"]
+"scripts/generate_robustness_figures_model_based.py" = ["F841"]
+"scripts/generate_statistical_figures.py" = ["F841"]
+"scripts/generate_statistical_figures_model_based.py" = ["F841"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["scripts.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["config", "training_utils"]
+ignore_errors = true

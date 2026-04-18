@@ -35,7 +35,9 @@ def expected_calibration_error(
 
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     # np.digitize with right=True maps confidence=1.0 to the last bin.
-    bin_ids = np.clip(np.digitize(confidences, bin_edges, right=True) - 1, 0, n_bins - 1)
+    bin_ids = np.clip(
+        np.digitize(confidences, bin_edges, right=True) - 1, 0, n_bins - 1
+    )
 
     bin_accuracy: list[float] = []
     bin_confidence: list[float] = []
@@ -132,7 +134,17 @@ def entropy_rejection_metrics(
 
     entropy = prediction_entropy(probs)
     preds = np.argmax(probs, axis=1)
-    accepted = entropy <= float(threshold)
+    threshold_input = float(threshold)
+    entropy_max_bits = float(math.log2(max(2, probs.shape[1])))
+
+    if threshold_input <= 1.0:
+        threshold_ratio = threshold_input
+        threshold_bits = threshold_ratio * entropy_max_bits
+    else:
+        threshold_bits = threshold_input
+        threshold_ratio = threshold_bits / entropy_max_bits
+
+    accepted = entropy <= float(threshold_bits)
     accepted_count = int(np.sum(accepted))
 
     if accepted_count == 0:
@@ -144,13 +156,17 @@ def entropy_rejection_metrics(
     rejection_rate = 1.0 - coverage
 
     return {
-        "threshold_bits": float(threshold),
+        "threshold_input": threshold_input,
+        "threshold_bits": float(threshold_bits),
+        "threshold_ratio": float(threshold_ratio),
+        "entropy_max_bits": entropy_max_bits,
         "coverage": coverage,
         "accepted_accuracy": accepted_acc,
         "rejection_rate": rejection_rate,
         "accepted_count": accepted_count,
         "total_count": int(len(y_true)),
         "mean_entropy_bits": float(np.mean(entropy)),
+        "mean_entropy_ratio": float(np.mean(entropy) / max(entropy_max_bits, 1e-8)),
     }
 
 

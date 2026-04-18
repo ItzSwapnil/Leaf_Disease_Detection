@@ -10,7 +10,6 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SECTIONS_DIR = ROOT / "reports" / "tables"
 DATASET_COUNTS = ROOT / "reports" / "dataset_counts.json"
@@ -87,7 +86,9 @@ def _load_train_history() -> list[dict]:
 def _load_class_order() -> list[str]:
     class_indices_path = ROOT / "models" / "class_indices.json"
     class_indices = json.loads(_require(class_indices_path).read_text(encoding="utf-8"))
-    return [label for label, _ in sorted(class_indices.items(), key=lambda item: item[1])]
+    return [
+        label for label, _ in sorted(class_indices.items(), key=lambda item: item[1])
+    ]
 
 
 def _crop_of(label: str) -> str:
@@ -98,7 +99,7 @@ def _crop_of(label: str) -> str:
 
 def _split_table_rows(rows: list[str], parts: int) -> list[list[str]]:
     chunk_size = math.ceil(len(rows) / parts)
-    return [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+    return [rows[i : i + chunk_size] for i in range(0, len(rows), chunk_size)]
 
 
 def _parse_routes() -> list[tuple[str, str, str]]:
@@ -111,7 +112,9 @@ def _parse_routes() -> list[tuple[str, str, str]]:
     for path, methods, func_name in route_pattern.findall(text):
         clean_methods = "GET"
         if methods:
-            clean_methods = "/".join(part.strip().strip("'") for part in methods.split(","))
+            clean_methods = "/".join(
+                part.strip().strip("'") for part in methods.split(",")
+            )
         routes.append((path, clean_methods, func_name))
     return routes
 
@@ -135,9 +138,9 @@ def build_dataset_summary() -> str:
 \toprule
 Split & Images & Classes \\
 \midrule
-Train & {counts['train']['total_images']:,} & {classes} \\
-Validation & {counts['val']['total_images']:,} & {classes} \\
-Test & {counts['test']['total_images']:,} & {classes} \\
+Train & {counts["train"]["total_images"]:,} & {classes} \\
+Validation & {counts["val"]["total_images"]:,} & {classes} \\
+Test & {counts["test"]["total_images"]:,} & {classes} \\
 \midrule
 Total & {total:,} & {classes} \\
 \bottomrule
@@ -149,7 +152,9 @@ Total & {total:,} & {classes} \\
 def build_crop_summary() -> str:
     counts = _load_dataset_counts()
     report = _load_eval_report()
-    per_crop_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"train": 0, "val": 0, "test": 0, "classes": 0})
+    per_crop_counts: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"train": 0, "val": 0, "test": 0, "classes": 0}
+    )
     crop_metrics: dict[str, list[float]] = defaultdict(list)
     crop_support: dict[str, int] = defaultdict(int)
 
@@ -171,7 +176,9 @@ def build_crop_summary() -> str:
         crop_support[crop] += int(data["support"])
 
     rows = []
-    for crop in sorted(per_crop_counts, key=lambda key: per_crop_counts[key]["train"], reverse=True):
+    for crop in sorted(
+        per_crop_counts, key=lambda key: per_crop_counts[key]["train"], reverse=True
+    ):
         train_count = per_crop_counts[crop]["train"]
         val_count = per_crop_counts[crop]["val"]
         test_count = per_crop_counts[crop]["test"]
@@ -244,12 +251,36 @@ Setting & Value \\
 
 def build_system_inventory() -> str:
     rows = [
-        ("train_model.py", "Primary two-stage training pipeline", "Checkpoint, logs, class indices"),
-        ("evaluate_model.py", "Held-out validation evaluation", "JSON and Markdown reports"),
-        ("scripts/generate_figures.py", "Figure generation", "Confusion matrix, learning curves, prediction panels"),
-        ("predict.py", "CLI and Python inference entrypoint", "Predicted label and confidence"),
-        ("app.py", "Flask web UI and workflow control", "Upload, prediction, health, and control endpoints"),
-        ("tools/reporting/generate_report_tables.py", "Report table generator", "Compiled PDF via latexmk"),
+        (
+            "train_model.py",
+            "Primary two-stage training pipeline",
+            "Checkpoint, logs, class indices",
+        ),
+        (
+            "evaluate_model.py",
+            "Held-out validation evaluation",
+            "JSON and Markdown reports",
+        ),
+        (
+            "scripts/generate_figures.py",
+            "Figure generation",
+            "Confusion matrix, learning curves, prediction panels",
+        ),
+        (
+            "predict.py",
+            "CLI and Python inference entrypoint",
+            "Predicted label and confidence",
+        ),
+        (
+            "app.py",
+            "Flask web UI and workflow control",
+            "Upload, prediction, health, and control endpoints",
+        ),
+        (
+            "tools/reporting/generate_report_tables.py",
+            "Report table generator",
+            "Compiled PDF via latexmk",
+        ),
     ]
     body = "\n".join(
         f"{_latex_escape(module)} & {_latex_escape(role)} & {_latex_escape(output)} \\\\"
@@ -290,14 +321,14 @@ def build_metrics_table() -> str:
 \toprule
 Metric & Value \\
 \midrule
-Validation samples & {report['validation_samples']:,} \\
-Accuracy & {metrics['accuracy'] * 100:.2f}\% \\
-Macro precision & {metrics['macro_precision'] * 100:.2f}\% \\
-Macro recall & {metrics['macro_recall'] * 100:.2f}\% \\
-Macro F1 & {metrics['macro_f1'] * 100:.2f}\% \\
-Loss & {metrics['loss']:.4f} \\
-Best epoch & {best['epoch'] + 1} / {epochs} \\
-Best val.\ loss & {best['val_loss']:.4f} \\
+Validation samples & {report["validation_samples"]:,} \\
+Accuracy & {metrics["accuracy"] * 100:.2f}\% \\
+Macro precision & {metrics["macro_precision"] * 100:.2f}\% \\
+Macro recall & {metrics["macro_recall"] * 100:.2f}\% \\
+Macro F1 & {metrics["macro_f1"] * 100:.2f}\% \\
+Loss & {metrics["loss"]:.4f} \\
+Best epoch & {best["epoch"] + 1} / {epochs} \\
+Best val.\ loss & {best["val_loss"]:.4f} \\
 \bottomrule
 \end{{tabular}}
 \end{{table}}
@@ -373,9 +404,13 @@ def build_crop_metrics_table() -> str:
         support_by_crop[crop] += int(data["support"])
 
     rows = []
-    for crop in sorted(per_crop, key=lambda key: sum(per_crop[key]) / len(per_crop[key])):
+    for crop in sorted(
+        per_crop, key=lambda key: sum(per_crop[key]) / len(per_crop[key])
+    ):
         macro_f1 = 100.0 * sum(per_crop[crop]) / len(per_crop[crop])
-        rows.append(f"{_latex_escape(crop)} & {len(per_crop[crop])} & {support_by_crop[crop]} & {macro_f1:.2f} \\\\")
+        rows.append(
+            f"{_latex_escape(crop)} & {len(per_crop[crop])} & {support_by_crop[crop]} & {macro_f1:.2f} \\\\"
+        )
     body = "\n".join(rows)
     return rf"""
 % Auto-generated by tools/reporting/generate_report_tables.py
@@ -519,9 +554,18 @@ def main() -> None:
     _write(SECTIONS_DIR / "generated_crop_metrics.tex", build_crop_metrics_table())
     _write(SECTIONS_DIR / "generated_per_class.tex", build_per_class_table())
     _write(SECTIONS_DIR / "generated_confusions.tex", build_confusion_table())
-    _write(SECTIONS_DIR / "generated_endpoint_inventory.tex", build_endpoint_inventory_table())
-    _write(SECTIONS_DIR / "generated_full_dataset_inventory_longtable.tex", build_full_dataset_inventory_longtable())
-    _write(SECTIONS_DIR / "generated_full_per_class_metrics_longtable.tex", build_full_per_class_metric_longtable())
+    _write(
+        SECTIONS_DIR / "generated_endpoint_inventory.tex",
+        build_endpoint_inventory_table(),
+    )
+    _write(
+        SECTIONS_DIR / "generated_full_dataset_inventory_longtable.tex",
+        build_full_dataset_inventory_longtable(),
+    )
+    _write(
+        SECTIONS_DIR / "generated_full_per_class_metrics_longtable.tex",
+        build_full_per_class_metric_longtable(),
+    )
 
 
 if __name__ == "__main__":

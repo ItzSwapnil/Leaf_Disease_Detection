@@ -5,10 +5,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import pytest
 import numpy as np
+import pytest
 
-from backbones import list_backbone_names, resolve_backbone_name, resolve_preprocess_function
+from backbones import (
+    list_backbone_names,
+    resolve_backbone_name,
+    resolve_preprocess_function,
+)
 
 
 def test_backbone_registry_contains_efficientnetv2_variants():

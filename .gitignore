@@ -77,7 +77,15 @@ reports/deep_scan_*.txt
 *.synctex.gz
 
 # ── Docs ──────────────────────────────────────────
-Thesis/*
-TAI_LaTex/*
+Thesis/
+TAI_LaTex/
 
 
+.ruff_cache/
+.mypy_cache/
+.xxplotsxx/
+
+
+leaf-disease.ipynb
+
+reports/*

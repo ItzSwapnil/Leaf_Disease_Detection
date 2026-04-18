@@ -8,11 +8,12 @@ from tensorflow.keras.applications import (
     EfficientNetV2B1,
     EfficientNetV2B2,
     EfficientNetV2B3,
-    EfficientNetV2S,
     EfficientNetV2M,
     EfficientNetV2L,
 )
-from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as effnetv2_preprocess_input
+from tensorflow.keras.applications.efficientnet_v2 import (
+    preprocess_input as effnetv2_preprocess_input,
+)
 
 
 def _preprocess_dinov3(images: np.ndarray) -> np.ndarray:
@@ -23,7 +24,9 @@ def _preprocess_dinov3(images: np.ndarray) -> np.ndarray:
     return (arr - mean) / std
 
 
-def _build_dinov3_backbone(input_shape=(224, 224, 3), include_top: bool = False, weights: str = "imagenet"):
+def _build_dinov3_backbone(
+    input_shape=(224, 224, 3), include_top: bool = False, weights: str = "imagenet"
+):
     """Best-effort DINOv3 loader via KerasHub presets (experimental)."""
     del include_top, weights  # Not used by preset-based backbones.
 
@@ -60,7 +63,9 @@ def _build_dinov3_backbone(input_shape=(224, 224, 3), include_top: bool = False,
             for _ in range(2):
                 try:
                     model_or_classifier = constructor(preset)
-                    backbone = getattr(model_or_classifier, "backbone", model_or_classifier)
+                    backbone = getattr(
+                        model_or_classifier, "backbone", model_or_classifier
+                    )
                     if getattr(backbone, "input_shape", None) is None:
                         continue
                     return backbone
@@ -95,7 +100,6 @@ BACKBONE_REGISTRY = {
     "EfficientNetV2B1": EfficientNetV2B1,
     "EfficientNetV2B2": EfficientNetV2B2,
     "EfficientNetV2B3": EfficientNetV2B3,
-    "EfficientNetV2S": EfficientNetV2S,
     "EfficientNetV2M": EfficientNetV2M,
     "EfficientNetV2L": EfficientNetV2L,
     "DINOv3": _build_dinov3_backbone,
@@ -128,5 +132,7 @@ def resolve_backbone_name(requested: str | None, default: str) -> str:
         candidate = default
     if candidate not in BACKBONE_REGISTRY:
         supported = ", ".join(sorted(BACKBONE_REGISTRY.keys()))
-        raise ValueError(f"Unsupported backbone '{candidate}'. Supported backbones: {supported}.")
+        raise ValueError(
+            f"Unsupported backbone '{candidate}'. Supported backbones: {supported}."
+        )
     return candidate

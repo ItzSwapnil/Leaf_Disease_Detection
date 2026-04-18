@@ -5,9 +5,8 @@ import time
 
 import tensorflow.keras as keras
 
-class ProgressEmitter(keras.callbacks.Callback):
-    
 
+class ProgressEmitter(keras.callbacks.Callback):
     def __init__(
         self,
         stage: str,
@@ -84,9 +83,8 @@ class ProgressEmitter(keras.callbacks.Callback):
         self._emit(progress_pct, eta, epoch_done)
         self._last_emit_time = time.time()
 
-class IntervalMetricsLogger(keras.callbacks.Callback):
-    
 
+class IntervalMetricsLogger(keras.callbacks.Callback):
     def __init__(
         self,
         file_path: str,
@@ -117,15 +115,28 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
 
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
         mode = "a" if self.append else "w"
-        file_exists = os.path.exists(self.file_path) and os.path.getsize(self.file_path) > 0
+        file_exists = (
+            os.path.exists(self.file_path) and os.path.getsize(self.file_path) > 0
+        )
         self._fp = open(self.file_path, mode, newline="", encoding="utf-8")
         self._writer = csv.writer(self._fp)
         if (not self.append) or (not file_exists):
-            self._writer.writerow([
-                "run_id", "stage", "row_type", "global_step",
-                "epoch", "epoch_progress", "loss", "accuracy",
-                "val_loss", "val_accuracy", "learning_rate", "timestamp",
-            ])
+            self._writer.writerow(
+                [
+                    "run_id",
+                    "stage",
+                    "row_type",
+                    "global_step",
+                    "epoch",
+                    "epoch_progress",
+                    "loss",
+                    "accuracy",
+                    "val_loss",
+                    "val_accuracy",
+                    "learning_rate",
+                    "timestamp",
+                ]
+            )
         self._fp.flush()
 
     def _safe_float(self, value):
@@ -149,16 +160,22 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
         if self._writer is None:
             return
         logs = logs or {}
-        self._writer.writerow([
-            self.run_id, self.stage, row_type, self._global_step,
-            self._epoch + 1, round(float(epoch_progress), 6),
-            self._safe_float(logs.get("loss")),
-            self._safe_float(logs.get("accuracy")),
-            self._safe_float(logs.get("val_loss")),
-            self._safe_float(logs.get("val_accuracy")),
-            self._current_lr(),
-            round(time.time(), 3),
-        ])
+        self._writer.writerow(
+            [
+                self.run_id,
+                self.stage,
+                row_type,
+                self._global_step,
+                self._epoch + 1,
+                round(float(epoch_progress), 6),
+                self._safe_float(logs.get("loss")),
+                self._safe_float(logs.get("accuracy")),
+                self._safe_float(logs.get("val_loss")),
+                self._safe_float(logs.get("val_accuracy")),
+                self._current_lr(),
+                round(time.time(), 3),
+            ]
+        )
         self._fp.flush()
 
     def on_epoch_begin(self, epoch, logs=None):
@@ -166,9 +183,15 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
 
     def on_train_batch_end(self, batch, logs=None):
         self._global_step += 1
-        if self._steps and ((batch + 1) % self._interval != 0) and ((batch + 1) != self._steps):
+        if (
+            self._steps
+            and ((batch + 1) % self._interval != 0)
+            and ((batch + 1) != self._steps)
+        ):
             return
-        epoch_progress = min(1.0, float(batch + 1) / float(self._steps)) if self._steps else 0.0
+        epoch_progress = (
+            min(1.0, float(batch + 1) / float(self._steps)) if self._steps else 0.0
+        )
         self._write_row("batch", epoch_progress, logs)
 
     def on_epoch_end(self, epoch, logs=None):

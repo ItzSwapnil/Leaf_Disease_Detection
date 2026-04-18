@@ -11,7 +11,9 @@ def assess_leaf_likelihood(img_path: str, img_size: int) -> dict[str, Any]:
     """Heuristic leaf plausibility check to reject obvious non-leaf uploads."""
     try:
         with Image.open(img_path) as img:
-            arr = np.asarray(img.convert("RGB").resize((img_size, img_size)), dtype=np.float32)
+            arr = np.asarray(
+                img.convert("RGB").resize((img_size, img_size)), dtype=np.float32
+            )
 
         if arr.size == 0:
             return {
@@ -123,19 +125,25 @@ def evaluate_inference_safety(
     top1_prob = float(diagnostics.get("top1_prob", 0.0))
     margin = float(diagnostics.get("confidence_margin", 0.0))
     entropy_bits = float(diagnostics.get("entropy_bits", 0.0))
+    entropy_ratio = float(diagnostics.get("entropy_ratio", 0.0))
 
     leaf_score = float(leaf_validation.get("leaf_score", 0.0))
     vegetation_ratio = float(leaf_validation.get("vegetation_ratio", 0.0))
 
-    appears_non_leaf = (
-        leaf_score < float(non_leaf_leaf_score)
-        and vegetation_ratio < float(min_vegetation_ratio)
-    )
+    appears_non_leaf = leaf_score < float(
+        non_leaf_leaf_score
+    ) and vegetation_ratio < float(min_vegetation_ratio)
     weak_leaf_signal = leaf_score < float(weak_leaf_score)
 
     low_confidence = top1_prob < float(confidence_threshold)
     low_msp = top1_prob < float(msp_threshold)
-    high_entropy = entropy_bits > float(entropy_threshold_bits)
+    entropy_threshold_value = float(entropy_threshold_bits)
+    # Backward-compatible threshold mode:
+    # <= 1.0 means normalized entropy ratio, otherwise entropy in bits.
+    if entropy_threshold_value <= 1.0:
+        high_entropy = entropy_ratio > entropy_threshold_value
+    else:
+        high_entropy = entropy_bits > entropy_threshold_value
     low_margin = margin < float(min_margin)
 
     uncertainty_flags = {

@@ -1,7 +1,8 @@
 import tensorflow as tf
 
+
 def configure_tensorflow():
-    
+
     try:
         gpus = tf.config.list_physical_devices("GPU")
         for gpu in gpus:
@@ -26,8 +27,9 @@ def configure_tensorflow():
         print(f"Hardware configuration failed: {exc}")
     return tf.config.list_physical_devices()
 
+
 def get_compute_info() -> dict:
-    
+
     try:
         gpus = tf.config.list_physical_devices("GPU")
         cpus = tf.config.list_physical_devices("CPU")
@@ -61,8 +63,9 @@ def get_compute_info() -> dict:
             "error": str(exc),
         }
 
+
 def get_training_strategy():
-    
+
     gpus = tf.config.list_physical_devices("GPU")
     if len(gpus) > 1:
         print(f"Using MirroredStrategy across {len(gpus)} GPUs")

@@ -4,17 +4,39 @@ import subprocess
 import sys
 from pathlib import Path
 
-from backbones import list_backbone_names
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+TASK_CHOICES = [
+    "serve",
+    "train",
+    "fine_tune",
+    "refine",
+    "evaluate",
+    "visualize",
+    "resume",
+    "validate",
+]
+
+# Keep command-runner lightweight and independent from TensorFlow imports.
+BACKBONE_CHOICES = [
+    "EfficientNetV2B0",
+    "EfficientNetV2B1",
+    "EfficientNetV2B2",
+    "EfficientNetV2B3",
+    "EfficientNetV2M",
+    "EfficientNetV2L",
+    "DINOv3",
+]
+
+
 def _run_command(command, cwd, env=None):
-    
+
     try:
         completed = subprocess.run(command, cwd=str(cwd), check=False, env=env)
     except KeyboardInterrupt:
         return 130
     return completed.returncode
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -22,12 +44,10 @@ def main():
     )
     parser.add_argument(
         "task",
-        choices=[
-            "serve", "train", "fine_tune",
-            "evaluate", "visualize",
-            "resume", "validate",
-        ],
-        help="Task to execute",
+        nargs="?",
+        default="serve",
+        choices=TASK_CHOICES,
+        help="Task to execute (default: serve)",
     )
     parser.add_argument(
         "--archive-logs",
@@ -41,7 +61,7 @@ def main():
     )
     parser.add_argument(
         "--base-model",
-        choices=list_backbone_names(),
+        choices=BACKBONE_CHOICES,
         default=None,
         help="Backbone to use for train/resume tasks (passed through to train_model.py).",
     )
@@ -57,6 +77,7 @@ def main():
         "serve": PROJECT_ROOT / "app.py",
         "train": PROJECT_ROOT / "train_model.py",
         "fine_tune": PROJECT_ROOT / "fine_tune_model.py",
+        "refine": PROJECT_ROOT / "refine_model.py",
         "evaluate": PROJECT_ROOT / "evaluate_model.py",
         "visualize": PROJECT_ROOT / "scripts" / "generate_figures.py",
         "resume": PROJECT_ROOT / "fine_tune_model.py",
@@ -68,6 +89,7 @@ def main():
 
     command = [sys.executable, str(script_path)]
     child_env = dict(os.environ)
+    child_env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     if args.archive_logs:
         child_env["LEAF_SAVE_LOG_ARCHIVE"] = "1"
         child_env["LEAF_SAVE_RUN_MANIFESTS"] = "1"
@@ -79,6 +101,7 @@ def main():
         child_env["LEAF_BASE_MODEL"] = args.base_model
 
     raise SystemExit(_run_command(command, PROJECT_ROOT, env=child_env))
+
 
 if __name__ == "__main__":
     main()

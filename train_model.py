@@ -1,83 +1,110 @@
-import os
+import argparse
 import json
+import math
+import os
 import random
 import time
-import math
-import argparse
 
 # Some notebook environments export an inline backend string that may be
 # unsupported in script mode. Normalize before TensorFlow imports Keras.
 if (os.getenv("MPLBACKEND") or "").startswith("module://matplotlib_inline"):
     os.environ["MPLBACKEND"] = "Agg"
 
-import tensorflow.keras as keras
-import tensorflow as tf
-import numpy as np
 from datetime import datetime
 
+import tensorflow as tf
+import tensorflow.keras as keras
+from tensorflow.keras.callbacks import CSVLogger, EarlyStopping, TensorBoard
 from tensorflow.keras.layers import (
+    BatchNormalization,
     Dense,
+    Dropout,
     GlobalAveragePooling1D,
     GlobalAveragePooling2D,
-    Dropout,
-    BatchNormalization,
 )
 from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import EarlyStopping, TensorBoard, CSVLogger
 
 from backbones import (
     list_backbone_names,
     resolve_backbone_factory,
     resolve_backbone_name,
 )
+from config import (
+    BASE_MODEL,
+    BATCH_SIZE,
+    CHECKPOINT_PATH,
+    CLASS_INDICES_PATH,
+    CUTMIX_PROB,
+    DENSE_UNITS,
+    DROPOUT_RATE,
+    EARLY_STOPPING_PATIENCE,
+    EPOCHS_PHASE1,
+    EPOCHS_PHASE2,
+    IMG_SIZE,
+    INTER_OP_THREADS,
+    INTRA_OP_THREADS,
+    LABEL_SMOOTHING,
+    LEARNING_RATE_PHASE1,
+    LEARNING_RATE_PHASE2,
+    MIXUP_ALPHA,
+    MIXUP_PROB,
+    NORMAL_PROB,
+    NUM_CLASSES,
+    OVERFITTING_STOP_ENABLED,
+    OVERFITTING_STOP_MIN_GAP,
+    OVERFITTING_STOP_PATIENCE,
+    RANDAUGMENT_MAGNITUDE,
+    RANDAUGMENT_NUM_LAYERS,
+    SAVE_LOG_ARCHIVE,
+    SAVE_RUN_MANIFESTS,
+    STEPS_PER_EPOCH,
+    TRAIN_DATA_FRACTION,
+    TRAIN_DIR,
+    UNFREEZE_LAYERS,
+    USE_MIXUP,
+    USE_RANDAUGMENT,
+    VAL_DIR,
+    VALIDATION_STEPS,
+    WARMUP_EPOCHS,
+)
 from hardware import configure_tensorflow, get_training_strategy
-from training_progress import ProgressEmitter, IntervalMetricsLogger
+from preprocessing import preprocess_batch_for_model_tf
+from training_progress import IntervalMetricsLogger, ProgressEmitter
 from training_utils import (
     BestModelSaver,
+    PreOverfitRestorer,
     WarmupCosineSchedule,
+    _build_randaugment_layer,
     build_adamw_optimizer,
     build_loss,
     compute_class_weights_from_directory,
     count_class_samples_from_directory,
-    _build_randaugment_layer,
     cutmix_batch_tf,
     mixup_batch_tf,
     resolve_augmentation_probabilities,
     resolve_step_count,
     tensorboard_available,
 )
-from preprocessing import preprocess_batch_for_model_tf
-from config import (
-    IMG_SIZE, BATCH_SIZE, STEPS_PER_EPOCH, VALIDATION_STEPS,
-    EPOCHS_PHASE1, EPOCHS_PHASE2, TRAIN_DIR, VAL_DIR,
-    CHECKPOINT_PATH, INTRA_OP_THREADS, INTER_OP_THREADS,
-    DENSE_UNITS, DROPOUT_RATE, NUM_CLASSES, LABEL_SMOOTHING,
-    LEARNING_RATE_PHASE1, LEARNING_RATE_PHASE2,
-    EARLY_STOPPING_PATIENCE, UNFREEZE_LAYERS,
-    CLASS_INDICES_PATH, BASE_MODEL,
-    SAVE_LOG_ARCHIVE, SAVE_RUN_MANIFESTS,
-    USE_MIXUP, MIXUP_ALPHA,
-    USE_RANDAUGMENT, RANDAUGMENT_NUM_LAYERS, RANDAUGMENT_MAGNITUDE,
-    WARMUP_EPOCHS,
-    MIXUP_PROB, CUTMIX_PROB, NORMAL_PROB,
-)
 
 # Import optional sota augmentation flags with safe fallbacks
 try:
-    from config import USE_CUTMIX, CUTMIX_ALPHA
+    from config import CUTMIX_ALPHA, USE_CUTMIX
 except ImportError:
     USE_CUTMIX = False
     CUTMIX_ALPHA = 1.0
 
 # Main training entrypoint
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Leaf Disease Detection training pipeline")
+    parser = argparse.ArgumentParser(
+        description="Leaf Disease Detection training pipeline"
+    )
     parser.add_argument(
         "--base-model",
         choices=list_backbone_names(),
         default=None,
-        help="Backbone to use for training (defaults to LEAF_BASE_MODEL or EfficientNetV2S).",
+        help="Backbone to use for training (defaults to LEAF_BASE_MODEL or EfficientNetV2B0).",
     )
     args = parser.parse_args()
 
@@ -106,7 +133,7 @@ def main():
 
     print(f"Training pipeline  |  Backbone: {backbone_name}")
     print("Target: 99%+ top-1 accuracy on PlantVillage-46")
-    
+
     # Reproducibility
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     # Allow overriding the run seed via RUN_SEED env var for multi-seed experiments
@@ -127,8 +154,6 @@ def main():
         print(f"TensorFlow threading config skipped: {exc}")
 
     configure_tensorflow()
-
-
 
     # Mixed precision: halves gpu memory footprint with negligible accuracy loss
     if tf.config.list_physical_devices("GPU"):
@@ -165,14 +190,18 @@ def main():
         shuffle=False,
     )
 
-    train_class_names = list(train_ds.class_names) if getattr(train_ds, "class_names", None) else []
+    train_class_names = (
+        list(train_ds.class_names) if getattr(train_ds, "class_names", None) else []
+    )
     if not train_class_names:
         train_class_names = sorted(
             entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
         )
 
     class_indices = {name: idx for idx, name in enumerate(train_class_names)}
-    _, train_samples = count_class_samples_from_directory(str(TRAIN_DIR), train_class_names)
+    _, train_samples = count_class_samples_from_directory(
+        str(TRAIN_DIR), train_class_names
+    )
     _, val_samples = count_class_samples_from_directory(str(VAL_DIR), train_class_names)
 
     print(f"Training samples: {train_samples}")
@@ -186,7 +215,7 @@ def main():
     if USE_RANDAUGMENT:
         print(
             "Augmentation: "
-            f"RandomFlip+RandomRotation+RandomTranslation+RandomZoom+RandomContrast"
+            "RandomFlip+RandomRotation+RandomTranslation+RandomZoom+RandomContrast"
         )
         randaugment_layer = _build_randaugment_layer(
             num_layers=int(RANDAUGMENT_NUM_LAYERS),
@@ -251,7 +280,21 @@ def main():
     print(f"Total parameters: {model.count_params():,}")
     trainable_params = sum(p.numpy().size for p in model.trainable_weights)
     print(f"Trainable parameters (phase 1): {trainable_params:,}")
-    steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_samples, batch_size)
+    full_steps_per_epoch = resolve_step_count(
+        STEPS_PER_EPOCH, train_samples, batch_size
+    )
+    train_data_fraction = float(TRAIN_DATA_FRACTION)
+    if 0.0 < train_data_fraction < 1.0:
+        steps_per_epoch = max(
+            1, int(math.ceil(full_steps_per_epoch * train_data_fraction))
+        )
+        print(
+            "Training subset per epoch: "
+            f"{steps_per_epoch}/{full_steps_per_epoch} batches "
+            f"(fraction={train_data_fraction:.2f}, reshuffled each epoch)"
+        )
+    else:
+        steps_per_epoch = full_steps_per_epoch
     validation_steps = resolve_step_count(VALIDATION_STEPS, val_samples, batch_size)
 
     phase1_epochs = max(0, int(EPOCHS_PHASE1))
@@ -263,7 +306,9 @@ def main():
         json.dump(class_indices, class_file, indent=2)
 
     # ── class weighting and loss ──────────────────────────────────────────
-    class_weight = compute_class_weights_from_directory(str(TRAIN_DIR), train_class_names)
+    class_weight = compute_class_weights_from_directory(
+        str(TRAIN_DIR), train_class_names
+    )
     if class_weight:
         print("Class-balanced weighting enabled (inverse-sqrt frequency).")
         class_names_by_idx = {idx: name for name, idx in class_indices.items()}
@@ -295,7 +340,9 @@ def main():
             f"MixUp={mixup_prob:.2f}, CutMix={cutmix_prob:.2f}, Normal={normal_prob:.2f}"
         )
         if fit_class_weight:
-            print("MixUp/CutMix active: disabling class_weight to avoid label-mix conflicts.")
+            print(
+                "MixUp/CutMix active: disabling class_weight to avoid label-mix conflicts."
+            )
             fit_class_weight = None
 
         def _apply_batch_augmentation(images, labels):
@@ -306,7 +353,9 @@ def main():
                     lambda: mixup_batch_tf(images, labels, alpha=float(MIXUP_ALPHA)),
                     lambda: tf.cond(
                         route_sample < (mixup_prob + cutmix_prob),
-                        lambda: cutmix_batch_tf(images, labels, alpha=float(CUTMIX_ALPHA)),
+                        lambda: cutmix_batch_tf(
+                            images, labels, alpha=float(CUTMIX_ALPHA)
+                        ),
                         lambda: (images, labels),
                     ),
                 )
@@ -340,13 +389,23 @@ def main():
         restore_best_weights=True,
         verbose=1,
     )
+    if OVERFITTING_STOP_ENABLED:
+        print(
+            "Overfitting stop enabled: "
+            f"min_gap={OVERFITTING_STOP_MIN_GAP:.3f}, "
+            f"patience={int(OVERFITTING_STOP_PATIENCE)}"
+        )
 
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_id = f"train_{run_stamp}"
     train_history_latest_path = os.path.join(logs_dir, "train_history.csv")
-    train_history_archive_path = os.path.join(logs_dir, f"train_history_{run_stamp}.csv")
+    train_history_archive_path = os.path.join(
+        logs_dir, f"train_history_{run_stamp}.csv"
+    )
     train_interval_latest_path = os.path.join(logs_dir, "train_interval_history.csv")
-    train_interval_archive_path = os.path.join(logs_dir, f"train_interval_history_{run_stamp}.csv")
+    train_interval_archive_path = os.path.join(
+        logs_dir, f"train_interval_history_{run_stamp}.csv"
+    )
     latest_runs_path = os.path.join(logs_dir, "latest_runs.json")
 
     csv_loggers_phase1 = [CSVLogger(train_history_latest_path, append=False)]
@@ -358,28 +417,40 @@ def main():
 
     interval_loggers_phase1 = [
         IntervalMetricsLogger(
-            train_interval_latest_path, points_per_epoch=12,
-            stage="train_full", append=False, run_id=run_id,
+            train_interval_latest_path,
+            points_per_epoch=12,
+            stage="train_full",
+            append=False,
+            run_id=run_id,
         ),
     ]
     if SAVE_LOG_ARCHIVE:
         interval_loggers_phase1.append(
             IntervalMetricsLogger(
-                train_interval_archive_path, points_per_epoch=12,
-                stage="train_full", append=False, run_id=run_id,
+                train_interval_archive_path,
+                points_per_epoch=12,
+                stage="train_full",
+                append=False,
+                run_id=run_id,
             )
         )
     interval_loggers_phase2 = [
         IntervalMetricsLogger(
-            train_interval_latest_path, points_per_epoch=12,
-            stage="train_full", append=True, run_id=run_id,
+            train_interval_latest_path,
+            points_per_epoch=12,
+            stage="train_full",
+            append=True,
+            run_id=run_id,
         ),
     ]
     if SAVE_LOG_ARCHIVE:
         interval_loggers_phase2.append(
             IntervalMetricsLogger(
-                train_interval_archive_path, points_per_epoch=12,
-                stage="train_full", append=True, run_id=run_id,
+                train_interval_archive_path,
+                points_per_epoch=12,
+                stage="train_full",
+                append=True,
+                run_id=run_id,
             )
         )
 
@@ -393,7 +464,9 @@ def main():
     if tensorboard_available():
         tensorboard = TensorBoard(
             log_dir=os.path.join(logs_dir, "tensorboard"),
-            histogram_freq=1, update_freq="epoch", write_graph=False,
+            histogram_freq=1,
+            update_freq="epoch",
+            write_graph=False,
         )
     else:
         print("TensorBoard not installed; skipping TensorBoard callback.")
@@ -410,7 +483,9 @@ def main():
     # ── phase 1: train classification head only ───────────────────────────
     if phase1_epochs > 0:
         phase1_total_steps = max(1, steps_per_epoch * phase1_epochs)
-        phase1_warmup_steps = max(0, steps_per_epoch * min(int(WARMUP_EPOCHS), phase1_epochs))
+        phase1_warmup_steps = max(
+            0, steps_per_epoch * min(int(WARMUP_EPOCHS), phase1_epochs)
+        )
         phase1_lr = WarmupCosineSchedule(
             peak_lr=LEARNING_RATE_PHASE1,
             min_lr=max(LEARNING_RATE_PHASE1 * 0.01, 1e-7),
@@ -434,10 +509,21 @@ def main():
 
         print(f"\n--- Phase 1: warm-up on {train_samples} training images ---")
         phase1_callbacks: list[keras.callbacks.Callback] = [
-            checkpoint, early_stopping,
-            *csv_loggers_phase1, *interval_loggers_phase1,
+            checkpoint,
+            early_stopping,
+            *csv_loggers_phase1,
+            *interval_loggers_phase1,
             progress_phase1,
         ]
+        if OVERFITTING_STOP_ENABLED:
+            phase1_callbacks.append(
+                PreOverfitRestorer(
+                    min_gap=float(OVERFITTING_STOP_MIN_GAP),
+                    patience=int(OVERFITTING_STOP_PATIENCE),
+                    verbose=1,
+                    save_path=CHECKPOINT_PATH,
+                )
+            )
         if tensorboard is not None:
             phase1_callbacks.append(tensorboard)
 
@@ -475,7 +561,9 @@ def main():
             print(f"Froze {bn_frozen} BatchNormalization layers for stability.")
 
         phase2_total_steps = max(1, steps_per_epoch * phase2_epochs)
-        phase2_warmup_steps = max(0, steps_per_epoch * min(int(WARMUP_EPOCHS), phase2_epochs))
+        phase2_warmup_steps = max(
+            0, steps_per_epoch * min(int(WARMUP_EPOCHS), phase2_epochs)
+        )
         phase2_lr = WarmupCosineSchedule(
             peak_lr=LEARNING_RATE_PHASE2,
             min_lr=max(LEARNING_RATE_PHASE2 * 0.01, 1e-7),
@@ -500,10 +588,21 @@ def main():
 
         print("\n--- Phase 2: fine-tuning entire network ---")
         phase2_callbacks: list[keras.callbacks.Callback] = [
-            checkpoint, early_stopping,
-            *csv_loggers_phase2, *interval_loggers_phase2,
+            checkpoint,
+            early_stopping,
+            *csv_loggers_phase2,
+            *interval_loggers_phase2,
             progress_phase2,
         ]
+        if OVERFITTING_STOP_ENABLED:
+            phase2_callbacks.append(
+                PreOverfitRestorer(
+                    min_gap=float(OVERFITTING_STOP_MIN_GAP),
+                    patience=int(OVERFITTING_STOP_PATIENCE),
+                    verbose=1,
+                    save_path=CHECKPOINT_PATH,
+                )
+            )
         if tensorboard is not None:
             phase2_callbacks.append(tensorboard)
 
@@ -536,9 +635,13 @@ def main():
         "run_stamp": run_stamp,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "train_history_latest": train_history_latest_path,
-        "train_history_archive": train_history_archive_path if SAVE_LOG_ARCHIVE else None,
+        "train_history_archive": train_history_archive_path
+        if SAVE_LOG_ARCHIVE
+        else None,
         "train_interval_latest": train_interval_latest_path,
-        "train_interval_archive": train_interval_archive_path if SAVE_LOG_ARCHIVE else None,
+        "train_interval_archive": train_interval_archive_path
+        if SAVE_LOG_ARCHIVE
+        else None,
         "base_model": backbone_name,
         "batch_size": int(batch_size),
         "use_mixup": USE_MIXUP,
@@ -551,13 +654,15 @@ def main():
     if SAVE_RUN_MANIFESTS or SAVE_LOG_ARCHIVE:
         with open(
             os.path.join(logs_dir, f"train_run_manifest_{run_stamp}.json"),
-            "w", encoding="utf-8",
+            "w",
+            encoding="utf-8",
         ) as out_file:
             json.dump(train_manifest, out_file, indent=2)
     with open(latest_runs_path, "w", encoding="utf-8") as out_file:
         json.dump(latest_runs, out_file, indent=2)
 
     return model
+
 
 if __name__ == "__main__":
     main()

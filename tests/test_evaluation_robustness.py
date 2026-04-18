@@ -1,4 +1,4 @@
-uv import sys
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +27,11 @@ def _dummy_predict(images: np.ndarray) -> np.ndarray:
 
 
 def test_corruption_transforms_preserve_shape_and_bounds():
-    images = np.random.default_rng(7).uniform(-1.0, 1.0, size=(6, 32, 32, 3)).astype(np.float32)
+    images = (
+        np.random.default_rng(7)
+        .uniform(-1.0, 1.0, size=(6, 32, 32, 3))
+        .astype(np.float32)
+    )
     rng = np.random.default_rng(11)
 
     outputs = [

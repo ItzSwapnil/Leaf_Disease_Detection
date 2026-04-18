@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import inspect
 import math
+import os
+import tempfile
+from collections import deque
+from pathlib import Path
 from typing import Dict, Optional, Sequence
 
-import tensorflow.keras as keras
 import tensorflow as tf
+import tensorflow.keras as keras
+
 # Provide a compatible `register_keras_serializable` decorator across TF/Keras versions.
 try:
     # Preferred import location
@@ -14,10 +19,14 @@ except Exception:
     try:
         register_keras_serializable = keras.saving.register_keras_serializable  # type: ignore
     except Exception:
+
         def register_keras_serializable(package=None):
             def decorator(obj):
                 return obj
+
             return decorator
+
+
 import numpy as np
 
 from config import (
@@ -34,11 +43,12 @@ from config import (
 
 # Learning rate schedule
 
+
 @register_keras_serializable(package="training_utils")
 class WarmupCosineSchedule(keras.optimizers.schedules.LearningRateSchedule):
-    
-
-    def __init__(self, peak_lr: float, min_lr: float, warmup_steps: int, total_steps: int):
+    def __init__(
+        self, peak_lr: float, min_lr: float, warmup_steps: int, total_steps: int
+    ):
         super().__init__()
         self.peak_lr = float(peak_lr)
         self.min_lr = float(min_lr)
@@ -74,11 +84,11 @@ class WarmupCosineSchedule(keras.optimizers.schedules.LearningRateSchedule):
             "total_steps": self.total_steps,
         }
 
+
 # Callbacks
 
-class BestModelSaver(keras.callbacks.Callback):
-    
 
+class BestModelSaver(keras.callbacks.Callback):
     def __init__(
         self,
         model_path: str,
@@ -116,9 +126,8 @@ class BestModelSaver(keras.callbacks.Callback):
                     f"{self.monitor}={current:.6f}"
                 )
 
-class OverfittingStopper(keras.callbacks.Callback):
-    
 
+class OverfittingStopper(keras.callbacks.Callback):
     def __init__(self, min_gap: float = 0.05, patience: int = 2, verbose: int = 1):
         super().__init__()
         self.min_gap = float(min_gap)
@@ -154,10 +163,228 @@ class OverfittingStopper(keras.callbacks.Callback):
         else:
             self.bad_epochs = 0
 
+
+class PreOverfitRestorer(keras.callbacks.Callback):
+    def __init__(
+        self,
+        min_gap: float = 0.05,
+        patience: int = 2,
+        verbose: int = 1,
+        save_path: Optional[str] = None,
+    ):
+        super().__init__()
+        self.min_gap = float(min_gap)
+        self.patience = int(patience)
+        self.verbose = int(verbose)
+        self.save_path = save_path
+        self.bad_epochs = 0
+        self.last_safe_weights = None
+        self.last_safe_epoch = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        loss = logs.get("loss")
+        val_loss = logs.get("val_loss")
+        acc = logs.get("accuracy")
+        val_acc = logs.get("val_accuracy")
+
+        if None in (loss, val_loss, acc, val_acc):
+            return
+
+        gap = float(acc) - float(val_acc)
+        overfitting_now = (float(val_loss) > float(loss)) and (gap >= self.min_gap)
+
+        if overfitting_now:
+            self.bad_epochs += 1
+            if self.verbose:
+                print(
+                    f"Pre-overfit monitor: epoch={epoch + 1}, "
+                    f"train_loss={float(loss):.4f}, val_loss={float(val_loss):.4f}, "
+                    f"acc_gap={gap:.4f} ({self.bad_epochs}/{self.patience})"
+                )
+
+            if self.bad_epochs >= self.patience:
+                restored = False
+                if self.last_safe_weights is not None:
+                    self.model.set_weights(self.last_safe_weights)
+                    restored = True
+                    if self.verbose:
+                        safe_epoch = (
+                            (int(self.last_safe_epoch) + 1)
+                            if self.last_safe_epoch is not None
+                            else "unknown"
+                        )
+                        print(
+                            "Stopping training: overfitting detected. "
+                            f"Restored weights from epoch {safe_epoch}."
+                        )
+                elif self.verbose:
+                    print(
+                        "Stopping training: overfitting detected before a safe snapshot "
+                        "was available."
+                    )
+
+                if restored and self.save_path:
+                    self.model.save(self.save_path)
+                    if self.verbose:
+                        print(f"Saved restored pre-overfit model to: {self.save_path}")
+
+                self.model.stop_training = True
+        else:
+            self.bad_epochs = 0
+            self.last_safe_weights = self.model.get_weights()
+            self.last_safe_epoch = int(epoch)
+
+
+class RollingPreOverfitRestorer(keras.callbacks.Callback):
+    def __init__(
+        self,
+        min_gap: float = 0.0,
+        patience: int = 1,
+        snapshot_count: int = 10,
+        snapshot_dir: Optional[str] = None,
+        monitor: str = "val_accuracy",
+        strict: bool = True,
+        verbose: int = 1,
+    ):
+        super().__init__()
+        self.min_gap = float(min_gap)
+        self.patience = int(patience)
+        self.snapshot_count = max(1, int(snapshot_count))
+        self.monitor = str(monitor)
+        self.strict = bool(strict)
+        self.verbose = int(verbose)
+        self.bad_epochs = 0
+        self.snapshot_dir = Path(
+            snapshot_dir or tempfile.mkdtemp(prefix="leaf_refine_snapshots_")
+        )
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self.safe_snapshots: deque[dict[str, object]] = deque()
+        self.best_snapshot_path = self.snapshot_dir / "best_safe.weights.h5"
+        self.best_snapshot_epoch: Optional[int] = None
+        self.best_snapshot_metric = float("-inf")
+        self.initial_snapshot_path = self.snapshot_dir / "initial_safe.weights.h5"
+        self._restored = False
+
+    def on_train_begin(self, logs=None):
+        # Keep a guaranteed pre-training safe restore point.
+        self.model.save_weights(str(self.initial_snapshot_path))
+
+    def _is_overfitting(self, logs: dict) -> bool:
+        loss = logs.get("loss")
+        val_loss = logs.get("val_loss")
+        acc = logs.get("accuracy")
+        val_acc = logs.get("val_accuracy")
+        if None in (loss, val_loss, acc, val_acc):
+            return False
+        gap = float(acc) - float(val_acc)
+        loss_overfit = float(val_loss) > float(loss)
+        gap_overfit = gap > float(self.min_gap)
+        if self.strict:
+            return loss_overfit or gap_overfit
+        return loss_overfit and gap_overfit
+
+    def _snapshot_path(self, epoch: int, metric: float) -> Path:
+        return self.snapshot_dir / (
+            f"safe_epoch_{int(epoch) + 1:03d}_{self.monitor}_{float(metric):.6f}.weights.h5"
+        )
+
+    def _save_safe_snapshot(self, epoch: int, metric: float) -> None:
+        snapshot_path = self._snapshot_path(epoch, metric)
+        self.model.save_weights(str(snapshot_path))
+        snapshot = {
+            "epoch": int(epoch),
+            "metric": float(metric),
+            "path": str(snapshot_path),
+        }
+        self.safe_snapshots.append(snapshot)
+        if float(metric) >= float(self.best_snapshot_metric):
+            self.model.save_weights(str(self.best_snapshot_path))
+            self.best_snapshot_metric = float(metric)
+            self.best_snapshot_epoch = int(epoch)
+        while len(self.safe_snapshots) > self.snapshot_count:
+            oldest = self.safe_snapshots.popleft()
+            oldest_path = str(oldest["path"])
+            try:
+                if os.path.exists(oldest_path):
+                    os.remove(oldest_path)
+            except Exception:
+                pass
+
+    def _restore_best_safe_snapshot(self) -> bool:
+        if self.best_snapshot_epoch is not None and self.best_snapshot_path.exists():
+            self.model.load_weights(str(self.best_snapshot_path))
+            self._restored = True
+            if self.verbose:
+                print(
+                    "Stopping training: overfitting detected. "
+                    f"Restored best safe weights from epoch {int(self.best_snapshot_epoch) + 1}."
+                )
+            return True
+
+        if self.initial_snapshot_path.exists():
+            self.model.load_weights(str(self.initial_snapshot_path))
+            self._restored = True
+            if self.verbose:
+                print(
+                    "Stopping training: overfitting detected. "
+                    "Restored initial pre-training safe weights."
+                )
+            return True
+
+        return False
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+
+        if self._is_overfitting(logs):
+            self.bad_epochs += 1
+            if self.verbose:
+                print(
+                    f"Rolling pre-overfit monitor: epoch={epoch + 1}, "
+                    f"train_loss={float(logs.get('loss', 0.0)):.4f}, "
+                    f"val_loss={float(logs.get('val_loss', 0.0)):.4f}, "
+                    f"acc_gap={float(logs.get('accuracy', 0.0)) - float(logs.get('val_accuracy', 0.0)):.4f} "
+                    f"({self.bad_epochs}/{self.patience})"
+                )
+            if self.bad_epochs >= self.patience:
+                restored = self._restore_best_safe_snapshot()
+                if not restored and self.verbose:
+                    print(
+                        "Stopping training: overfitting detected before a safe snapshot was available."
+                    )
+                self.model.stop_training = True
+        else:
+            self.bad_epochs = 0
+            monitor_value = logs.get(self.monitor)
+            if monitor_value is not None:
+                self._save_safe_snapshot(int(epoch), float(monitor_value))
+
+    def on_train_end(self, logs=None):
+        if self._restored:
+            return
+        if self.best_snapshot_epoch is not None and self.best_snapshot_path.exists():
+            self.model.load_weights(str(self.best_snapshot_path))
+            if self.verbose:
+                print(
+                    "Training ended without an overfit stop. "
+                    f"Restored best safe weights from epoch {int(self.best_snapshot_epoch) + 1}."
+                )
+            return
+        if self.initial_snapshot_path.exists():
+            self.model.load_weights(str(self.initial_snapshot_path))
+            if self.verbose:
+                print(
+                    "Training ended without an overfit stop. "
+                    "Restored initial pre-training safe weights."
+                )
+
+
 # Loss construction
 
+
 def build_loss(class_weight: Optional[Dict[int, float]]):
-    
+
     if not USE_FOCAL_LOSS or not class_weight:
         return (
             keras.losses.CategoricalCrossentropy(label_smoothing=LABEL_SMOOTHING),
@@ -174,10 +401,12 @@ def build_loss(class_weight: Optional[Dict[int, float]]):
     )
     return focal, None
 
+
 # Class weighting
 
+
 def compute_class_weights_from_flow(train_flow) -> Optional[Dict[int, float]]:
-    
+
     classes = np.array(train_flow.classes, dtype=np.int64)
     if classes.size == 0:
         return None
@@ -211,11 +440,15 @@ def count_class_samples_from_directory(
         total += int(sample_count)
     return counts, int(total)
 
+
 def compute_class_weights_from_directory(
     train_dir: str, class_names: Sequence[str]
 ) -> Optional[Dict[int, float]]:
     counts_by_class, _ = count_class_samples_from_directory(train_dir, class_names)
-    count_arr = np.array([float(counts_by_class[idx]) for idx in sorted(counts_by_class)], dtype=np.float64)
+    count_arr = np.array(
+        [float(counts_by_class[idx]) for idx in sorted(counts_by_class)],
+        dtype=np.float64,
+    )
     if count_arr.size == 0 or np.any(count_arr <= 0.0):
         return None
 
@@ -224,12 +457,14 @@ def compute_class_weights_from_directory(
     inv = np.clip(inv, 0.5, 3.0)
     return {int(idx): float(w) for idx, w in enumerate(inv)}
 
+
 # Mixup & cutmix augmentation
+
 
 def mixup_numpy_batch(
     images: np.ndarray, labels: np.ndarray, alpha: float = 0.3
 ) -> tuple[np.ndarray, np.ndarray]:
-    
+
     if alpha <= 0.0 or images.shape[0] < 2:
         return images, labels
 
@@ -242,10 +477,11 @@ def mixup_numpy_batch(
     mixed_labels = labels * lam_y + labels[indices] * (1.0 - lam_y)
     return mixed_images, mixed_labels
 
+
 def cutmix_numpy_batch(
     images: np.ndarray, labels: np.ndarray, alpha: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
-    
+
     if alpha <= 0.0 or images.shape[0] < 2:
         return images, labels
 
@@ -298,7 +534,9 @@ def cutmix_batch_tf(images, labels, alpha: float = 1.0):
 
     row_mask = tf.logical_and(tf.range(height) >= y1, tf.range(height) < y2)
     col_mask = tf.logical_and(tf.range(width) >= x1, tf.range(width) < x2)
-    box_mask = tf.cast(tf.logical_and(row_mask[:, None], col_mask[None, :]), images.dtype)
+    box_mask = tf.cast(
+        tf.logical_and(row_mask[:, None], col_mask[None, :]), images.dtype
+    )
     box_mask = tf.reshape(box_mask, [1, height, width, 1])
     box_mask = tf.broadcast_to(box_mask, tf.shape(images))
 
@@ -409,6 +647,7 @@ def sample_augmentation_route(
         return "cutmix"
     return "normal"
 
+
 def mixup_cutmix_generator(
     base_generator,
     mixup_alpha: float = 0.3,
@@ -419,7 +658,7 @@ def mixup_cutmix_generator(
     cutmix_prob: float = 0.4,
     normal_prob: float = 0.2,
 ):
-    
+
     while True:
         images, labels = next(base_generator)
         route = sample_augmentation_route(
@@ -435,8 +674,9 @@ def mixup_cutmix_generator(
             images, labels = cutmix_numpy_batch(images, labels, alpha=cutmix_alpha)
         yield images, labels
 
+
 def mixup_batch_tf(images, labels, alpha: float = 0.2):
-    
+
     import tensorflow as tf
 
     batch_size = tf.shape(images)[0]
@@ -455,10 +695,12 @@ def mixup_batch_tf(images, labels, alpha: float = 0.2):
     mixed_labels = labels * lam_y + tf.gather(labels, indices) * (1.0 - lam_y)
     return mixed_images, mixed_labels
 
+
 # Optimiser
 
+
 def build_adamw_optimizer(learning_rate):
-    
+
     if OPTIMIZER.lower() != "adamw":
         raise ValueError(f"Unsupported OPTIMIZER '{OPTIMIZER}'. Expected 'AdamW'.")
 
@@ -471,7 +713,11 @@ def build_adamw_optimizer(learning_rate):
     }
 
     accumulation = int(ACCUMULATION_STEPS)
-    if accumulation > 1 and "gradient_accumulation_steps" in inspect.signature(keras.optimizers.AdamW).parameters:
+    if (
+        accumulation > 1
+        and "gradient_accumulation_steps"
+        in inspect.signature(keras.optimizers.AdamW).parameters
+    ):
         optimizer_kwargs["gradient_accumulation_steps"] = accumulation
         effective_bs = BATCH_SIZE * accumulation
         print(
@@ -488,16 +734,20 @@ def build_adamw_optimizer(learning_rate):
     print(f"AdamW weight_decay={WEIGHT_DECAY}.")
     return keras.optimizers.AdamW(**optimizer_kwargs)
 
+
 # Misc helpers
 
+
 def resolve_step_count(config_steps: int, total_samples: int, batch_size: int) -> int:
-    
+
     total_batches = max(1, math.ceil(float(total_samples) / float(batch_size)))
     if int(config_steps) <= 0:
         return total_batches
     return min(int(config_steps), total_batches)
 
+
 def tensorboard_available() -> bool:
-    
+
     import importlib.util
+
     return importlib.util.find_spec("tensorboard") is not None

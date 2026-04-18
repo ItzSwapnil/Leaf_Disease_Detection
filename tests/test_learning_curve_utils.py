@@ -60,17 +60,21 @@ def test_combine_train_and_fine_metrics_uses_train_len_as_phase_boundary():
         val_loss=[0.89, 0.88],
     )
 
-    combined, phase_boundary = combine_train_and_fine_metrics(train, fine, epochs_phase1=25)
+    combined, phase_boundary = combine_train_and_fine_metrics(
+        train, fine, epochs_phase1=25
+    )
 
     assert phase_boundary == 3
     assert combined["accuracy"] == [0.1, 0.2, 0.3, 0.31, 0.32]
 
 
 def test_build_best_epoch_markers_maps_fine_best_to_global_epoch():
-    marker_lines, marker_note, train_best, fine_best, fine_global = build_best_epoch_markers(
-        train_val_acc=[0.6, 0.7, 0.8, 0.75],
-        fine_val_acc=[0.81, 0.83, 0.82],
-        phase_boundary=21,
+    marker_lines, marker_note, train_best, fine_best, fine_global = (
+        build_best_epoch_markers(
+            train_val_acc=[0.6, 0.7, 0.8, 0.75],
+            fine_val_acc=[0.81, 0.83, 0.82],
+            phase_boundary=21,
+        )
     )
 
     assert train_best == 3

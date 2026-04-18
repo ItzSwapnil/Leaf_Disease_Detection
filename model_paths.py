@@ -1,55 +1,80 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable, List, Optional
+from typing import Iterable, Optional
 
-from config import CHECKPOINT_PATH, FINAL_MODEL_PATH, MODELS_DIR
+from config import EFFNET_MODEL_PATH, FINAL_MODEL_PATH
+
 
 def resolve_keras_model_path(preferred_paths: Optional[Iterable[str]] = None) -> str:
-    """Pick the highest-priority existing model path.
+    """Resolve one of the canonical model paths strictly.
 
-    - preferred_paths first
-    - FINAL_MODEL_PATH then CHECKPOINT_PATH
-    - auto-discover .keras/.h5/.hdf5 in MODELS_DIR
+    Allowed model files:
+    - models/leaf_disease_refined.keras (DINOv3)
+    - models/leaf_disease_EfficientNetV2-S.keras (EfficientNetV2-S)
+    - models/EfficientNetv2B0/* (EfficientNetV2-B0 variants)
+    - models/EfficientNetv2S/* (EfficientNetV2-S variants)
     """
 
-    candidates: List[str] = []
+    allowed = {
+        os.path.abspath(str(FINAL_MODEL_PATH)),
+        os.path.abspath(str(EFFNET_MODEL_PATH)),
+        # EfficientNetV2-B0 variants
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2B0", "leaf_disease_classifier.keras"
+            )
+        ),
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2B0", "leaf_disease_checkpoint.keras"
+            )
+        ),
+        # EfficientNetV2-S variants
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2S", "leaf_disease_classifier.keras"
+            )
+        ),
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2S", "leaf_disease_checkpoint.keras"
+            )
+        ),
+        # Legacy patterns (backward compat)
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(str(EFFNET_MODEL_PATH)), "leaf_disease_classifier.keras"
+            )
+        ),
+        os.path.abspath(
+            os.path.join(
+                os.path.dirname(str(EFFNET_MODEL_PATH)), "leaf_disease_checkpoint.keras"
+            )
+        ),
+    }
+
     if preferred_paths:
         for path in preferred_paths:
             if not path:
                 continue
             normalized = os.path.abspath(str(path))
-            if normalized not in candidates:
-                candidates.append(normalized)
+            if normalized not in allowed:
+                raise ValueError(
+                    "Only canonical model paths are allowed: "
+                    f"{sorted(allowed)}. Received: {normalized}"
+                )
 
-    for default_path in [FINAL_MODEL_PATH, CHECKPOINT_PATH]:
-        if default_path:
-            normalized = os.path.abspath(str(default_path))
-            if normalized not in candidates:
-                candidates.append(normalized)
+            if os.path.exists(normalized):
+                return normalized
 
-    for candidate in candidates:
+    for candidate in [
+        os.path.abspath(str(FINAL_MODEL_PATH)),
+        os.path.abspath(str(EFFNET_MODEL_PATH)),
+    ]:
         if os.path.exists(candidate):
             return candidate
 
-    discovered: List[str] = []
-    if os.path.isdir(MODELS_DIR):
-        for name in sorted(os.listdir(MODELS_DIR)):
-            if name.lower().endswith((".keras", ".h5", ".hdf5")):
-                discovered.append(os.path.abspath(os.path.join(MODELS_DIR, name)))
-
-    if discovered:
-        return discovered[0]
-
-    formatted = {
-        "preferred": list(preferred_paths or []),
-        "default": [FINAL_MODEL_PATH, CHECKPOINT_PATH],
-        "discovered": discovered,
-    }
-
     raise FileNotFoundError(
-        "No model file found. "
-        f"Preferred paths: {formatted['preferred']}. "
-        f"Default paths: {formatted['default']}. "
-        f"Discovered: {formatted['discovered']}."
+        f"No canonical model file found. Expected one of: {sorted(allowed)}"
     )

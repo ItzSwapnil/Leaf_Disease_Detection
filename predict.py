@@ -2,35 +2,80 @@ import argparse
 import json
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
-from PIL import Image
 
 from config import (
-    IMG_SIZE,
     CLASS_INDICES_PATH,
     CONFIDENCE_REJECT_THRESHOLD,
     ENTROPY_REJECT_THRESHOLD,
+    IMG_SIZE,
     OOD_MSP_THRESHOLD,
 )
 from hardware import configure_tensorflow
-from model_paths import resolve_keras_model_path
+
 from inference_guard import (
     assess_leaf_likelihood,
     compute_prediction_diagnostics,
     evaluate_inference_safety,
 )
+from model_paths import resolve_keras_model_path
 from preprocessing import preprocess_array_for_model
 from training_utils import WarmupCosineSchedule
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 configure_tensorflow()
 
-class LeafDiseasePredictor:
-    
 
+def _load_model_robust(model_path: str):
+    custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
+    try:
+        return load_model(model_path, custom_objects=custom_objects, compile=False)
+    except TypeError as exc:
+        error_text = str(exc)
+        if "ViTPatchingAndEmbedding" not in error_text:
+            raise
+
+        if not _patch_vit_layer_init_for_compat():
+            raise RuntimeError(
+                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch. "
+                "Install a compatible keras-hub version or retrain with current stack."
+            ) from exc
+
+        print(
+            "Detected KerasHub ViT checkpoint compatibility mismatch; "
+            "retrying load with compatibility shim."
+        )
+        return load_model(model_path, custom_objects=custom_objects, compile=False)
+
+
+def _patch_vit_layer_init_for_compat() -> bool:
+    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
+    try:
+        from keras_hub.src.models.vit import vit_layers
+
+        layer_cls = vit_layers.ViTPatchingAndEmbedding
+    except Exception:
+        return False
+
+    if getattr(layer_cls, "_leaf_compat_patched", False):
+        return True
+
+    original_init = layer_cls.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        kwargs.pop("num_patches", None)
+        kwargs.pop("num_positions", None)
+        return original_init(self, *args, **kwargs)
+
+    layer_cls.__init__ = _patched_init
+    layer_cls._leaf_compat_patched = True
+    return True
+
+
+class LeafDiseasePredictor:
     def __init__(
         self,
         model_path: str = None,
@@ -43,10 +88,7 @@ class LeafDiseasePredictor:
             [model_path] if model_path else None
         )
         print(f"Loading model from {resolved_model_path}...")
-        self.model = load_model(
-            resolved_model_path,
-            custom_objects={"WarmupCosineSchedule": WarmupCosineSchedule}
-        )
+        self.model = _load_model_robust(resolved_model_path)
         print("Model loaded successfully.")
 
         if os.path.exists(class_indices_path):
@@ -56,10 +98,13 @@ class LeafDiseasePredictor:
             self.class_indices = self._generate_class_indices()
 
         self.idx_to_class = {v: k for k, v in self.class_indices.items()}
-        print(f"Loaded {len(self.class_indices)} disease classes.")
+        print(
+            f"Loaded {len(self.class_indices)} total classes "
+            "(13 healthy, 33 disease)."
+        )
 
     def _generate_class_indices(self) -> dict:
-        
+
         train_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "dataset", "train"
         )
@@ -71,14 +116,14 @@ class LeafDiseasePredictor:
         }
 
     def preprocess_image(self, img_path: str) -> np.ndarray:
-        
+
         img = image.load_img(img_path, target_size=(self.img_size, self.img_size))
         img_array = image.img_to_array(img)
         img_array = np.expand_dims(img_array, axis=0)
         return preprocess_array_for_model(img_array)
 
     def predict(self, img_path: str) -> dict:
-        
+
         img_array = self.preprocess_image(img_path)
         predictions = self.model.predict(img_array, verbose=0)[0]
 
@@ -100,7 +145,9 @@ class LeafDiseasePredictor:
         )
 
         if safety["reject"]:
-            reason = ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+            reason = (
+                ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+            )
             return {
                 "image_path": img_path,
                 "disease": "Unknown",
@@ -150,7 +197,8 @@ class LeafDiseasePredictor:
         }
 
     def predict_and_visualize(self, img_path: str, save_path: str = None):
-        
+        import matplotlib.pyplot as plt
+
         result = self.predict(img_path)
         pred = result["prediction"]
 
@@ -163,8 +211,10 @@ class LeafDiseasePredictor:
 
         display_name = pred["class"].replace("___", " - ").replace("_", " ")
         color = (
-            "green" if pred["confidence"] > 0.9
-            else "orange" if pred["confidence"] > 0.7
+            "green"
+            if pred["confidence"] > 0.9
+            else "orange"
+            if pred["confidence"] > 0.7
             else "red"
         )
         ax2.barh([display_name], [pred["confidence"]], color=[color])
@@ -174,7 +224,7 @@ class LeafDiseasePredictor:
         ax2.text(
             pred["confidence"] + 0.02,
             0,
-            f'{pred["confidence"] * 100:.1f}%',
+            f"{pred['confidence'] * 100:.1f}%",
             va="center",
             fontweight="bold",
         )
@@ -198,7 +248,7 @@ class LeafDiseasePredictor:
         print()
 
     def predict_batch(self, image_folder: str, output_file: str = "predictions.json"):
-        
+
         valid_extensions = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
         image_files = [
             f for f in os.listdir(image_folder) if f.endswith(valid_extensions)
@@ -211,11 +261,13 @@ class LeafDiseasePredictor:
             img_path = os.path.join(image_folder, img_file)
             try:
                 prediction = self.predict(img_path)
-                results.append({
-                    "filename": img_file,
-                    "predicted_class": prediction["prediction"]["class"],
-                    "confidence": prediction["prediction"]["confidence_percent"],
-                })
+                results.append(
+                    {
+                        "filename": img_file,
+                        "predicted_class": prediction["prediction"]["class"],
+                        "confidence": prediction["prediction"]["confidence_percent"],
+                    }
+                )
                 print(f"  {img_file}: {prediction['prediction']['class']}")
             except Exception as e:
                 print(f"  Error processing {img_file}: {e}")
@@ -226,21 +278,29 @@ class LeafDiseasePredictor:
         print(f"\nBatch predictions saved to {output_file}")
         return results
 
+
 def main():
-    
+
     parser = argparse.ArgumentParser(
         description="Leaf Disease Detection — Inference CLI"
     )
     parser.add_argument(
-        "--image", "-i", type=str,
+        "--image",
+        "-i",
+        type=str,
         help="Path to a single image file or a directory of images.",
     )
     parser.add_argument(
-        "--model", "-m", type=str, default=None,
+        "--model",
+        "-m",
+        type=str,
+        default=None,
         help="Path to a saved .keras model file.",
     )
     parser.add_argument(
-        "--save", "-s", type=str,
+        "--save",
+        "-s",
+        type=str,
         help="Path to save the prediction visualization.",
     )
     args = parser.parse_args()
@@ -269,6 +329,7 @@ def main():
                         test_image, save_path="plots/example_prediction.png"
                     )
                     break
+
 
 if __name__ == "__main__":
     main()

@@ -16,21 +16,29 @@ def test_resolve_keras_model_path_prefers_existing_preferred(tmp_path, monkeypat
     preferred.write_text("x", encoding="utf-8")
 
     monkeypatch.setattr(model_paths, "FINAL_MODEL_PATH", str(tmp_path / "final.keras"))
-    monkeypatch.setattr(model_paths, "CHECKPOINT_PATH", str(tmp_path / "checkpoint.keras"))
+    monkeypatch.setattr(
+        model_paths, "CHECKPOINT_PATH", str(tmp_path / "checkpoint.keras")
+    )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(tmp_path / "models"))
 
     resolved = model_paths.resolve_keras_model_path([str(preferred)])
     assert resolved == str(preferred)
 
 
-def test_resolve_keras_model_path_falls_back_to_discovered_sorted(tmp_path, monkeypatch):
+def test_resolve_keras_model_path_falls_back_to_discovered_sorted(
+    tmp_path, monkeypatch
+):
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     (models_dir / "z_last.keras").write_text("z", encoding="utf-8")
     (models_dir / "a_first.keras").write_text("a", encoding="utf-8")
 
-    monkeypatch.setattr(model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras"))
-    monkeypatch.setattr(model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras"))
+    monkeypatch.setattr(
+        model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras")
+    )
+    monkeypatch.setattr(
+        model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras")
+    )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
 
     resolved = model_paths.resolve_keras_model_path([])
@@ -41,8 +49,12 @@ def test_resolve_keras_model_path_raises_when_nothing_exists(tmp_path, monkeypat
     models_dir = tmp_path / "models"
     models_dir.mkdir()
 
-    monkeypatch.setattr(model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras"))
-    monkeypatch.setattr(model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras"))
+    monkeypatch.setattr(
+        model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras")
+    )
+    monkeypatch.setattr(
+        model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras")
+    )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
 
     with pytest.raises(FileNotFoundError):
@@ -54,8 +66,12 @@ def test_resolve_keras_model_path_discover_h5(tmp_path, monkeypatch):
     models_dir.mkdir()
     (models_dir / "saved_checkpoint.h5").write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras"))
-    monkeypatch.setattr(model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras"))
+    monkeypatch.setattr(
+        model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras")
+    )
+    monkeypatch.setattr(
+        model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras")
+    )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
 
     resolved = model_paths.resolve_keras_model_path([])
@@ -73,6 +89,7 @@ def test_progress_emitter_estimate_eta_math():
     # If 5 units are completed in 10 seconds, 5 units remain -> ETA should be 10 seconds.
     emitter.run_start_time = 100.0
     import time
+
     original = time.time
     try:
         time.time = lambda: 110.0

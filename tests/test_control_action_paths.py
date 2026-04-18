@@ -2,7 +2,6 @@ import ast
 import sys
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -14,8 +13,14 @@ APP_FILE = PROJECT_ROOT / "app.py"
 def _string_assignments(module: ast.Module) -> dict[str, str]:
     values: dict[str, str] = {}
     for node in module.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            if isinstance(node.value, ast.Constant) and isinstance(
+                node.value.value, str
+            ):
                 target = node.targets[0].id
                 values[target] = node.value.value
     return values
@@ -35,7 +40,10 @@ def _extract_control_actions() -> dict[str, str]:
     for node in module.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
-        if not isinstance(node.targets[0], ast.Name) or node.targets[0].id != "CONTROL_ACTIONS":
+        if (
+            not isinstance(node.targets[0], ast.Name)
+            or node.targets[0].id != "CONTROL_ACTIONS"
+        ):
             continue
         if not isinstance(node.value, ast.Dict):
             continue
@@ -49,7 +57,9 @@ def _extract_control_actions() -> dict[str, str]:
             script_value = next(
                 (
                     _resolve_string(inner_value, known)
-                    for inner_key, inner_value in zip(value_node.keys, value_node.values)
+                    for inner_key, inner_value in zip(
+                        value_node.keys, value_node.values
+                    )
                     if _resolve_string(inner_key, known) == "script"
                 ),
                 None,
@@ -72,5 +82,9 @@ def test_control_actions_reference_existing_scripts():
 
     for action_key, relative_path in actions.items():
         script_path = PROJECT_ROOT / relative_path
-        assert script_path.exists(), f"Action '{action_key}' points to missing script: {relative_path}"
-        assert script_path.is_file(), f"Action '{action_key}' path is not a file: {relative_path}"
+        assert script_path.exists(), (
+            f"Action '{action_key}' points to missing script: {relative_path}"
+        )
+        assert script_path.is_file(), (
+            f"Action '{action_key}' path is not a file: {relative_path}"
+        )

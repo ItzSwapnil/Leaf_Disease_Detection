@@ -5,7 +5,7 @@ Individual scripts read these values at import time. Runtime overrides are
 available via environment variables for CI/CD and reproducibility workflows.
 
 Current configuration is optimised for 99%+ top-1 accuracy on the
-PlantVillage-46 dataset using EfficientNetV2-S transfer learning on an
+PlantVillage-46 dataset using EfficientNetV2-B0 transfer learning on an
 NVIDIA RTX 5060 Laptop GPU (8 GB VRAM).
 
 References:
@@ -90,23 +90,24 @@ def _env_float_list(name: str, default_csv: str) -> tuple[float, ...]:
 #                    IMAGE & CLASS SETTINGS
 # ============================================================
 
-IMG_SIZE = 224                    # EfficientNetV2-S native resolution
-NUM_CLASSES = 46                  # PlantVillage-46 disease classes
+IMG_SIZE = 224  # EfficientNetV2-B0 native resolution
+NUM_CLASSES = 46  # Total classes: 13 healthy + 33 disease
 
 # ============================================================
 #                 TRAINING HYPERPARAMETERS
 # ============================================================
 
-BATCH_SIZE = 64                   # Fits 8 GB VRAM at 224x224 + fp16
-EPOCHS_PHASE1 = 5                 # Phase 1: frozen-backbone head warm-up
-EPOCHS_PHASE2 = 10                # Phase 2: full-model fine-tuning
-LEARNING_RATE_PHASE1 = 2e-3       # Aggressive LR for head-only training
-LEARNING_RATE_PHASE2 = 1e-4       # Lower LR for backbone fine-tuning
-LEARNING_RATE_RESUME = 1e-6       # Resume/continued training LR
+BATCH_SIZE = 32  # Safer default for 8 GB laptop GPUs at 224x224 + fp16
+EPOCHS_PHASE1 = 5  # Phase 1: frozen-backbone head warm-up
+EPOCHS_PHASE2 = 10  # Phase 2: full-model fine-tuning
+LEARNING_RATE_PHASE1 = 2e-3  # Aggressive LR for head-only training
+LEARNING_RATE_PHASE2 = 1e-4  # Lower LR for backbone fine-tuning
+LEARNING_RATE_RESUME = 1e-6  # Resume/continued training LR
 
 # Step control (0 = use all batches in the dataset)
 STEPS_PER_EPOCH = 0
 VALIDATION_STEPS = 0
+TRAIN_DATA_FRACTION = _env_float("LEAF_TRAIN_DATA_FRACTION", 1.0)
 
 # Optimiser settings (AdamW + cosine annealing)
 OPTIMIZER = "AdamW"
@@ -118,7 +119,7 @@ ACCUMULATION_STEPS = _env_int("LEAF_ACCUMULATION_STEPS", 1)
 # Regularisation
 DROPOUT_RATE = 0.4
 LABEL_SMOOTHING = 0.1
-USE_FOCAL_LOSS = False            # CrossEntropy + label smoothing preferred
+USE_FOCAL_LOSS = False  # CrossEntropy + label smoothing preferred
 FOCAL_GAMMA = 2.0
 USE_MIXUP = True
 MIXUP_ALPHA = 0.3
@@ -148,6 +149,9 @@ TEMPERATURE_SCALING_LR = _env_float("LEAF_TEMPERATURE_SCALING_LR", 0.01)
 BOOTSTRAP_SAMPLES = _env_int("LEAF_BOOTSTRAP_SAMPLES", 2000)
 BOOTSTRAP_SEED = _env_int("LEAF_BOOTSTRAP_SEED", 42)
 CONFIDENCE_REJECT_THRESHOLD = _env_float("LEAF_CONFIDENCE_REJECT_THRESHOLD", 0.92)
+# Entropy threshold mode:
+# - <= 1.0: normalized entropy ratio (0..1)
+# - > 1.0: entropy in bits
 ENTROPY_REJECT_THRESHOLD = _env_float("LEAF_ENTROPY_REJECT_THRESHOLD", 0.7)
 OOD_MSP_THRESHOLD = _env_float("LEAF_OOD_MSP_THRESHOLD", 0.75)
 OOD_MAX_SAMPLES = _env_int("LEAF_OOD_MAX_SAMPLES", 2048)
@@ -162,9 +166,13 @@ ROBUSTNESS_BLUR_SIGMAS = _env_float_list("LEAF_ROBUSTNESS_BLUR_SIGMAS", "0.5,1.0
 ROBUSTNESS_BRIGHTNESS_FACTORS = _env_float_list(
     "LEAF_ROBUSTNESS_BRIGHTNESS_FACTORS", "0.8,0.6,1.2"
 )
-ROBUSTNESS_NOISE_SIGMAS = _env_float_list("LEAF_ROBUSTNESS_NOISE_SIGMAS", "0.01,0.03,0.05")
+ROBUSTNESS_NOISE_SIGMAS = _env_float_list(
+    "LEAF_ROBUSTNESS_NOISE_SIGMAS", "0.01,0.03,0.05"
+)
 ROBUSTNESS_FOG_LEVELS = _env_float_list("LEAF_ROBUSTNESS_FOG_LEVELS", "0.1,0.2")
-ROBUSTNESS_OCCLUSION_FRACS = _env_float_list("LEAF_ROBUSTNESS_OCCLUSION_FRACS", "0.1,0.2")
+ROBUSTNESS_OCCLUSION_FRACS = _env_float_list(
+    "LEAF_ROBUSTNESS_OCCLUSION_FRACS", "0.1,0.2"
+)
 
 # Logging behaviour
 SAVE_LOG_ARCHIVE = _env_bool("LEAF_SAVE_LOG_ARCHIVE", False)
@@ -187,11 +195,15 @@ TEST_DIR = BASE_DIR / "dataset" / "test"
 # Model artefact paths
 MODELS_DIR = BASE_DIR / "models"
 CHECKPOINT_MODEL_PATH = MODELS_DIR / "leaf_disease_checkpoint.keras"
-FINAL_MODEL_FILE_PATH = MODELS_DIR / "leaf_disease_classifier.keras"
+# Strict canonical model path used across inference/evaluation/figure generation.
+FINAL_MODEL_FILE_PATH = MODELS_DIR / "leaf_disease_refined.keras"
+EFFNET_MODEL_FILE_PATH = (
+    MODELS_DIR / "EfficientNetv2B0" / "leaf_disease_EfficientNetV2-B0.keras"
+)
 CLASS_INDICES_PATH = MODELS_DIR / "class_indices.json"
 MCNEMAR_BASELINE_MODEL_PATH = os.getenv(
-  "LEAF_MCNEMAR_BASELINE_MODEL_PATH",
-  str(MODELS_DIR / "leaf_disease_effnetv2b1.keras"),
+    "LEAF_MCNEMAR_BASELINE_MODEL_PATH",
+    str(MODELS_DIR / "leaf_disease_effnetv2b1.keras"),
 )
 ENSEMBLE_MODEL_PATHS = _env_csv("LEAF_ENSEMBLE_MODELS")
 OOD_DIR = os.getenv("LEAF_OOD_DIR", str(BASE_DIR / "dataset" / "ood"))
@@ -211,9 +223,9 @@ INTER_OP_THREADS = 4
 #                    MODEL ARCHITECTURE
 # ============================================================
 
-# Backbone: EfficientNetV2-S offers the best accuracy/speed trade-off
+# Backbone: EfficientNetV2-B0 offers the best accuracy/speed trade-off
 # for transfer learning on laptop-class hardware.
-BASE_MODEL = "EfficientNetV2S"
+BASE_MODEL = "EfficientNetV2B0"
 
 # Classification head
 DENSE_UNITS = 512
@@ -222,15 +234,19 @@ DENSE_UNITS = 512
 UNFREEZE_LAYERS = -1
 
 
-
 # Fine-tuning strategy
 FINE_TUNE_UNFREEZE_LAYERS = _env_int("LEAF_FINE_TUNE_UNFREEZE_LAYERS", -1)
 FINE_TUNE_EPOCHS = _env_int("LEAF_FINE_TUNE_EPOCHS", 10)
-FINE_TUNE_BATCH_SIZE = _env_int("LEAF_FINE_TUNE_BATCH_SIZE", 64)
+FINE_TUNE_BATCH_SIZE = _env_int("LEAF_FINE_TUNE_BATCH_SIZE", 32)
 FINE_TUNE_LEARNING_RATE = _env_float("LEAF_FINE_TUNE_LEARNING_RATE", 5e-5)
 FINE_TUNE_DATA_FRACTION = _env_float("LEAF_FINE_TUNE_DATA_FRACTION", 1.0)
 FINE_TUNE_MAX_STEPS_PER_EPOCH = _env_int("LEAF_FINE_TUNE_MAX_STEPS_PER_EPOCH", 0)
 FINE_TUNE_VAL_MAX_STEPS = _env_int("LEAF_FINE_TUNE_VAL_MAX_STEPS", 0)
+
+# Stop when overfitting emerges (instead of only waiting on val_accuracy plateau)
+OVERFITTING_STOP_ENABLED = _env_bool("LEAF_OVERFITTING_STOP_ENABLED", True)
+OVERFITTING_STOP_MIN_GAP = _env_float("LEAF_OVERFITTING_STOP_MIN_GAP", 0.04)
+OVERFITTING_STOP_PATIENCE = _env_int("LEAF_OVERFITTING_STOP_PATIENCE", 2)
 
 # ============================================================
 #                       CALLBACKS
@@ -249,6 +265,7 @@ TARGET_ACCURACY = 99.0  # Engineering target (%)
 
 # Best model path alias
 BEST_MODEL = str(FINAL_MODEL_FILE_PATH)
+EFFNET_BEST_MODEL = str(EFFNET_MODEL_FILE_PATH)
 
 # ============================================================
 #           STRING ALIASES (backward compatibility)
@@ -256,6 +273,7 @@ BEST_MODEL = str(FINAL_MODEL_FILE_PATH)
 
 CHECKPOINT_PATH = str(CHECKPOINT_MODEL_PATH)
 FINAL_MODEL_PATH = str(FINAL_MODEL_FILE_PATH)
+EFFNET_MODEL_PATH = str(EFFNET_MODEL_FILE_PATH)
 CLASS_INDICES_PATH = str(CLASS_INDICES_PATH)
 TRAIN_DIR = str(TRAIN_DIR)
 VAL_DIR = str(VAL_DIR)

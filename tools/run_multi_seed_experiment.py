@@ -74,7 +74,9 @@ def main() -> int:
             _run_step(evaluate_script, seed, root)
 
         if not eval_report_path.exists():
-            raise FileNotFoundError(f"Expected evaluation report not found: {eval_report_path}")
+            raise FileNotFoundError(
+                f"Expected evaluation report not found: {eval_report_path}"
+            )
 
         report = json.loads(eval_report_path.read_text(encoding="utf-8"))
         output = {
@@ -87,9 +89,9 @@ def main() -> int:
             "macro_f1": _collect_metric(report, "macro_f1"),
             "test_accuracy": _collect_metric(report, "test_accuracy"),
             "temperature": float(
-                ((report.get("calibration") or {}).get("temperature_scaling") or {}).get(
-                    "temperature", 1.0
-                )
+                (
+                    (report.get("calibration") or {}).get("temperature_scaling") or {}
+                ).get("temperature", 1.0)
             ),
         }
         per_seed_metrics.append(output)

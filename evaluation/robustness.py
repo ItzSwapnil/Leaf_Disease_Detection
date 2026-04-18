@@ -48,7 +48,9 @@ def adjust_brightness(images: np.ndarray, factor: float) -> np.ndarray:
     return _from_unit_range(adjusted)
 
 
-def add_gaussian_noise(images: np.ndarray, sigma: float, rng: np.random.Generator) -> np.ndarray:
+def add_gaussian_noise(
+    images: np.ndarray, sigma: float, rng: np.random.Generator
+) -> np.ndarray:
     """Add Gaussian noise in unit space, then map back to [-1, 1]."""
     sigma = float(sigma)
     if sigma <= 0.0:
@@ -68,7 +70,9 @@ def add_fog(images: np.ndarray, level: float) -> np.ndarray:
     return _from_unit_range(fogged)
 
 
-def add_occlusion(images: np.ndarray, frac: float, rng: np.random.Generator) -> np.ndarray:
+def add_occlusion(
+    images: np.ndarray, frac: float, rng: np.random.Generator
+) -> np.ndarray:
     """Add random square occlusion patches in unit space."""
     frac = float(np.clip(frac, 0.0, 0.9))
     if frac <= 0.0:
@@ -151,33 +155,57 @@ def evaluate_robustness_suite(
 
     for sigma in blur_sigmas:
         corrupted = apply_gaussian_blur(images, sigma=sigma)
-        metrics = _metrics_from_probs(labels, np.asarray(predictor(corrupted), dtype=np.float64))
-        report["gaussian_blur"].append({"sigma": float(sigma), **_with_drop(base_metrics, metrics)})
+        metrics = _metrics_from_probs(
+            labels, np.asarray(predictor(corrupted), dtype=np.float64)
+        )
+        report["gaussian_blur"].append(
+            {"sigma": float(sigma), **_with_drop(base_metrics, metrics)}
+        )
 
     for factor in brightness_factors:
         corrupted = adjust_brightness(images, factor=factor)
-        metrics = _metrics_from_probs(labels, np.asarray(predictor(corrupted), dtype=np.float64))
+        metrics = _metrics_from_probs(
+            labels, np.asarray(predictor(corrupted), dtype=np.float64)
+        )
         report["brightness_shift"].append(
             {"factor": float(factor), **_with_drop(base_metrics, metrics)}
         )
 
     for sigma in noise_sigmas:
         corrupted = add_gaussian_noise(images, sigma=sigma, rng=rng)
-        metrics = _metrics_from_probs(labels, np.asarray(predictor(corrupted), dtype=np.float64))
-        report["gaussian_noise"].append({"sigma": float(sigma), **_with_drop(base_metrics, metrics)})
+        metrics = _metrics_from_probs(
+            labels, np.asarray(predictor(corrupted), dtype=np.float64)
+        )
+        report["gaussian_noise"].append(
+            {"sigma": float(sigma), **_with_drop(base_metrics, metrics)}
+        )
 
     for level in fog_levels:
         corrupted = add_fog(images, level=level)
-        metrics = _metrics_from_probs(labels, np.asarray(predictor(corrupted), dtype=np.float64))
-        report["fog"].append({"level": float(level), **_with_drop(base_metrics, metrics)})
+        metrics = _metrics_from_probs(
+            labels, np.asarray(predictor(corrupted), dtype=np.float64)
+        )
+        report["fog"].append(
+            {"level": float(level), **_with_drop(base_metrics, metrics)}
+        )
 
     for frac in occlusion_fracs:
         corrupted = add_occlusion(images, frac=frac, rng=rng)
-        metrics = _metrics_from_probs(labels, np.asarray(predictor(corrupted), dtype=np.float64))
-        report["occlusion"].append({"fraction": float(frac), **_with_drop(base_metrics, metrics)})
+        metrics = _metrics_from_probs(
+            labels, np.asarray(predictor(corrupted), dtype=np.float64)
+        )
+        report["occlusion"].append(
+            {"fraction": float(frac), **_with_drop(base_metrics, metrics)}
+        )
 
     all_rows = []
-    for key in ("gaussian_blur", "brightness_shift", "gaussian_noise", "fog", "occlusion"):
+    for key in (
+        "gaussian_blur",
+        "brightness_shift",
+        "gaussian_noise",
+        "fog",
+        "occlusion",
+    ):
         all_rows.extend(report[key])
     if all_rows:
         worst = max(all_rows, key=lambda item: item["accuracy_drop"])

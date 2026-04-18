@@ -11,7 +11,9 @@ from inference_guard import compute_prediction_diagnostics, evaluate_inference_s
 
 
 def test_compute_prediction_diagnostics_reports_topk_margin_entropy():
-    diagnostics = compute_prediction_diagnostics(np.array([0.8, 0.1, 0.1], dtype=np.float64))
+    diagnostics = compute_prediction_diagnostics(
+        np.array([0.8, 0.1, 0.1], dtype=np.float64)
+    )
 
     assert diagnostics["top1_index"] == 0
     assert diagnostics["top2_index"] in {1, 2}
@@ -22,7 +24,9 @@ def test_compute_prediction_diagnostics_reports_topk_margin_entropy():
 
 
 def test_evaluate_inference_safety_rejects_non_leaf_signal():
-    diagnostics = compute_prediction_diagnostics(np.array([0.97, 0.02, 0.01], dtype=np.float64))
+    diagnostics = compute_prediction_diagnostics(
+        np.array([0.97, 0.02, 0.01], dtype=np.float64)
+    )
     leaf_validation = {"leaf_score": 0.1, "vegetation_ratio": 0.01}
 
     decision = evaluate_inference_safety(
@@ -38,7 +42,9 @@ def test_evaluate_inference_safety_rejects_non_leaf_signal():
 
 
 def test_evaluate_inference_safety_rejects_uncertain_predictions():
-    diagnostics = compute_prediction_diagnostics(np.array([0.37, 0.33, 0.30], dtype=np.float64))
+    diagnostics = compute_prediction_diagnostics(
+        np.array([0.37, 0.33, 0.30], dtype=np.float64)
+    )
     leaf_validation = {"leaf_score": 0.85, "vegetation_ratio": 0.42}
 
     decision = evaluate_inference_safety(
@@ -55,7 +61,9 @@ def test_evaluate_inference_safety_rejects_uncertain_predictions():
 
 
 def test_evaluate_inference_safety_accepts_confident_leaf_prediction():
-    diagnostics = compute_prediction_diagnostics(np.array([0.95, 0.03, 0.02], dtype=np.float64))
+    diagnostics = compute_prediction_diagnostics(
+        np.array([0.95, 0.03, 0.02], dtype=np.float64)
+    )
     leaf_validation = {"leaf_score": 0.74, "vegetation_ratio": 0.34}
 
     decision = evaluate_inference_safety(

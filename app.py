@@ -6,44 +6,45 @@ recommendations, and prevention guidelines. Also provides a control panel
 for triggering training, fine-tuning, evaluation, and figure generation jobs.
 """
 
-import os
+import base64
 import json
-import uuid
-import sys
-import time
-import glob
-import threading
-import subprocess
+import os
 import re
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
 import numpy as np
-from flask import Flask, render_template, request, jsonify
-from werkzeug.utils import secure_filename
 import tensorflow as tf
+from flask import Flask, jsonify, render_template, request
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
-import base64
+from werkzeug.utils import secure_filename
+
+from backbones import list_backbone_names
 from config import (
-    IMG_SIZE,
-    FINAL_MODEL_PATH,
     CLASS_INDICES_PATH,
-    MODELS_DIR,
     CONFIDENCE_REJECT_THRESHOLD,
     ENTROPY_REJECT_THRESHOLD,
+    FINAL_MODEL_PATH,
+    IMG_SIZE,
+    MODELS_DIR,
     OOD_MSP_THRESHOLD,
 )
-from model_paths import resolve_keras_model_path
 from hardware import configure_tensorflow, get_compute_info
-from preprocessing import preprocess_array_for_model
-from training_utils import WarmupCosineSchedule
-from backbones import list_backbone_names
 from inference_guard import (
     assess_leaf_likelihood,
     compute_prediction_diagnostics,
     evaluate_inference_safety,
 )
+from model_paths import resolve_keras_model_path
+from preprocessing import preprocess_array_for_model
+from training_utils import WarmupCosineSchedule
 
 # Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
 def _log_tf_runtime_info():
@@ -61,18 +62,20 @@ configure_tensorflow()
 _log_tf_runtime_info()
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
-app.config['UPLOAD_FOLDER'] = 'uploads'
-ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
+app.config["UPLOAD_FOLDER"] = "uploads"
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 # Create uploads folder
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 # Global model variable
 model = None
 class_indices = None
 MODEL_LOAD_ERROR = None
 ACTIVE_MODEL_PATH = None
+# Backward compatibility alias for older helper scripts.
+MODEL_PATH = None
 MODEL_CACHE = {}
 
 # Keep complete per-job console history in memory for UI display.
@@ -83,7 +86,7 @@ JOBS_LOCK = threading.Lock()
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 KERAS_BATCH_PROGRESS_RE = re.compile(r"^\d+/\d+\s+")
 
-TRAIN_SCRIPT = 'train_model.py'
+TRAIN_SCRIPT = "train_model.py"
 TRAIN_DESC = "Run baseline EfficientNet training pipeline."
 TRAIN_BACKBONES = list_backbone_names()
 
@@ -96,18 +99,23 @@ CONTROL_ACTIONS = {
     "fine_tune": {
         "label": "Fine Tune Model",
         "script": "fine_tune_model.py",
-        "description": "continue training from a saved checkpoint"
+        "description": "continue training from a saved checkpoint",
+    },
+    "refine": {
+        "label": "Refine Model",
+        "script": "refine_model.py",
+        "description": "run post-fine-tune refinement for deployment-ready weights",
     },
     "evaluate": {
         "label": "Evaluate Model",
         "script": "evaluate_model.py",
-        "description": "run validation and eval metrics"
+        "description": "run validation and eval metrics",
     },
     "generate_figures": {
         "label": "Generate Figures",
         "script": "scripts/generate_figures.py",
-        "description": "build plots and analysis artifacts"
-    }
+        "description": "build plots and analysis artifacts",
+    },
 }
 
 
@@ -115,50 +123,150 @@ def _resolve_model_path():
     return resolve_keras_model_path([FINAL_MODEL_PATH])
 
 
+def _model_option_name(model_path):
+    """Render a stable model option name relative to MODELS_DIR when possible."""
+    models_root = os.path.abspath(str(MODELS_DIR))
+    abs_path = os.path.abspath(str(model_path))
+    rel = os.path.relpath(abs_path, models_root)
+    if rel.startswith(".."):
+        return os.path.basename(abs_path)
+    return rel.replace(os.sep, "/")
+
+
 def _list_available_model_paths():
     candidates = []
-    for path in glob.glob(os.path.join(MODELS_DIR, '*.keras')):
-        if os.path.isfile(path):
-            candidates.append(os.path.abspath(path))
+    models_root = os.path.abspath(str(MODELS_DIR))
+    if not os.path.isdir(models_root):
+        return candidates
+
+    for root, _, files in os.walk(models_root):
+        for filename in files:
+            if filename.lower().endswith(".keras"):
+                path = os.path.join(root, filename)
+                if os.path.isfile(path):
+                    candidates.append(os.path.abspath(path))
+
     return sorted(candidates)
 
 
 def _resolve_requested_model_path(model_name=None):
-    default_path = _resolve_model_path()
-    if not model_name:
-        return os.path.abspath(default_path)
-
-    model_name = str(model_name).strip()
-    if not model_name:
-        return os.path.abspath(default_path)
-
     available_paths = _list_available_model_paths()
-    by_name = {os.path.basename(path): path for path in available_paths}
-    if model_name in by_name:
-        return by_name[model_name]
+    option_to_path = {_model_option_name(path): path for path in available_paths}
+    basename_to_paths = {}
+    for path in available_paths:
+        basename_to_paths.setdefault(os.path.basename(path), []).append(path)
+
+    default_path = None
+    try:
+        default_path = os.path.abspath(_resolve_model_path())
+    except Exception:
+        default_path = None
+
+    if not model_name:
+        if default_path and os.path.exists(default_path):
+            return default_path
+        if available_paths:
+            return available_paths[0]
+        raise ValueError(
+            "No model files were found under models/. Add at least one .keras model."
+        )
+
+    model_name = str(model_name).strip().replace("\\", "/")
+    if not model_name:
+        if default_path and os.path.exists(default_path):
+            return default_path
+        if available_paths:
+            return available_paths[0]
+        raise ValueError(
+            "No model files were found under models/. Add at least one .keras model."
+        )
+
+    if model_name in option_to_path:
+        return option_to_path[model_name]
+
+    # Backward compatibility: allow basename selection when unique.
+    if model_name in basename_to_paths:
+        matches = basename_to_paths[model_name]
+        if len(matches) == 1:
+            return matches[0]
+        raise ValueError(
+            "Model name is ambiguous across subfolders. "
+            "Select using relative path under models/ (e.g. EfficientNetv2B0/model.keras)."
+        )
+
+    available = sorted(option_to_path.keys())
+    shown = ", ".join(available[:10])
+    if len(available) > 10:
+        shown += f", ... (+{len(available) - 10} more)"
 
     raise ValueError(
-        f"Unknown model '{model_name}'. Available: {', '.join(sorted(by_name.keys()))}"
+        f"Unknown model '{model_name}'. Available options: {shown}"
     )
 
 
 def _get_inference_model(model_name=None):
-    global model, ACTIVE_MODEL_PATH
+    global model, ACTIVE_MODEL_PATH, MODEL_PATH
 
     target_path = _resolve_requested_model_path(model_name)
     if target_path in MODEL_CACHE:
         model = MODEL_CACHE[target_path]
         ACTIVE_MODEL_PATH = target_path
+        MODEL_PATH = target_path
         return model, ACTIVE_MODEL_PATH
 
-    loaded = load_model(
-        target_path,
-        custom_objects={"WarmupCosineSchedule": WarmupCosineSchedule}
-    )
+    loaded = _load_model_robust(target_path)
     MODEL_CACHE[target_path] = loaded
     model = loaded
     ACTIVE_MODEL_PATH = target_path
+    MODEL_PATH = target_path
     return model, ACTIVE_MODEL_PATH
+
+
+def _load_model_robust(model_path: str):
+    """Load model with compatibility fallback for older KerasHub ViT configs."""
+    custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
+    try:
+        return load_model(model_path, custom_objects=custom_objects, compile=False)
+    except TypeError as exc:
+        error_text = str(exc)
+        if "ViTPatchingAndEmbedding" not in error_text:
+            raise
+
+        if not _patch_vit_layer_init_for_compat():
+            raise RuntimeError(
+                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch. "
+                "Install a compatible keras-hub version or retrain with current stack."
+            ) from exc
+
+        print(
+            "Detected KerasHub ViT checkpoint compatibility mismatch; "
+            "retrying load with compatibility shim."
+        )
+        return load_model(model_path, custom_objects=custom_objects, compile=False)
+
+
+def _patch_vit_layer_init_for_compat() -> bool:
+    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
+    try:
+        from keras_hub.src.models.vit import vit_layers
+
+        layer_cls = vit_layers.ViTPatchingAndEmbedding
+    except Exception:
+        return False
+
+    if getattr(layer_cls, "_leaf_compat_patched", False):
+        return True
+
+    original_init = layer_cls.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        kwargs.pop("num_patches", None)
+        kwargs.pop("num_positions", None)
+        return original_init(self, *args, **kwargs)
+
+    layer_cls.__init__ = _patched_init
+    layer_cls._leaf_compat_patched = True
+    return True
 
 
 def _is_allowed_upload(filename):
@@ -171,19 +279,23 @@ def _to_bool(value):
         return value
     if value is None:
         return False
-    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _create_job(action_key, archive_logs=False, base_model=None):
     action = CONTROL_ACTIONS[action_key]
     script = action["script"]
-    command = [sys.executable, script]
+    script_args = []
+    if action_key == "train" and base_model:
+        script_args = ["--base-model", str(base_model)]
+
+    command = [sys.executable, script, *script_args]
     env_overrides = {
-        'LEAF_SAVE_LOG_ARCHIVE': '1' if archive_logs else '0',
-        'LEAF_SAVE_RUN_MANIFESTS': '1' if archive_logs else '0',
+        "LEAF_SAVE_LOG_ARCHIVE": "1" if archive_logs else "0",
+        "LEAF_SAVE_RUN_MANIFESTS": "1" if archive_logs else "0",
     }
-    if base_model:
-        env_overrides['LEAF_BASE_MODEL'] = str(base_model)
+    if action_key == "train" and base_model:
+        env_overrides["LEAF_BASE_MODEL"] = str(base_model)
     job_id = uuid.uuid4().hex
     now = time.time()
     job = {
@@ -192,6 +304,7 @@ def _create_job(action_key, archive_logs=False, base_model=None):
         "label": action["label"],
         "description": action["description"],
         "script": script,
+        "script_args": script_args,
         "command": " ".join(command),
         "archive_logs": bool(archive_logs),
         "base_model": base_model,
@@ -229,16 +342,24 @@ def _append_job_log(job, line):
 
     # Keras/TensorFlow batch progress emits carriage-return updates.
     # Keep a single live-updating progress line instead of appending a new line for each step.
-    is_batch_progress = KERAS_BATCH_PROGRESS_RE.match(cleaned) is not None and "ms/step" in cleaned
+    is_batch_progress = (
+        KERAS_BATCH_PROGRESS_RE.match(cleaned) is not None and "ms/step" in cleaned
+    )
     if is_batch_progress and job["logs"]:
         prev = job["logs"][-1]
-        prev_is_batch = KERAS_BATCH_PROGRESS_RE.match(prev) is not None and "ms/step" in prev
+        prev_is_batch = (
+            KERAS_BATCH_PROGRESS_RE.match(prev) is not None and "ms/step" in prev
+        )
         if prev_is_batch:
             job["logs"][-1] = cleaned
             return
 
     job["logs"].append(cleaned)
-    if isinstance(JOB_LOG_LIMIT, int) and JOB_LOG_LIMIT > 0 and len(job["logs"]) > JOB_LOG_LIMIT:
+    if (
+        isinstance(JOB_LOG_LIMIT, int)
+        and JOB_LOG_LIMIT > 0
+        and len(job["logs"]) > JOB_LOG_LIMIT
+    ):
         job["logs"] = job["logs"][-JOB_LOG_LIMIT:]
 
 
@@ -249,13 +370,15 @@ def _parse_progress_line(job, raw_line):
         return False
 
     try:
-        payload = json.loads(line[len(prefix):])
+        payload = json.loads(line[len(prefix) :])
         progress = float(payload.get("progress_pct", job.get("progress_pct", 0.0)))
         eta = payload.get("eta_seconds")
 
         job["progress_pct"] = max(0.0, min(100.0, progress))
         job["eta_seconds"] = None if eta is None else max(0.0, float(eta))
-        job["progress_stage"] = payload.get("stage", job.get("progress_stage", "running"))
+        job["progress_stage"] = payload.get(
+            "stage", job.get("progress_stage", "running")
+        )
         return True
     except Exception:
         return False
@@ -263,7 +386,7 @@ def _parse_progress_line(job, raw_line):
 
 def _run_job(job):
     script_path = os.path.join(os.getcwd(), job["script"])
-    command = [sys.executable, script_path]
+    command = [sys.executable, script_path, *(job.get("script_args") or [])]
     child_env = dict(os.environ)
     child_env.update(job.get("env_overrides") or {})
     try:
@@ -321,6 +444,7 @@ def _job_response(job):
         "label": job["label"],
         "description": job["description"],
         "script": job["script"],
+        "base_model": job.get("base_model"),
         "command": job["command"],
         "archive_logs": bool(job.get("archive_logs", False)),
         "status": job["status"],
@@ -334,6 +458,7 @@ def _job_response(job):
         "logs": list(job["logs"]),
     }
 
+
 # Disease information database
 DISEASE_INFO = {
     "Apple___Apple_scab": {
@@ -342,7 +467,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Venturia inaequalis that affects apple trees.",
         "symptoms": "Dark, olive-green to brown spots on leaves and fruit. Leaves may curl and drop early.",
         "treatment": "Apply fungicides during spring. Remove infected leaves and fruit. Improve air circulation.",
-        "prevention": "Plant resistant varieties. Rake and destroy fallen leaves. Prune trees for better airflow."
+        "prevention": "Plant resistant varieties. Rake and destroy fallen leaves. Prune trees for better airflow.",
     },
     "Apple___Black_rot": {
         "plant": "Apple",
@@ -350,7 +475,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Botryosphaeria obtusa affecting fruit, leaves, and bark.",
         "symptoms": "Brown spots with concentric rings on leaves. Rotting fruit with black, mummified appearance.",
         "treatment": "Remove infected plant parts. Apply fungicides during growing season.",
-        "prevention": "Maintain tree health. Remove mummified fruits. Prune dead wood."
+        "prevention": "Maintain tree health. Remove mummified fruits. Prune dead wood.",
     },
     "Apple___Brown spot": {
         "plant": "Apple",
@@ -358,7 +483,7 @@ DISEASE_INFO = {
         "description": "A fungal infection causing brown lesions on apple leaves.",
         "symptoms": "Brown circular spots on leaves, potentially leading to early defoliation.",
         "treatment": "Apply appropriate fungicides. Remove affected foliage.",
-        "prevention": "Ensure good air circulation. Avoid overhead watering."
+        "prevention": "Ensure good air circulation. Avoid overhead watering.",
     },
     "Apple___Cedar_apple_rust": {
         "plant": "Apple",
@@ -366,7 +491,7 @@ DISEASE_INFO = {
         "description": "A fungal disease requiring both apple and cedar/juniper trees to complete its life cycle.",
         "symptoms": "Yellow-orange spots on leaves with small black dots. Tube-like structures on leaf undersides.",
         "treatment": "Apply fungicides in spring. Remove nearby cedar/juniper trees if possible.",
-        "prevention": "Plant resistant varieties. Remove galls from cedars before spring."
+        "prevention": "Plant resistant varieties. Remove galls from cedars before spring.",
     },
     "Apple___Grey spot": {
         "plant": "Apple",
@@ -374,7 +499,7 @@ DISEASE_INFO = {
         "description": "A fungal disease affecting apple leaves causing grey lesions.",
         "symptoms": "Grey to brown spots on leaves, may cause premature leaf drop.",
         "treatment": "Apply fungicides. Improve orchard sanitation.",
-        "prevention": "Remove fallen leaves. Ensure proper spacing between trees."
+        "prevention": "Remove fallen leaves. Ensure proper spacing between trees.",
     },
     "Apple___healthy": {
         "plant": "Apple",
@@ -382,7 +507,7 @@ DISEASE_INFO = {
         "description": "This apple leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present. Leaf appears healthy with normal coloration.",
         "treatment": "No treatment needed. Continue regular plant care.",
-        "prevention": "Maintain good growing conditions and regular monitoring."
+        "prevention": "Maintain good growing conditions and regular monitoring.",
     },
     "Apple___Mosaic": {
         "plant": "Apple",
@@ -390,7 +515,7 @@ DISEASE_INFO = {
         "description": "A viral disease causing mottled patterns on apple leaves.",
         "symptoms": "Yellow and green mosaic patterns on leaves. Stunted growth possible.",
         "treatment": "No cure for viral diseases. Remove infected plants to prevent spread.",
-        "prevention": "Use virus-free planting material. Control insect vectors."
+        "prevention": "Use virus-free planting material. Control insect vectors.",
     },
     "Blueberry___healthy": {
         "plant": "Blueberry",
@@ -398,7 +523,7 @@ DISEASE_INFO = {
         "description": "This blueberry leaf shows no signs of disease.",
         "symptoms": "No disease symptoms. Healthy green coloration.",
         "treatment": "No treatment needed.",
-        "prevention": "Maintain proper soil pH and nutrition."
+        "prevention": "Maintain proper soil pH and nutrition.",
     },
     "Cherry___healthy": {
         "plant": "Cherry",
@@ -406,7 +531,7 @@ DISEASE_INFO = {
         "description": "This cherry leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Regular monitoring and proper care."
+        "prevention": "Regular monitoring and proper care.",
     },
     "Cherry___Powdery_mildew": {
         "plant": "Cherry",
@@ -414,7 +539,7 @@ DISEASE_INFO = {
         "description": "A fungal disease causing white powdery coating on leaves.",
         "symptoms": "White powdery spots on leaves and shoots. Leaves may curl and distort.",
         "treatment": "Apply sulfur-based or systemic fungicides. Remove heavily infected parts.",
-        "prevention": "Ensure good air circulation. Avoid overhead watering. Plant resistant varieties."
+        "prevention": "Ensure good air circulation. Avoid overhead watering. Plant resistant varieties.",
     },
     "Corn___Cercospora_leaf_spot_Gray_leaf_spot": {
         "plant": "Corn",
@@ -422,7 +547,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Cercospora zeae-maydis.",
         "symptoms": "Rectangular gray to tan lesions on leaves running parallel to veins.",
         "treatment": "Apply foliar fungicides. Use resistant hybrids.",
-        "prevention": "Rotate crops. Till under crop residue. Plant resistant varieties."
+        "prevention": "Rotate crops. Till under crop residue. Plant resistant varieties.",
     },
     "Corn___Common_rust": {
         "plant": "Corn",
@@ -430,7 +555,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Puccinia sorghi.",
         "symptoms": "Small, circular to elongated brown pustules on both leaf surfaces.",
         "treatment": "Apply fungicides if severe. Usually not economically damaging.",
-        "prevention": "Plant resistant hybrids. Early planting can help avoid infection."
+        "prevention": "Plant resistant hybrids. Early planting can help avoid infection.",
     },
     "Corn___healthy": {
         "plant": "Corn",
@@ -438,7 +563,7 @@ DISEASE_INFO = {
         "description": "This corn leaf shows no signs of disease.",
         "symptoms": "No disease symptoms. Normal green coloration.",
         "treatment": "No treatment needed.",
-        "prevention": "Maintain proper nutrition and irrigation."
+        "prevention": "Maintain proper nutrition and irrigation.",
     },
     "Corn___Northern_Leaf_Blight": {
         "plant": "Corn",
@@ -446,7 +571,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Exserohilum turcicum.",
         "symptoms": "Long, elliptical gray-green to tan lesions on leaves.",
         "treatment": "Apply foliar fungicides. Remove crop debris.",
-        "prevention": "Use resistant hybrids. Rotate crops. Till under residue."
+        "prevention": "Use resistant hybrids. Rotate crops. Till under residue.",
     },
     "Grape___Black_rot": {
         "plant": "Grape",
@@ -454,7 +579,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Guignardia bidwellii.",
         "symptoms": "Brown circular spots on leaves. Fruit shrivels and turns black (mummies).",
         "treatment": "Apply fungicides from bud break. Remove mummified fruit.",
-        "prevention": "Prune for good air circulation. Remove infected plant material."
+        "prevention": "Prune for good air circulation. Remove infected plant material.",
     },
     "Grape___Esca_(Black_Measles)": {
         "plant": "Grape",
@@ -462,7 +587,7 @@ DISEASE_INFO = {
         "description": "A complex fungal disease affecting grapevines.",
         "symptoms": "Tiger-stripe pattern on leaves. Dark spots on berries. Sudden vine collapse.",
         "treatment": "No effective treatment. Remove severely affected vines.",
-        "prevention": "Avoid large pruning wounds. Paint pruning cuts with fungicide."
+        "prevention": "Avoid large pruning wounds. Paint pruning cuts with fungicide.",
     },
     "Grape___healthy": {
         "plant": "Grape",
@@ -470,7 +595,7 @@ DISEASE_INFO = {
         "description": "This grape leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Regular monitoring and proper vineyard management."
+        "prevention": "Regular monitoring and proper vineyard management.",
     },
     "Grape___Leaf_blight_(Isariopsis_Leaf_Spot)": {
         "plant": "Grape",
@@ -478,7 +603,7 @@ DISEASE_INFO = {
         "description": "A fungal disease causing leaf spots on grapevines.",
         "symptoms": "Irregular brown spots on leaves with dark borders.",
         "treatment": "Apply fungicides. Remove infected leaves.",
-        "prevention": "Improve air circulation. Avoid overhead irrigation."
+        "prevention": "Improve air circulation. Avoid overhead irrigation.",
     },
     "Orange___Haunglongbing_(Citrus_greening)": {
         "plant": "Orange",
@@ -486,7 +611,7 @@ DISEASE_INFO = {
         "description": "A devastating bacterial disease spread by psyllid insects.",
         "symptoms": "Yellowing of leaves in blotchy pattern. Misshapen, bitter fruit. Tree decline.",
         "treatment": "No cure. Remove infected trees. Control psyllid vectors.",
-        "prevention": "Use disease-free nursery stock. Control Asian citrus psyllid."
+        "prevention": "Use disease-free nursery stock. Control Asian citrus psyllid.",
     },
     "Peach___Bacterial_spot": {
         "plant": "Peach",
@@ -494,7 +619,7 @@ DISEASE_INFO = {
         "description": "A bacterial disease caused by Xanthomonas campestris.",
         "symptoms": "Small, dark spots on leaves that may fall out. Fruit has sunken spots.",
         "treatment": "Apply copper-based bactericides. Remove infected parts.",
-        "prevention": "Plant resistant varieties. Avoid overhead irrigation."
+        "prevention": "Plant resistant varieties. Avoid overhead irrigation.",
     },
     "Peach___healthy": {
         "plant": "Peach",
@@ -502,7 +627,7 @@ DISEASE_INFO = {
         "description": "This peach leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Regular care and monitoring."
+        "prevention": "Regular care and monitoring.",
     },
     "Pepper,_bell___Bacterial_spot": {
         "plant": "Bell Pepper",
@@ -510,7 +635,7 @@ DISEASE_INFO = {
         "description": "A bacterial disease affecting pepper plants.",
         "symptoms": "Small, dark, water-soaked spots on leaves. Raised spots on fruit.",
         "treatment": "Apply copper-based sprays. Remove infected plants.",
-        "prevention": "Use disease-free seeds. Rotate crops. Avoid overhead watering."
+        "prevention": "Use disease-free seeds. Rotate crops. Avoid overhead watering.",
     },
     "Pepper,_bell___healthy": {
         "plant": "Bell Pepper",
@@ -518,7 +643,7 @@ DISEASE_INFO = {
         "description": "This pepper leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Maintain good growing conditions."
+        "prevention": "Maintain good growing conditions.",
     },
     "Potato___Early_blight": {
         "plant": "Potato",
@@ -526,7 +651,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Alternaria solani.",
         "symptoms": "Dark brown spots with concentric rings (target-like) on older leaves.",
         "treatment": "Apply fungicides. Remove infected leaves.",
-        "prevention": "Rotate crops. Use certified seed. Maintain plant vigor."
+        "prevention": "Rotate crops. Use certified seed. Maintain plant vigor.",
     },
     "Potato___healthy": {
         "plant": "Potato",
@@ -534,7 +659,7 @@ DISEASE_INFO = {
         "description": "This potato leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Regular monitoring and proper irrigation."
+        "prevention": "Regular monitoring and proper irrigation.",
     },
     "Potato___Late_blight": {
         "plant": "Potato",
@@ -542,7 +667,7 @@ DISEASE_INFO = {
         "description": "A devastating disease caused by Phytophthora infestans (caused Irish Potato Famine).",
         "symptoms": "Water-soaked spots that turn brown. White mold on leaf undersides. Rapid plant death.",
         "treatment": "Apply fungicides immediately. Remove infected plants.",
-        "prevention": "Use resistant varieties. Avoid overhead irrigation. Destroy infected tubers."
+        "prevention": "Use resistant varieties. Avoid overhead irrigation. Destroy infected tubers.",
     },
     "Raspberry___healthy": {
         "plant": "Raspberry",
@@ -550,7 +675,7 @@ DISEASE_INFO = {
         "description": "This raspberry leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Good pruning and air circulation."
+        "prevention": "Good pruning and air circulation.",
     },
     "Rice___Brown_Spot": {
         "plant": "Rice",
@@ -558,7 +683,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Bipolaris oryzae.",
         "symptoms": "Oval brown spots on leaves with gray centers.",
         "treatment": "Apply fungicides. Improve soil fertility.",
-        "prevention": "Use resistant varieties. Balanced fertilization."
+        "prevention": "Use resistant varieties. Balanced fertilization.",
     },
     "Rice___Healthy": {
         "plant": "Rice",
@@ -566,7 +691,7 @@ DISEASE_INFO = {
         "description": "This rice leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Maintain proper water and nutrient management."
+        "prevention": "Maintain proper water and nutrient management.",
     },
     "Rice___Leaf_Blast": {
         "plant": "Rice",
@@ -574,7 +699,7 @@ DISEASE_INFO = {
         "description": "A serious fungal disease caused by Magnaporthe oryzae.",
         "symptoms": "Diamond-shaped spots with gray centers and brown borders.",
         "treatment": "Apply systemic fungicides. Drain fields if possible.",
-        "prevention": "Use resistant varieties. Avoid excess nitrogen."
+        "prevention": "Use resistant varieties. Avoid excess nitrogen.",
     },
     "Rice___Neck_Blast": {
         "plant": "Rice",
@@ -582,7 +707,7 @@ DISEASE_INFO = {
         "description": "A severe form of rice blast affecting the panicle neck.",
         "symptoms": "Brown to black lesions on panicle neck. Panicle may break and fall.",
         "treatment": "Apply fungicides before heading. Remove infected panicles.",
-        "prevention": "Plant resistant varieties. Balanced fertilization."
+        "prevention": "Plant resistant varieties. Balanced fertilization.",
     },
     "Soybean___healthy": {
         "plant": "Soybean",
@@ -590,7 +715,7 @@ DISEASE_INFO = {
         "description": "This soybean leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Crop rotation and proper spacing."
+        "prevention": "Crop rotation and proper spacing.",
     },
     "Squash___Powdery_mildew": {
         "plant": "Squash",
@@ -598,7 +723,7 @@ DISEASE_INFO = {
         "description": "A common fungal disease affecting cucurbits.",
         "symptoms": "White powdery patches on leaves. Leaves may yellow and die.",
         "treatment": "Apply fungicides or baking soda solution. Remove infected leaves.",
-        "prevention": "Plant resistant varieties. Ensure good air circulation."
+        "prevention": "Plant resistant varieties. Ensure good air circulation.",
     },
     "Strawberry___healthy": {
         "plant": "Strawberry",
@@ -606,7 +731,7 @@ DISEASE_INFO = {
         "description": "This strawberry leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Proper spacing and mulching."
+        "prevention": "Proper spacing and mulching.",
     },
     "Strawberry___Leaf_scorch": {
         "plant": "Strawberry",
@@ -614,7 +739,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Diplocarpon earlianum.",
         "symptoms": "Irregular purple spots that merge. Leaf margins appear burned.",
         "treatment": "Apply fungicides. Remove infected leaves.",
-        "prevention": "Use resistant varieties. Renovate beds after harvest."
+        "prevention": "Use resistant varieties. Renovate beds after harvest.",
     },
     "Tomato___Bacterial_spot": {
         "plant": "Tomato",
@@ -622,7 +747,7 @@ DISEASE_INFO = {
         "description": "A bacterial disease affecting tomato plants.",
         "symptoms": "Small, dark, water-soaked spots on leaves. Raised spots on fruit.",
         "treatment": "Apply copper-based bactericides. Remove infected parts.",
-        "prevention": "Use disease-free seeds. Rotate crops. Avoid overhead watering."
+        "prevention": "Use disease-free seeds. Rotate crops. Avoid overhead watering.",
     },
     "Tomato___Early_blight": {
         "plant": "Tomato",
@@ -630,7 +755,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Alternaria solani.",
         "symptoms": "Dark brown spots with concentric rings on lower leaves first.",
         "treatment": "Apply fungicides. Remove infected leaves. Mulch around plants.",
-        "prevention": "Rotate crops. Stake plants. Water at base of plants."
+        "prevention": "Rotate crops. Stake plants. Water at base of plants.",
     },
     "Tomato___healthy": {
         "plant": "Tomato",
@@ -638,7 +763,7 @@ DISEASE_INFO = {
         "description": "This tomato leaf shows no signs of disease.",
         "symptoms": "No disease symptoms present.",
         "treatment": "No treatment needed.",
-        "prevention": "Regular monitoring and proper care."
+        "prevention": "Regular monitoring and proper care.",
     },
     "Tomato___Late_blight": {
         "plant": "Tomato",
@@ -646,7 +771,7 @@ DISEASE_INFO = {
         "description": "A destructive disease caused by Phytophthora infestans.",
         "symptoms": "Large, irregular brown spots. White mold on undersides. Rapid spread.",
         "treatment": "Apply fungicides immediately. Remove infected plants.",
-        "prevention": "Use resistant varieties. Improve air circulation. Avoid wet foliage."
+        "prevention": "Use resistant varieties. Improve air circulation. Avoid wet foliage.",
     },
     "Tomato___Leaf_Mold": {
         "plant": "Tomato",
@@ -654,7 +779,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Passalora fulva.",
         "symptoms": "Pale green to yellow spots on upper leaf surface. Olive-brown mold below.",
         "treatment": "Improve ventilation. Apply fungicides. Remove infected leaves.",
-        "prevention": "Reduce humidity. Space plants properly. Use resistant varieties."
+        "prevention": "Reduce humidity. Space plants properly. Use resistant varieties.",
     },
     "Tomato___Septoria_leaf_spot": {
         "plant": "Tomato",
@@ -662,7 +787,7 @@ DISEASE_INFO = {
         "description": "A common fungal disease caused by Septoria lycopersici.",
         "symptoms": "Small, circular spots with dark borders and gray centers with black dots.",
         "treatment": "Apply fungicides. Remove infected lower leaves.",
-        "prevention": "Rotate crops. Mulch around plants. Avoid overhead watering."
+        "prevention": "Rotate crops. Mulch around plants. Avoid overhead watering.",
     },
     "Tomato___Spider_mites_Two-spotted_spider_mite": {
         "plant": "Tomato",
@@ -670,7 +795,7 @@ DISEASE_INFO = {
         "description": "Tiny arachnid pests that feed on plant cells.",
         "symptoms": "Stippled, yellowing leaves. Fine webbing on undersides. Leaf drop.",
         "treatment": "Spray with water or insecticidal soap. Use miticides if severe.",
-        "prevention": "Maintain plant health. Avoid dusty conditions. Introduce predatory mites."
+        "prevention": "Maintain plant health. Avoid dusty conditions. Introduce predatory mites.",
     },
     "Tomato___Target_Spot": {
         "plant": "Tomato",
@@ -678,7 +803,7 @@ DISEASE_INFO = {
         "description": "A fungal disease caused by Corynespora cassiicola.",
         "symptoms": "Brown spots with concentric rings giving target-like appearance.",
         "treatment": "Apply fungicides. Remove infected leaves.",
-        "prevention": "Improve air circulation. Avoid overhead irrigation."
+        "prevention": "Improve air circulation. Avoid overhead irrigation.",
     },
     "Tomato___Tomato_mosaic_virus": {
         "plant": "Tomato",
@@ -686,7 +811,7 @@ DISEASE_INFO = {
         "description": "A highly contagious viral disease.",
         "symptoms": "Mottled light and dark green pattern on leaves. Distorted growth.",
         "treatment": "No cure. Remove and destroy infected plants.",
-        "prevention": "Use virus-free seeds. Disinfect tools. Wash hands before handling."
+        "prevention": "Use virus-free seeds. Disinfect tools. Wash hands before handling.",
     },
     "Tomato___Tomato_Yellow_Leaf_Curl_Virus": {
         "plant": "Tomato",
@@ -694,7 +819,7 @@ DISEASE_INFO = {
         "description": "A devastating viral disease spread by whiteflies.",
         "symptoms": "Upward curling of leaves. Yellowing. Stunted growth. Reduced fruit.",
         "treatment": "No cure. Remove infected plants. Control whiteflies.",
-        "prevention": "Use resistant varieties. Control whitefly populations. Use reflective mulches."
+        "prevention": "Use resistant varieties. Control whitefly populations. Use reflective mulches.",
     },
     "Wheat brown spot disease": {
         "plant": "Wheat",
@@ -702,30 +827,33 @@ DISEASE_INFO = {
         "description": "A fungal disease affecting wheat leaves.",
         "symptoms": "Brown oval spots on leaves that may merge.",
         "treatment": "Apply fungicides. Remove crop residue.",
-        "prevention": "Use resistant varieties. Crop rotation."
-    }
+        "prevention": "Use resistant varieties. Crop rotation.",
+    },
 }
 
 
 def load_model_and_classes():
     """Load the model and class indices"""
-    global model, class_indices, MODEL_LOAD_ERROR, ACTIVE_MODEL_PATH
+    global model, class_indices, MODEL_LOAD_ERROR, ACTIVE_MODEL_PATH, MODEL_PATH
 
     model = None
     class_indices = None
     MODEL_LOAD_ERROR = None
     ACTIVE_MODEL_PATH = None
+    MODEL_PATH = None
 
     print("Loading model...")
     model, model_path = _get_inference_model()
+    MODEL_PATH = model_path
     print(f"Loaded model file: {model_path}")
 
-    with open(CLASS_INDICES_PATH, 'r') as f:
+    with open(CLASS_INDICES_PATH, "r") as f:
         class_indices = json.load(f)
 
     # Reverse the indices to get class names from predictions
     class_indices = {v: k for k, v in class_indices.items()}
     print("Model loaded successfully.")
+    return model, class_indices, ACTIVE_MODEL_PATH
 
 
 def predict_disease(img_path, inference_model=None):
@@ -738,7 +866,7 @@ def predict_disease(img_path, inference_model=None):
     img_array = image.img_to_array(img)
     img_array = np.expand_dims(img_array, axis=0)
     img_array = preprocess_array_for_model(img_array)
-    
+
     # Make prediction
     predictions = active_model.predict(img_array, verbose=0)
     diagnostics = compute_prediction_diagnostics(predictions[0])
@@ -746,7 +874,7 @@ def predict_disease(img_path, inference_model=None):
     confidence = float(diagnostics["top1_prob"]) * 100.0
     confidence_margin = float(diagnostics["confidence_margin"]) * 100.0
     entropy_bits = float(diagnostics["entropy_bits"])
-    
+
     # Get class name
     class_name = class_indices.get(predicted_class_idx, "Unknown")
 
@@ -761,11 +889,15 @@ def predict_disease(img_path, inference_model=None):
     )
 
     if safety["reject"]:
-        guidance = "Upload a clear, close-up image of a single leaf under good lighting."
+        guidance = (
+            "Upload a clear, close-up image of a single leaf under good lighting."
+        )
         if leaf_validation["reason"]:
             guidance = f"{leaf_validation['reason']} {guidance}"
         else:
-            safety_reason = ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+            safety_reason = (
+                ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+            )
             guidance = f"Inference was rejected due to {safety_reason}. {guidance}"
 
         return {
@@ -788,17 +920,22 @@ def predict_disease(img_path, inference_model=None):
                 "rejection_reasons": safety["reasons"],
             },
         }
-    
+
     # Get disease info
-    info = DISEASE_INFO.get(class_name, {
-        "plant": class_name.split("___")[0] if "___" in class_name else "Unknown",
-        "disease": class_name.split("___")[1] if "___" in class_name else class_name,
-        "description": "Information not available for this disease.",
-        "symptoms": "Please consult a plant pathologist for detailed symptoms.",
-        "treatment": "Consult with local agricultural extension for treatment options.",
-        "prevention": "Maintain good plant hygiene and regular monitoring."
-    })
-    
+    info = DISEASE_INFO.get(
+        class_name,
+        {
+            "plant": class_name.split("___")[0] if "___" in class_name else "Unknown",
+            "disease": class_name.split("___")[1]
+            if "___" in class_name
+            else class_name,
+            "description": "Information not available for this disease.",
+            "symptoms": "Please consult a plant pathologist for detailed symptoms.",
+            "treatment": "Consult with local agricultural extension for treatment options.",
+            "prevention": "Maintain good plant hygiene and regular monitoring.",
+        },
+    )
+
     return {
         "class_name": class_name,
         "confidence": round(confidence, 2),
@@ -820,13 +957,13 @@ def predict_disease(img_path, inference_model=None):
     }
 
 
-@app.route('/')
+@app.route("/")
 def index():
     """Render the main page"""
-    available_model_names = [os.path.basename(path) for path in _list_available_model_paths()]
-    active_name = os.path.basename(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
+    available_model_names = [_model_option_name(path) for path in _list_available_model_paths()]
+    active_name = _model_option_name(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
     return render_template(
-        'index.html',
+        "index.html",
         control_actions=CONTROL_ACTIONS,
         compute_info=get_compute_info(),
         available_models=available_model_names,
@@ -835,79 +972,85 @@ def index():
     )
 
 
-@app.route('/predict', methods=['POST'])
+@app.route("/predict", methods=["POST"])
 def predict():
     """Handle image upload and prediction"""
     if model is None or class_indices is None:
         details = MODEL_LOAD_ERROR or (
             "Model artifacts are not loaded. Run training first or place a valid model in the models/ directory."
         )
-        return jsonify({'error': details}), 503
+        return jsonify({"error": details}), 503
 
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    
-    file = request.files['file']
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
     filename_input = file.filename
 
     if not filename_input:
-        return jsonify({'error': 'No file selected'}), 400
+        return jsonify({"error": "No file selected"}), 400
 
     if not _is_allowed_upload(filename_input):
-        return jsonify({'error': 'Unsupported file type. Use JPG, PNG, or WEBP.'}), 400
+        return jsonify({"error": "Unsupported file type. Use JPG, PNG, or WEBP."}), 400
 
-    selected_model_name = (request.form.get('model_name') or '').strip()
-    
+    selected_model_name = (request.form.get("model_name") or "").strip()
+
     if file:
         # Save file temporarily
         original_name = secure_filename(filename_input)
         _, ext = os.path.splitext(original_name)
         filename = f"{uuid.uuid4().hex}{ext.lower()}"
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         file.save(filepath)
-        
+
         try:
-            inference_model, active_model_path = _get_inference_model(selected_model_name)
+            inference_model, active_model_path = _get_inference_model(
+                selected_model_name
+            )
 
             # Make prediction
             result = predict_disease(filepath, inference_model=inference_model)
-            result['model_name'] = os.path.basename(active_model_path)
-            
+            result["model_name"] = _model_option_name(active_model_path)
+
             # Read image for preview
-            with open(filepath, 'rb') as f:
-                img_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            result['image'] = f"data:image/jpeg;base64,{img_data}"
-            
+            with open(filepath, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+
+            result["image"] = f"data:image/jpeg;base64,{img_data}"
+
             return jsonify(result)
-        
+
         except ValueError as e:
-            return jsonify({'error': str(e)}), 400
+            return jsonify({"error": str(e)}), 400
 
         except Exception as e:
-            return jsonify({'error': str(e)}), 500
-        
+            return jsonify({"error": str(e)}), 500
+
         finally:
             # Clean up uploaded file
             if os.path.exists(filepath):
                 os.remove(filepath)
-    
-    return jsonify({'error': 'Invalid file'}), 400
+
+    return jsonify({"error": "Invalid file"}), 400
 
 
-@app.route('/health')
+@app.route("/health")
 def health():
     """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': model is not None and class_indices is not None,
-        'model_error': MODEL_LOAD_ERROR,
-        'active_model': os.path.basename(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None,
-        'available_models': [os.path.basename(path) for path in _list_available_model_paths()],
-    })
+    return jsonify(
+        {
+            "status": "healthy",
+            "model_loaded": model is not None and class_indices is not None,
+            "model_error": MODEL_LOAD_ERROR,
+            "active_model": _model_option_name(ACTIVE_MODEL_PATH)
+            if ACTIVE_MODEL_PATH
+            else None,
+            "available_models": [_model_option_name(path) for path in _list_available_model_paths()],
+        }
+    )
 
 
-@app.route('/control/actions', methods=['GET'])
+@app.route("/control/actions", methods=["GET"])
 def control_actions():
     """Return available control panel actions."""
     actions = []
@@ -923,7 +1066,7 @@ def control_actions():
     return jsonify({"actions": actions})
 
 
-@app.route('/control/run/<action_key>', methods=['POST'])
+@app.route("/control/run/<action_key>", methods=["POST"])
 def control_run(action_key):
     """Start a background workflow action."""
     if action_key not in CONTROL_ACTIONS:
@@ -932,26 +1075,46 @@ def control_run(action_key):
     with JOBS_LOCK:
         for job in JOBS.values():
             if job["action"] == action_key and job["status"] in {"starting", "running"}:
-                return jsonify({"error": "This action is already running.", "job": _job_response(job)}), 409
+                return jsonify(
+                    {
+                        "error": "This action is already running.",
+                        "job": _job_response(job),
+                    }
+                ), 409
 
     payload = request.get_json(silent=True) or {}
-    archive_logs = _to_bool(payload.get('archive_logs'))
-    base_model = (payload.get('base_model') or '').strip() if payload else ''
+    archive_logs = _to_bool(payload.get("archive_logs"))
+    base_model = (payload.get("base_model") or "").strip() if payload else ""
     if not payload and request.form:
-        archive_logs = _to_bool(request.form.get('archive_logs'))
-        base_model = (request.form.get('base_model') or '').strip()
+        archive_logs = _to_bool(request.form.get("archive_logs"))
+        base_model = (request.form.get("base_model") or "").strip()
 
-    if base_model and action_key not in {"train", "resume"}:
-        return jsonify({"error": "Base model selection is only available for training actions."}), 400
+    if base_model and action_key not in {"train"}:
+        return jsonify(
+            {"error": "Base model selection is only available for training actions."}
+        ), 400
 
-    job = _create_job(action_key, archive_logs=archive_logs, base_model=base_model or None)
+    if action_key == "train":
+        if not base_model:
+            base_model = TRAIN_BACKBONES[0] if TRAIN_BACKBONES else None
+        if base_model and base_model not in TRAIN_BACKBONES:
+            return jsonify(
+                {
+                    "error": "Unknown backbone selected for training.",
+                    "available_backbones": TRAIN_BACKBONES,
+                }
+            ), 400
+
+    job = _create_job(
+        action_key, archive_logs=archive_logs, base_model=base_model or None
+    )
     thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
     thread.start()
 
     return jsonify({"message": f"{job['label']} started.", "job": _job_response(job)})
 
 
-@app.route('/control/jobs', methods=['GET'])
+@app.route("/control/jobs", methods=["GET"])
 def control_jobs():
     """List all workflow jobs."""
     with JOBS_LOCK:
@@ -960,13 +1123,13 @@ def control_jobs():
     return jsonify({"jobs": jobs})
 
 
-@app.route('/control/system', methods=['GET'])
+@app.route("/control/system", methods=["GET"])
 def control_system():
     """Return compute backend information for control panel status."""
     return jsonify({"compute": get_compute_info()})
 
 
-@app.route('/control/stop/<job_id>', methods=['POST'])
+@app.route("/control/stop/<job_id>", methods=["POST"])
 def control_stop(job_id):
     """Stop a running workflow job."""
     with JOBS_LOCK:
@@ -990,15 +1153,17 @@ def control_stop(job_id):
     return jsonify({"message": "Stop signal sent.", "job": _job_response(job)})
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         load_model_and_classes()
     except Exception as exc:
         MODEL_LOAD_ERROR = str(exc)
         print(f"Model initialization skipped: {MODEL_LOAD_ERROR}")
-        print("The web app will still start, but prediction requests will return 503 until a model is available.")
+        print(
+            "The web app will still start, but prediction requests will return 503 until a model is available."
+        )
     print("\nLeaf Disease Detection Web App")
     print("=" * 40)
     print("Open http://localhost:5000 in your browser")
     print("=" * 40)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
