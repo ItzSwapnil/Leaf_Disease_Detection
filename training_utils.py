@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import shutil
 import tempfile
+import zipfile
 from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, Sequence
@@ -88,6 +90,122 @@ class WarmupCosineSchedule(keras.optimizers.schedules.LearningRateSchedule):
 # Callbacks
 
 
+def _normalize_save_mode(save_mode: str) -> str:
+    mode = str(save_mode or "with_optimizer").strip().lower().replace("-", "_")
+    if mode not in {"with_optimizer", "without_optimizer", "all"}:
+        raise ValueError(
+            "Unsupported save mode "
+            f"'{save_mode}'. Expected one of: with_optimizer, without_optimizer, all."
+        )
+    return mode
+
+
+def _without_optimizer_path(model_path: str) -> str:
+    base, ext = os.path.splitext(model_path)
+    extension = ext or ".keras"
+    return f"{base}_no_optimizer{extension}"
+
+
+def _strip_optimizer_from_keras_archive(model_path: str) -> None:
+    """Rewrite a .keras archive and remove the top-level optimizer group from weights."""
+    try:
+        import h5py
+    except Exception:
+        # If h5py is unavailable, keep best-effort behavior from clone save.
+        return
+
+    if not str(model_path).lower().endswith(".keras"):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="leaf_strip_optimizer_") as tmp_dir:
+        extracted_weights_path = os.path.join(tmp_dir, "model.weights.h5")
+        stripped_weights_path = os.path.join(tmp_dir, "model.weights.stripped.h5")
+        rebuilt_archive_path = os.path.join(tmp_dir, "rebuilt.keras")
+        other_members: dict[str, bytes] = {}
+
+        with zipfile.ZipFile(model_path, "r") as archive:
+            member_names = archive.namelist()
+            if "model.weights.h5" not in member_names:
+                return
+
+            for member_name in member_names:
+                if member_name == "model.weights.h5":
+                    with archive.open(member_name, "r") as src, open(
+                        extracted_weights_path, "wb"
+                    ) as dst:
+                        for chunk in iter(lambda: src.read(4 * 1024 * 1024), b""):
+                            dst.write(chunk)
+                else:
+                    other_members[member_name] = archive.read(member_name)
+
+        with h5py.File(extracted_weights_path, "r") as src_h5, h5py.File(
+            stripped_weights_path, "w"
+        ) as dst_h5:
+            for top_key in src_h5.keys():
+                if str(top_key).lower() == "optimizer":
+                    continue
+                src_h5.copy(top_key, dst_h5, name=top_key)
+
+        with zipfile.ZipFile(rebuilt_archive_path, "w", compression=zipfile.ZIP_STORED) as out:
+            if "metadata.json" in other_members:
+                out.writestr("metadata.json", other_members.pop("metadata.json"))
+            if "config.json" in other_members:
+                out.writestr("config.json", other_members.pop("config.json"))
+            out.write(stripped_weights_path, arcname="model.weights.h5")
+            for member_name in sorted(other_members.keys()):
+                out.writestr(member_name, other_members[member_name])
+
+        try:
+            os.replace(rebuilt_archive_path, model_path)
+        except OSError as exc:
+            # EXDEV can happen when temp dir and model dir are on different mounts.
+            if getattr(exc, "errno", None) != 18:
+                raise
+            shutil.copy2(rebuilt_archive_path, model_path)
+            os.remove(rebuilt_archive_path)
+
+
+def _save_model_with_include_optimizer(
+    model: keras.Model, model_path: str, include_optimizer: bool
+) -> None:
+    if include_optimizer:
+        try:
+            model.save(model_path, include_optimizer=True)
+            return
+        except TypeError:
+            # Older Keras variants may not expose include_optimizer.
+            model.save(model_path)
+            return
+
+    # Avoid clone_model for optimizer-free exports: some backbones (for example
+    # ViT variants) may not deserialize cleanly across keras-hub versions.
+    # Save directly, then force-strip optimizer tensors from the archive.
+    try:
+        model.save(model_path, include_optimizer=False)
+    except TypeError:
+        model.save(model_path)
+    _strip_optimizer_from_keras_archive(model_path)
+
+
+def save_model_variants(
+    model: keras.Model, model_path: str, save_mode: str = "with_optimizer"
+) -> list[str]:
+    mode = _normalize_save_mode(save_mode)
+
+    if mode == "with_optimizer":
+        _save_model_with_include_optimizer(model, model_path, include_optimizer=True)
+        return [model_path]
+
+    if mode == "without_optimizer":
+        _save_model_with_include_optimizer(model, model_path, include_optimizer=False)
+        return [model_path]
+
+    no_optimizer_path = _without_optimizer_path(model_path)
+    _save_model_with_include_optimizer(model, model_path, include_optimizer=True)
+    _save_model_with_include_optimizer(model, no_optimizer_path, include_optimizer=False)
+    return [model_path, no_optimizer_path]
+
+
 class BestModelSaver(keras.callbacks.Callback):
     def __init__(
         self,
@@ -96,12 +214,14 @@ class BestModelSaver(keras.callbacks.Callback):
         mode: str = "max",
         initial_best: Optional[float] = None,
         verbose: int = 1,
+        save_mode: str = "with_optimizer",
     ):
         super().__init__()
         self.model_path = model_path
         self.monitor = monitor
         self.mode = mode
         self.verbose = int(verbose)
+        self.save_mode = str(save_mode or "with_optimizer")
         if initial_best is None:
             self.best = float("-inf") if mode == "max" else float("inf")
         else:
@@ -119,12 +239,16 @@ class BestModelSaver(keras.callbacks.Callback):
         current = float(current)
         if self._is_better(current):
             self.best = current
-            self.model.save(self.model_path)
+            saved_paths = save_model_variants(
+                self.model, self.model_path, save_mode=self.save_mode
+            )
             if self.verbose:
                 print(
                     f"Saved improved model at epoch {epoch + 1}: "
                     f"{self.monitor}={current:.6f}"
                 )
+                if len(saved_paths) > 1:
+                    print("Saved variants: " + ", ".join(saved_paths))
 
 
 class OverfittingStopper(keras.callbacks.Callback):
@@ -171,12 +295,14 @@ class PreOverfitRestorer(keras.callbacks.Callback):
         patience: int = 2,
         verbose: int = 1,
         save_path: Optional[str] = None,
+        save_mode: str = "with_optimizer",
     ):
         super().__init__()
         self.min_gap = float(min_gap)
         self.patience = int(patience)
         self.verbose = int(verbose)
         self.save_path = save_path
+        self.save_mode = str(save_mode or "with_optimizer")
         self.bad_epochs = 0
         self.last_safe_weights = None
         self.last_safe_epoch = None
@@ -225,7 +351,9 @@ class PreOverfitRestorer(keras.callbacks.Callback):
                     )
 
                 if restored and self.save_path:
-                    self.model.save(self.save_path)
+                    save_model_variants(
+                        self.model, self.save_path, save_mode=self.save_mode
+                    )
                     if self.verbose:
                         print(f"Saved restored pre-overfit model to: {self.save_path}")
 
@@ -699,10 +827,7 @@ def mixup_batch_tf(images, labels, alpha: float = 0.2):
 # Optimiser
 
 
-def build_adamw_optimizer(learning_rate):
-
-    if OPTIMIZER.lower() != "adamw":
-        raise ValueError(f"Unsupported OPTIMIZER '{OPTIMIZER}'. Expected 'AdamW'.")
+def _build_adamw_kwargs(learning_rate):
 
     optimizer_kwargs = {
         "learning_rate": learning_rate,
@@ -729,10 +854,63 @@ def build_adamw_optimizer(learning_rate):
         # If not supported by the keras version, it is also omitted
         pass
 
+    return optimizer_kwargs
+
+
+def build_adamw_optimizer(learning_rate):
+    configured = str(OPTIMIZER or "AdamW").strip().lower()
+    if configured != "adamw":
+        raise ValueError(f"Unsupported OPTIMIZER '{OPTIMIZER}'. Expected 'AdamW'.")
+
+    optimizer_kwargs = _build_adamw_kwargs(learning_rate)
+
     if USE_OPTIMIZER_EMA:
         print(f"AdamW EMA enabled (momentum={EMA_MOMENTUM}).")
     print(f"AdamW weight_decay={WEIGHT_DECAY}.")
     return keras.optimizers.AdamW(**optimizer_kwargs)
+
+
+def build_optimizer(learning_rate, optimizer_name: Optional[str] = None):
+    name = str(optimizer_name or OPTIMIZER or "AdamW").strip().lower()
+
+    if name == "adamw":
+        optimizer_kwargs = _build_adamw_kwargs(learning_rate)
+        if USE_OPTIMIZER_EMA:
+            print(f"AdamW EMA enabled (momentum={EMA_MOMENTUM}).")
+        print(f"AdamW weight_decay={WEIGHT_DECAY}.")
+        return keras.optimizers.AdamW(**optimizer_kwargs)
+
+    if name == "adam":
+        if USE_OPTIMIZER_EMA:
+            print("Optimizer EMA is only applied for AdamW; skipping for Adam.")
+        print("Using Adam optimizer.")
+        return keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
+
+    if name == "sgd":
+        if USE_OPTIMIZER_EMA:
+            print("Optimizer EMA is only applied for AdamW; skipping for SGD.")
+        print("Using SGD optimizer (momentum=0.9, nesterov=True).")
+        return keras.optimizers.SGD(
+            learning_rate=learning_rate,
+            momentum=0.9,
+            nesterov=True,
+            clipnorm=1.0,
+        )
+
+    if name == "rmsprop":
+        if USE_OPTIMIZER_EMA:
+            print("Optimizer EMA is only applied for AdamW; skipping for RMSprop.")
+        print("Using RMSprop optimizer (momentum=0.9).")
+        return keras.optimizers.RMSprop(
+            learning_rate=learning_rate,
+            momentum=0.9,
+            clipnorm=1.0,
+        )
+
+    raise ValueError(
+        "Unsupported optimizer "
+        f"'{optimizer_name}'. Expected one of: AdamW, Adam, SGD, RMSprop."
+    )
 
 
 # Misc helpers

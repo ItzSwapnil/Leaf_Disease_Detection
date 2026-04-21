@@ -1,550 +1,508 @@
-# 🍃 Leaf Disease Detection System
+# Leaf Disease Detection
 
-> **SOTA Plant Disease Classification** — Lightweight (B0) → Scaled (S) → **Vision Transformer (DINOv3)** 🏆
+Production-focused plant leaf disease classification with TensorFlow/Keras.
+This repository includes end-to-end scripts for training, refinement,
+evaluation, safety-guarded inference, and a Flask web UI.
 
-Production-grade deep learning system for automated plant leaf disease classification. Multi-backbone architecture with progressive model evolution, comprehensive safety mechanisms, and end-to-end training/evaluation/deployment pipelines.
-
-![Python 3.13+](https://img.shields.io/badge/Python-3.13+-blue.svg)
+![Python 3.13+](https://img.shields.io/badge/Python-3.13%2B-blue.svg)
 ![TensorFlow 2.21+](https://img.shields.io/badge/TensorFlow-2.21%2B-orange.svg)
 ![Keras 3.13+](https://img.shields.io/badge/Keras-3.13%2B-red.svg)
-![46 Total Classes](https://img.shields.io/badge/Classes-46-brightgreen.svg)
-![259K+ Images](https://img.shields.io/badge/Dataset-259K%2B-blue.svg)
+![Classes 46](https://img.shields.io/badge/Classes-46-brightgreen.svg)
+![Dataset 259K+](https://img.shields.io/badge/Dataset-259K%2B-blue.svg)
 ![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
----
+## Abstract
 
-## ⚡ Quick Start (5 minutes)
+This repository presents a production-oriented plant leaf disease recognition
+system that combines modern deep backbones, calibrated confidence estimates,
+and safety-aware inference controls. The workflow spans dataset preparation,
+training, post-training refinement, robustness evaluation, and deployment via
+CLI and web endpoints. The design objective is not only high classification
+performance, but also trustworthy predictions through uncertainty-aware gating
+and auditable evaluation artifacts.
 
-### 1. Setup
+## Scientific Highlights
+
+| Dimension | Design Choice | Scientific Rationale |
+|---|---|---|
+| Representation learning | EfficientNetV2 + DINOv3 backbones | Strong transfer performance across plant-pathology textures |
+| Generalization | MixUp, CutMix, RandAugment, class balancing | Reduces overfitting and improves minority-class behavior |
+| Reliability | Temperature scaling + calibration metrics | Aligns confidence with empirical correctness |
+| Safety | Confidence, entropy, and OOD-style rejection | Mitigates high-risk low-trust predictions |
+| Reproducibility | Manifested splits + report artifacts | Enables repeatable experiments and audit trails |
+
+## Overview
+
+This project supports three backbone families and one unified workflow:
+
+- EfficientNetV2 variants (lightweight to larger CNN backbones)
+- DINOv3 (ViT-based backbone)
+- A shared classification head, calibration pipeline, and safety guard layer
+
+Main workflows included:
+
+- Train from dataset split folders
+- Fine-tune and refine checkpoints
+- Evaluate calibration, robustness, and uncertainty
+- Run predictions from CLI or web app
+
+## Dataset Used
+
+This repository expects an expanded PlantVillage-style dataset called
+"PlantVillage-46" in local split folders.
+
+Primary dataset used for this project:
+
+- Mendeley Data (exact dataset package used): https://data.mendeley.com/datasets/32vfdrj76m/1
+
+Related base references (background attribution):
+
+- PlantVillage original dataset (GitHub): https://github.com/spMohanty/PlantVillage-Dataset
+- PlantVillage mirror (Kaggle): https://www.kaggle.com/datasets/mohitsingh1804/plantvillage
+
+Important notes:
+
+- The training setup in this repo uses 46 classes (13 healthy + 33 disease)
+  and 16 crops.
+- Class index mapping is tracked in `models/class_indices.json`.
+- Exact reproducibility requires the same class folder names and split layout.
+
+### Dataset Summary Table
+
+| Item | Value |
+|---|---|
+| Primary dataset | Mendeley Data `32vfdrj76m/1` |
+| Dataset URL | https://data.mendeley.com/datasets/32vfdrj76m/1 |
+| Total classes | 46 |
+| Healthy vs disease classes | 13 healthy / 33 disease |
+| Supported crops | 16 |
+| Files scanned | 259,135 |
+| Unique SHA-1 items | 234,115 |
+| Exact duplicates removed | 25,020 |
+| Final unique items after dedupe | 234,115 |
+
+Current local corpus stats (from `reports/leakage_free_split_summary.json`):
+
+- Files scanned: 259,135
+- Unique SHA-1 items: 234,115
+- Exact duplicates removed: 25,020
+- Final unique items after dedupe: 234,115
+
+Expected dataset layout:
+
+```text
+dataset/
+  train/
+    <class_name>/
+      *.jpg|*.jpeg|*.png|...
+  val/
+    <class_name>/
+      *
+  test/
+    <class_name>/
+      *
+```
+
+### Split Summary Table (Leakage-Free Manifest)
+
+| Split | Images | Share of final unique items |
+|---|---:|---:|
+| Train | 198,975 | 84.99% |
+| Validation | 17,536 | 7.49% |
+| Test | 17,604 | 7.52% |
+
+Source: `reports/leakage_free_split_summary.json` (`split_counts` totals).
+
+Recommended dataset setup steps:
+
+1. Download and extract the Mendeley dataset archive.
+2. Ensure split folders are available as `dataset/train`, `dataset/val`, and `dataset/test`.
+3. Ensure each split contains class subfolders with image files.
+4. Validate counts and class discovery:
+
+```bash
+uv run python tools/dataset/count_dataset.py
+```
+
+## Environment Setup
+
+### 1. Clone and install dependencies
+
 ```bash
 git clone https://github.com/ItzSwapnil/Leaf_Disease_Detection.git
 cd Leaf_Disease_Detection
 uv sync --python 3.13
 ```
 
-### 2. Run Web App
+### 2. Verify installation
+
+```bash
+uv run python main.py --help
+uv run pytest -q
+```
+
+### 3. Reproducibility checklist
+
+| Check | Action |
+|---|---|
+| Dependency lock | Use `uv sync --python 3.13` in a clean workspace |
+| Dataset integrity | Run `uv run python tools/dataset/count_dataset.py` |
+| Split leakage audit | Run `uv run python tools/dataset/create_leakage_free_split.py` |
+| Determinism control | Set `RUN_SEED` when comparing experiments |
+| Artifact traceability | Keep `reports/` outputs and `models/logs/` histories |
+
+## How Everything Works (End-to-End)
+
+### 1. Data loading and preprocessing
+
+- Dataset paths come from `config.py`: `dataset/train`, `dataset/val`, `dataset/test`.
+- Images are loaded with `keras.utils.image_dataset_from_directory`.
+- Preprocessing is routed through `preprocessing.py`.
+- Fine-tune, refine, and evaluate flows lock preprocessing to the detected
+  loaded-model backbone to avoid mismatch.
+
+### 2. Model construction
+
+- Backbone registry and factories are defined in `backbones.py`.
+- `train_model.py` builds the classifier head and attaches it to the selected
+  backbone.
+- Backbones can be selected from CLI (`--base-model`) or env (`LEAF_BASE_MODEL`).
+
+### 3. Training stages
+
+- Stage A: head warm-up with frozen backbone.
+- Stage B: full/partial unfreeze for fine-tuning.
+- Optional data balancing and augmentation:
+  - class equalizer
+  - MixUp / CutMix
+  - RandAugment
+
+### 4. Refinement stage
+
+- `refine_model.py` performs post-fine-tune refinement with rolling
+  pre-overfit restoration.
+- Produces the deployment-ready refined model file.
+
+### 5. Evaluation stage
+
+- `evaluate_model.py` computes:
+  - aggregate metrics (accuracy, macro precision/recall/F1)
+  - calibration (ECE, temperature scaling)
+  - uncertainty and OOD reports
+  - robustness suite metrics
+- Reports are saved under `reports/` and reliability plots under `plots/`.
+
+### 6. Inference safety and prediction
+
+- `predict.py` applies model inference + safety checks from `inference_guard.py`.
+- Safety includes confidence, entropy, and OOD-style gating.
+- For incompatible legacy ViT checkpoints, a KerasHub compatibility shim is
+  applied automatically.
+
+Formal acceptance rule used by the safety gate:
+
+$$
+	ext{accept}(x)=\mathbb{1}\left[p_{\max}(x) \ge \tau_c\;\land\;\frac{H(p(x))}{\log K} \le \tau_h\right]
+$$
+
+Where $p_{\max}$ is top-class probability, $H(p)$ is predictive entropy,
+$K$ is number of classes, $\tau_c$ is confidence threshold,
+and $\tau_h$ is entropy threshold.
+
+### 7. Web serving
+
+- `app.py` starts a Flask app with:
+  - upload + prediction endpoint
+  - health endpoint
+  - control panel endpoints to launch train/fine-tune/refine/evaluate/figures
+
+## Mermaid Diagrams
+
+### End-to-end Training and Deployment Flow
+
+```mermaid
+flowchart TD
+    A[Download dataset<br/>Mendeley 32vfdrj76m/1] --> B[Arrange folders<br/>dataset/train, dataset/val, dataset/test]
+    B --> C[Train<br/>train_model.py]
+    C --> D[Fine-tune<br/>fine_tune_model.py]
+    D --> E[Refine<br/>refine_model.py]
+    E --> F[Evaluate<br/>evaluate_model.py]
+    F --> G{Metrics and safety acceptable?}
+    G -- Yes --> H[Serve and infer<br/>app.py or predict.py]
+    G -- No --> I[Adjust config and retrain]
+    I --> C
+    H --> J[Generate figures<br/>scripts/generate_figures.py]
+```
+
+### Inference Request Sequence
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant W as Web UI or CLI
+    participant P as Predictor
+    participant M as Keras Model
+    participant G as Inference Guard
+
+    U->>W: Provide image
+    W->>P: Request prediction
+    P->>M: model.predict(image)
+    M-->>P: Class probabilities
+    P->>G: confidence, entropy, OOD checks
+    G-->>P: accept or reject
+    P-->>W: prediction plus confidence and reason
+    W-->>U: final result
+```
+
+## Main Scripts and Their Purpose
+
+| Script | Purpose | Typical Output |
+|---|---|---|
+| `main.py` | Command runner for serve/train/fine_tune/refine/evaluate/visualize | Runs child script and manages logging mode |
+| `train_model.py` | Primary training pipeline | checkpoints, logs, class indices, trained model artifacts |
+| `fine_tune_model.py` | Continue training from saved checkpoint | updated model + logs |
+| `refine_model.py` | Strict overfit-aware refinement | `models/leaf_disease_refined.keras` |
+| `evaluate_model.py` | Full evaluation and report generation | `reports/evaluation_report.json`, `reports/evaluation_report.md`, reliability plots |
+| `predict.py` | CLI/API inference utility | prediction output and optional visualization |
+| `app.py` | Flask web UI + control API | web dashboard at port 5000 |
+| `tools/dataset/create_leakage_free_split.py` | dedupe + stratified split generation | leakage manifest and summary JSON |
+
+## Quick Start Commands
+
+### Quick Command Table
+
+| Goal | Command |
+|---|---|
+| Run web app | `uv run python app.py` |
+| Predict one image | `uv run python predict.py --image path/to/leaf.jpg` |
+| Predict a directory | `uv run python predict.py --image path/to/folder` |
+| Train (default) | `uv run python train_model.py` |
+| Train (DINOv3) | `uv run python train_model.py --base-model DINOv3` |
+| Fine-tune | `uv run python fine_tune_model.py` |
+| Refine | `uv run python refine_model.py --model-path models/leaf_disease_classifier.keras --output-path models/leaf_disease_refined.keras` |
+| Evaluate | `uv run python evaluate_model.py --model-path models/leaf_disease_refined.keras` |
+| Generate figures | `uv run python scripts/generate_figures.py` |
+| Run tests | `uv run pytest -v` |
+
+### Run web app
+
 ```bash
 uv run python app.py
 # Open http://127.0.0.1:5000
 ```
 
-### 3. Make a Prediction
+### Predict a single image
+
 ```bash
 uv run python predict.py --image path/to/leaf.jpg
 ```
 
-**Output:**
-```
-Disease: Tomato_Early_Blight | Confidence: 0.982 | Action: Treat with fungicide
-```
-
-### 4. Run Tasks via Command Runner
-```bash
-# train | fine_tune | refine | evaluate | visualize | serve
-uv run python main.py train --base-model DINOv3
-```
-
----
-
-## 📊 At a Glance
-
-| Feature | Details |
-|---------|---------|
-| **Accuracy** | **99.09% test** (DINOv3) |
-| **Backbones** | EfficientNetV2-B0/S + DINOv3 Vision Transformer |
-| **Dataset** | 259K+ images, 46 total classes (13 healthy, 33 disease), 16 crops |
-| **Training** | 2-phase: head warm-up (5 epochs) + fine-tune (10 epochs) |
-| **Augmentation** | MixUp, CutMix, Label Smoothing |
-| **Safety** | Confidence/entropy rejection, OOD detection, MC Dropout |
-| **Interfaces** | 🖥️ Web UI + 💻 CLI + 🐍 Python API |
-| **Calibration** | Temperature scaling (τ=2.635), ECE=0.0082 |
-| **Inference Speed** | 50ms (B0) → 80ms (S) → 120ms (DINOv3) |
-
----
-
-## 🚀 Usage
-
-### A) Web Interface (Recommended)
-```bash
-uv run python app.py
-```
-Features:
-- 📤 Drag-drop image upload
-- 🎯 Top-3 predictions with confidence
-- 📋 Disease details (symptoms, treatment, prevention)
-- ⚙️ Workflow control panel (Train, Fine-tune, Refine, Evaluate, Visualize)
-- 📊 Live job monitoring
-
-### B) Command Line
-```bash
-# Single image
-uv run python predict.py --image path/to/leaf.jpg
-
-# Batch predict
-uv run python predict.py --image path/to/folder/
-```
-
-**Output:**
-```
-Disease: Tomato_Early_Blight | Confidence: 0.982 | Action: Treat with fungicide
-Disease: Apple_Cedar_Apple_Rust | Confidence: 0.978 | Action: Remove galls, apply sulfur
-```
-
-### C) Python API
-```python
-from predict import LeafDiseasePredictor
-
-predictor = LeafDiseasePredictor()
-result = predictor.predict("leaf.jpg")
-
-print(f"Disease: {result['disease']}")
-print(f"Confidence: {result['confidence']:.4f}")
-print(f"Top 3:")
-for pred in result['top_3_predictions']:
-    print(f"  - {pred['class']}: {pred['probability']:.4f}")
-```
-
-**Result:**
-```python
-{
-    "disease": "Tomato_Early_Blight",
-    "confidence": 0.9824,
-    "top_3_predictions": [
-        {"class": "Tomato_Early_Blight", "probability": 0.9824},
-        {"class": "Tomato_Septoria_Leaf_Spot", "probability": 0.0142},
-        {"class": "Tomato_Healthy", "probability": 0.0034}
-    ],
-    "disease_details": {
-        "description": "Fungal disease affecting tomato foliage...",
-        "symptoms": "Brown spots with concentric rings on lower leaves",
-        "treatment": "Apply fungicides; remove infected leaves",
-        "prevention": "Improve air circulation; crop rotation"
-    },
-    "inference_guard": {"passed_checks": True, "reason": "High confidence, low entropy"},
-    "calibration_confidence": "Reliable (ECE: 0.0082)"
-}
-```
-
-### D) REST API Endpoints
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/` | GET | Web UI |
-| `/predict` | POST | Predict from image upload |
-| `/health` | GET | Model health check |
-| `/control/actions` | GET | Available workflow actions |
-| `/control/run/<action>` | POST | Start job (train/evaluate/etc) |
-| `/control/jobs` | GET | Job history & status |
-
-**Example `/predict` request:**
-```bash
-curl -X POST -F "file=@leaf.jpg" http://127.0.0.1:5000/predict
-```
-
-**Response:**
-```json
-{
-  "disease": "Tomato_Early_Blight",
-  "confidence": 0.9824,
-  "disease_details": {
-    "description": "Early blight is a fungal disease...",
-    "symptoms": "Brown spots with concentric rings",
-    "treatment": "Apply fungicides (Chlorothalonil, Mancozeb)",
-    "prevention": "Improve air circulation; avoid overhead watering"
-  },
-  "top_3_predictions": [
-    {"class": "Tomato_Early_Blight", "probability": 0.9824},
-    {"class": "Tomato_Septoria_Leaf_Spot", "probability": 0.0142},
-    {"class": "Tomato_Healthy", "probability": 0.0034}
-  ],
-  "inference_guard": {
-    "confidence_threshold": 0.92,
-    "entropy_threshold": 0.7,
-    "passed_checks": true,
-    "reason": "High confidence and low entropy"
-  },
-  "temperature_scaled": true,
-  "calibration_confidence": "Reliable confidence scores (ECE: 0.0082)"
-}
-```
-
----
-
-## 🏗️ Model Architecture
-
-### Three Progressively Better Backbones
-
-| Backbone | Params | Speed | Accuracy | Inference | Best For |
-|----------|--------|-------|----------|-----------|----------|
-| **EfficientNetV2-B0** | 5.3M | ⚡⚡⚡ | 98.6% | 50ms | Edge/Mobile |
-| **EfficientNetV2-S** | 21.4M | ⚡⚡ | 98.8% | 80ms | Cloud/Standard |
-| **DINOv3 (SOTA)** | 87M | ⚡ | **99.09%** 🏆 | 120ms | Accuracy-first |
-
-### Training Pipeline
-
-```
-Dataset (259K images)
-    ↓
-Preprocessing & Augmentation (MixUp, CutMix, Label Smoothing)
-    ↓
-Phase 1: Train Head (frozen backbone, 5 epochs)
-    ↓
-Phase 2: Fine-tune (unfreeze backbone, cosine schedule, 10 epochs)
-    ↓
-Temperature Scaling & Calibration
-    ↓
-Evaluation: Top-1 accuracy, macro F1, ECE, Bootstrap CI
-```
-
-### Classification Head (Shared)
-```
-Input: Backbone features (224×224 → 2048 dims)
-  ↓
-GlobalAveragePooling
-  ↓
-BatchNormalization
-  ↓
-Dense(512, Swish) + Dropout(0.4)
-  ↓
-Dense(256, Swish) + Dropout(0.2)
-  ↓
-Dense(46, Softmax) ← 46 total classes (13 healthy, 33 disease)
-```
-
-### Production Safety Layer
-```
-Raw Prediction
-  ↓
-Temperature Scaling (τ = 2.635)
-  ↓
-Confidence Check (≥ 0.92?) → Reject if low
-  ↓
-Entropy Check (≤ 0.7?) → Reject if uncertain
-  ↓
-OOD Detection (Mahalanobis distance)
-  ↓
-Final Prediction + Confidence Score
-```
-
----
-
-## 📈 Performance Results
-
-### SOTA Model: DINOv3
-
-| Metric | Value |
-|--------|-------|
-| **Validation Accuracy** | 98.79% |
-| **Test Accuracy** | **99.09%** 🏆 |
-| **Macro F1-Score** | 0.9831 |
-| **Precision (Macro)** | 0.9844 |
-| **Recall (Macro)** | 0.9825 |
-| **ECE (Uncalibrated)** | 0.0683 |
-| **ECE (Temperature-Scaled)** | **0.0082** ✓ |
-| **Confidence Threshold (0.92) Coverage** | 71.81% |
-| **Test Samples** | 601 |
-
-### Backbone Comparison
-
-| Backbone | Val Acc | Test Acc | Status |
-|----------|---------|----------|--------|
-| EfficientNetV2-B0 | ~98.5% | ~98.6% | Production Baseline |
-| EfficientNetV2-S | ~98.7% | ~98.8% | Improved |
-| **DINOv3** | **98.79%** | **99.09%** | **State-of-the-Art** 🏆 |
-
----
-
-## 📚 Training & Configuration
-
-### Quick Training Examples
-
-**Train with default (B0):**
-```bash
-uv run python train_model.py
-```
-
-**Train with DINOv3:**
-```bash
-uv run python train_model.py --base-model DINOv3
-```
-
-**Quick test (10% data):**
-```bash
-LEAF_TRAIN_DATA_FRACTION=0.1 uv run python train_model.py
-```
-
-**DINOv3 with smaller batch (GPU memory limited):**
-```bash
-LEAF_BATCH_SIZE=8 uv run python train_model.py --base-model DINOv3
-```
-
-### Key Configuration
-
-```python
-# In config.py
-IMG_SIZE = 224                    # EfficientNetV2-B0 native resolution
-BATCH_SIZE = 32                   # Laptop-safe (8GB VRAM at fp16)
-BASE_MODEL = "EfficientNetV2B0"   # Default backbone
-EPOCHS_PHASE1 = 5                 # Head warm-up
-EPOCHS_PHASE2 = 10                # Full fine-tuning
-USE_MIXUP = True                  # Data augmentation
-USE_CUTMIX = True                 # Data augmentation
-LABEL_SMOOTHING = 0.1             # Regularization
-CONFIDENCE_REJECT_THRESHOLD = 0.92  # Safety threshold
-ENTROPY_REJECT_THRESHOLD = 0.7    # Uncertainty threshold
-```
-
-### Runtime Overrides
+### Predict a folder
 
 ```bash
-# Memory-constrained training
-LEAF_BATCH_SIZE=16 uv run python train_model.py
-
-# With strict overfitting detection
-LEAF_OVERFITTING_STOP_ENABLED=1 LEAF_OVERFITTING_STOP_PATIENCE=3 \
-  uv run python fine_tune_model.py
-
-# Comprehensive evaluation with robustness
-LEAF_ROBUSTNESS_EVAL_ENABLED=1 LEAF_MC_DROPOUT_ENABLED=1 \
-  uv run python evaluate_model.py
-
-# Enable detailed logs
-LEAF_SAVE_RUN_MANIFESTS=1 LEAF_SAVE_LOG_ARCHIVE=1 \
-  uv run python train_model.py
+uv run python predict.py --image path/to/folder
 ```
 
----
+Predict CLI options (from `uv run python predict.py --help`):
 
-## 📦 Dataset
+- `--image`, `-i`: Path to a single image file or a directory of images
+- `--model`, `-m`: Path to a saved `.keras` model file
+- `--save`, `-s`: Path to save the prediction visualization
 
-### Structure
-```
-dataset/
-├── train/     220,498 images (16 crops × ~2.8 samples/class on avg)
-├── val/       19,419 images
-└── test/      19,218 images
-```
+### Train
 
-### 46 Classes (13 Healthy + 33 Disease) Across 16 Crops
-
-| Crop | Classes | Examples |
-|------|---------|----------|
-| Apple | 3 | Cedar Apple Rust, Healthy, Scab |
-| Tomato | 6 | Early Blight, Late Blight, Septoria Leaf Spot, Healthy |
-| Corn | 4 | Common Rust, Northern Leaf Blight, Healthy |
-| Grape | 3 | Black Rot, Healthy, Leaf Blight |
-| Potato | 3 | Early Blight, Late Blight, Healthy |
-| + 11 more crops | 27 more classes | ... |
-
-**Supported crops:** Apple, Blueberry, Cherry, Corn, Grape, Orange, Peach, Pepper, Potato, Rice, Raspberry, Squash, Strawberry, Tomato, Wheat, Soybean
-
-### Load Dataset Programmatically
-
-```python
-from pathlib import Path
-from preprocessing import load_and_preprocess_image
-
-dataset_root = Path("dataset/train")
-for class_folder in sorted(dataset_root.iterdir()):
-    if class_folder.is_dir():
-        image_count = len(list(class_folder.glob("*.jpg")))
-        print(f"{class_folder.name}: {image_count} images")
-
-# Output dataset statistics
-from tools.dataset.count_dataset import count_dataset
-count_dataset()
-```
-
----
-
-## 🎨 Visual Gallery
-
-### Model Comparison
-| EfficientNetV2-B0 | DINOv3 | Backbone Evolution |
-|---|---|---|
-| [![B0 confusion](plots/EfficientNetV2-B0/confusion_matrix.png)](plots/EfficientNetV2-B0/confusion_matrix.png) | [![DINOv3 confusion](plots/DINOv3/confusion_matrix.png)](plots/DINOv3/confusion_matrix.png) | [![Comparison](plots/DINOv3/ablation_backbone_comparison.png)](plots/DINOv3/ablation_backbone_comparison.png) |
-
-### Ablation Studies
-| Augmentation Strategies | Regularization Impact | Temperature Scaling |
-|---|---|---|
-| [![Augmentation](plots/DINOv3/ablation_augmentation_strategies.png)](plots/DINOv3/ablation_augmentation_strategies.png) | [![Regularization](plots/DINOv3/ablation_regularization.png)](plots/DINOv3/ablation_regularization.png) | [![Temperature](plots/DINOv3/ablation_temperature_scaling.png)](plots/DINOv3/ablation_temperature_scaling.png) |
-
-### Statistical Analysis
-| Bootstrap CI | Margin Distribution | Per-Class Stability |
-|---|---|---|
-| [![Bootstrap](plots/DINOv3/statistical_bootstrap_ci_distributions.png)](plots/DINOv3/statistical_bootstrap_ci_distributions.png) | [![Margins](plots/DINOv3/statistical_margin_distributions.png)](plots/DINOv3/statistical_margin_distributions.png) | [![Stability](plots/DINOv3/statistical_per_class_stability.png)](plots/DINOv3/statistical_per_class_stability.png) |
-
-### Robustness Testing
-| Blur Degradation | Brightness/Contrast | JPEG Compression |
-|---|---|---|
-| [![Blur](plots/others/robustness_blur_degradation.png)](plots/others/robustness_blur_degradation.png) | [![Brightness](plots/others/robustness_brightness_contrast_matrix.png)](plots/others/robustness_brightness_contrast_matrix.png) | [![JPEG](plots/others/robustness_jpeg_compression.png)](plots/others/robustness_jpeg_compression.png) |
-
----
-
-## 📁 Project Structure
-
-```
-Leaf_Disease_Detection/
-├── app.py                         # Flask web application
-├── main.py                        # Task dispatcher (train/evaluate/etc)
-├── train_model.py                 # Training entrypoint
-├── fine_tune_model.py             # Fine-tuning entrypoint
-├── refine_model.py                # Refinement entrypoint
-├── evaluate_model.py              # Evaluation entrypoint
-├── predict.py                     # Inference CLI/API
-│
-├── config.py                      # Central configuration
-├── backbones.py                   # Backbone registry and factories
-├── model_paths.py                 # Model path resolution
-├── preprocessing.py               # Image preprocessing
-├── training_utils.py              # Training helpers
-├── training_progress.py           # Progress callbacks
-├── hardware.py                    # GPU/CPU detection
-│
-├── scripts/                       # Figure generation
-│   ├── generate_figures.py
-│   ├── generate_publication_figures.py
-│   └── ... (10+ visualization scripts)
-│
-├── evaluation/                    # Evaluation modules
-│   ├── calibration.py
-│   ├── reliability_plot.py
-│   └── robustness.py
-│
-├── tools/                         # Utilities (multi-seed, dataset stats)
-│   ├── run_multi_seed_experiment.py
-│   └── dataset/count_dataset.py
-│
-├── templates/                     # Web UI templates (Flask)
-│   └── index.html
-│
-├── tests/                         # Unit tests
-│   ├── test_backbones.py
-│   └── ... (multiple test modules)
-│
-├── dataset/                       # Train/val/test images
-│   ├── train/    (220K images)
-│   ├── val/      (19K images)
-│   └── test/     (19K images)
-│
-├── models/                        # Model artifacts
-│   ├── leaf_disease_checkpoint.keras
-│   ├── leaf_disease_classifier.keras
-│   └── leaf_disease_refined.keras
-│
-├── plots/                         # Generated visualizations (~60 PNGs)
-│   ├── DINOv3/
-│   ├── EfficientNetV2-B0/
-│   ├── EfficientNetV2-S/
-│   └── others/
-│
-├── logs/                          # Training/fine-tuning run logs
-├── uploads/                       # Temporary web uploads (runtime)
-├── reports/                       # Generated on first evaluation run
-└── pyproject.toml                 # Project metadata and dependencies
-```
-
----
-
-## 🔧 Common Tasks
-
-### Train a Model
 ```bash
-# Default (B0)
+# Default backbone
 uv run python train_model.py
 
-# With DINOv3
+# Explicit backbone
 uv run python train_model.py --base-model DINOv3
+
+# Train fraction, optimizer, save mode
+uv run python train_model.py \
+  --base-model EfficientNetV2B0 \
+  --train-fraction 0.25 \
+  --optimizer AdamW \
+  --save-mode with_optimizer \
+  --class-equalizer on
 ```
 
-### Fine-tune from Checkpoint
+### Fine-tune and refine
+
 ```bash
 uv run python fine_tune_model.py
+
+uv run python refine_model.py \
+  --model-path models/leaf_disease_classifier.keras \
+  --output-path models/leaf_disease_refined.keras
 ```
 
-### Evaluate on Test Set
+### Evaluate
+
 ```bash
+# Uses resolver fallback when omitted
+uv run python evaluate_model.py
+
+# Explicit model path
 uv run python evaluate_model.py --model-path models/leaf_disease_refined.keras
 ```
 
-### Generate Visualizations
+### Generate figures
+
 ```bash
 uv run python scripts/generate_figures.py
 uv run python scripts/generate_publication_figures.py
 ```
 
-### Run Tests
+### Run tests
+
 ```bash
 uv run pytest -v
 ```
 
----
+## Visual Gallery (Plots)
 
-## ⚠️ Troubleshooting
+If plots are missing, generate them first:
 
-| Issue | Solution |
-|-------|----------|
-| **GPU not detected** | Verify NVIDIA CUDA + TensorFlow compatibility. AMD integrated GPUs not supported. |
-| **Out of Memory (OOM)** | Reduce batch size: `LEAF_BATCH_SIZE=16 uv run python train_model.py` |
-| **Model not found** | Pass explicit path: `uv run python evaluate_model.py --model-path models/leaf_disease_refined.keras` |
-| **Port 5000 in use** | Run on different port: `PORT=5001 uv run python app.py` |
-| **DINOv3 training slow** | Normal (87M params). Use smaller batch: `LEAF_BATCH_SIZE=8` |
-| **Import errors** | Reinstall: `uv sync --python 3.13` |
-| **Evaluation stalls** | Disable robustness: `LEAF_ROBUSTNESS_EVAL_ENABLED=0 uv run python evaluate_model.py` |
-
-**Debug commands:**
 ```bash
-# Check TensorFlow GPU setup
-uv run python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
-
-# View current config
-uv run python -c "from config import *; print(f'IMG_SIZE={IMG_SIZE}, BATCH_SIZE={BATCH_SIZE}')"
-
-# Check model existence
-ls -lh models/leaf_disease_*.keras
-
-# Monitor GPU during training (if NVIDIA)
-watch -n 1 nvidia-smi
+uv run python scripts/generate_figures.py
+uv run python scripts/generate_publication_figures.py
 ```
 
----
+Core model plots:
 
-## 📊 Technical Details
+| DINOv3 Confusion Matrix | DINOv3 Learning Curves | Backbone Comparison |
+|---|---|---|
+| [![DINOv3 confusion](plots/DINOv3/confusion_matrix.png)](plots/DINOv3/confusion_matrix.png) | [![DINOv3 learning curves](plots/DINOv3/learning_curves.png)](plots/DINOv3/learning_curves.png) | [![Backbone comparison](plots/DINOv3/ablation_backbone_comparison.png)](plots/DINOv3/ablation_backbone_comparison.png) |
 
-### Techniques Used
-- **Backbone**: EfficientNetV2 (5.3M-480M params) + DINOv3 Vision Transformer (87M params, self-supervised)
-- **Training**: 2-phase transfer learning with cosine annealing
-- **Augmentation**: MixUp (α=0.3), CutMix (α=1.0), Label Smoothing (ε=0.1)
-- **Optimization**: AdamW + EMA (Exponential Moving Average)
-- **Calibration**: Temperature scaling (τ=2.635) for trustworthy confidence
-- **Validation**: Bootstrap confidence intervals, McNemar significance test
-- **Safety**: Confidence/entropy rejection, Mahalanobis OOD detection, MC Dropout
+Additional analysis plots:
 
-### Performance Metrics (DINOv3)
-- **ECE (Calibration Error)**: 0.0082 (temperature-scaled) — excellent calibration
-- **MCE (Max Calibration Error)**: Low systematic miscalibration
-- **Brier Score**: Low prediction variance
-- **Robustness**: Max -0.98% accuracy drop under worst-case perturbations
-- **OOD Detection**: Combined AUROC > 0.95
+| Class Distribution | Robustness (Blur) | Robustness (Brightness/Contrast) |
+|---|---|---|
+| [![Class distribution](plots/others/class_distribution.png)](plots/others/class_distribution.png) | [![Blur robustness](plots/others/robustness_blur_degradation.png)](plots/others/robustness_blur_degradation.png) | [![Brightness contrast robustness](plots/others/robustness_brightness_contrast_matrix.png)](plots/others/robustness_brightness_contrast_matrix.png) |
 
----
+Backbone comparison examples:
 
-## 📝 License
+| EfficientNetV2-B0 Confusion | EfficientNetV2-S Learning Curves | DINOv3 Sample Predictions |
+|---|---|---|
+| [![B0 confusion](plots/EfficientNetV2-B0/confusion_matrix.png)](plots/EfficientNetV2-B0/confusion_matrix.png) | [![V2-S learning curves](plots/EfficientNetV2-S/learning_curves.png)](plots/EfficientNetV2-S/learning_curves.png) | [![DINOv3 sample predictions](plots/DINOv3/sample_predictions.png)](plots/DINOv3/sample_predictions.png) |
 
-MIT License. See [LICENSE](LICENSE) for details.
+## Command Runner (`main.py`)
 
----
+The command runner exposes these tasks:
 
-## 🙏 Acknowledgments
+```text
+serve, train, fine_tune, refine, evaluate, visualize, resume, validate
+```
 
-- **Dataset**: PlantVillage, agricultural research communities
-- **Models**: EfficientNetV2 (Tan & Le, 2021), DINOv3 (Oquab et al., ICCV 2023)
-- **Libraries**: TensorFlow, Keras, scikit-learn
+Examples:
 
----
+```bash
+uv run python main.py serve
+uv run python main.py train --base-model DINOv3
+uv run python main.py evaluate --archive-logs
+```
 
-## 📧 Contact
+## Dataset Integrity and Leakage Utilities
 
-Made with 🍃 by **Swapnil** — [@ItzSwapnil](https://github.com/ItzSwapnil)
+Count split/class images:
 
-Questions? Issues? [Open a GitHub issue](https://github.com/ItzSwapnil/Leaf_Disease_Detection/issues)
+```bash
+uv run python tools/dataset/count_dataset.py
+```
+
+Create leakage-free split manifest (dry run):
+
+```bash
+uv run python tools/dataset/create_leakage_free_split.py
+```
+
+Materialize cleaned split tree with hardlinks:
+
+```bash
+uv run python tools/dataset/create_leakage_free_split.py \
+  --materialize \
+  --output-root dataset_clean \
+  --prefix-sha1
+```
+
+Optional near-duplicate filtering (dHash Hamming <= 1):
+
+```bash
+uv run python tools/dataset/create_leakage_free_split.py \
+  --dhash-threshold 1 \
+  --materialize \
+  --output-root dataset_clean
+```
+
+Outputs:
+
+- `reports/leakage_free_split_manifest.csv`
+- `reports/leakage_free_split_summary.json`
+
+## Control API Endpoints (Flask)
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | UI page |
+| `/predict` | POST | Upload image and predict |
+| `/health` | GET | Model and app health status |
+| `/control/actions` | GET | List available control actions |
+| `/control/run/<action>` | POST | Launch workflow job |
+| `/control/jobs` | GET | List jobs and status |
+| `/control/stop/<job_id>` | POST | Stop active job |
+
+Example:
+
+```bash
+curl -X POST -F "file=@leaf.jpg" http://127.0.0.1:5000/predict
+```
+
+## Key Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `LEAF_BASE_MODEL` | default backbone selection |
+| `LEAF_BATCH_SIZE` | training batch size override |
+| `LEAF_TRAIN_DATA_FRACTION` | per-class train sampling fraction |
+| `LEAF_SAVE_LOG_ARCHIVE` | keep timestamped archives when set to 1 |
+| `LEAF_SAVE_RUN_MANIFESTS` | persist run manifests when set to 1 |
+| `LEAF_CONFIDENCE_REJECT_THRESHOLD` | inference confidence gate |
+| `LEAF_ENTROPY_REJECT_THRESHOLD` | entropy rejection gate |
+| `LEAF_ROBUSTNESS_EVAL_ENABLED` | enable robustness suite in evaluation |
+| `LEAF_MC_DROPOUT_ENABLED` | enable MC-dropout uncertainty evaluation |
+
+## Where Outputs Go
+
+- Models: `models/`
+- Plots: `plots/`
+- Logs: `logs/` and `models/logs/`
+- Evaluation reports: `reports/evaluation_report.json`, `reports/evaluation_report.md`
+- Leakage reports: `reports/leakage_free_split_manifest.csv`,
+  `reports/leakage_free_split_summary.json`
+
+## Troubleshooting
+
+- GPU not detected:
+  - verify TensorFlow/CUDA compatibility for your GPU and drivers.
+- Slow first run on newer NVIDIA GPUs (for example RTX 50xx / compute capability 12.0a):
+  - TensorFlow may JIT-compile CUDA kernels from PTX when matching binaries are not bundled.
+  - The first GPU run can be significantly slower; subsequent runs are typically faster.
+- OOM during training:
+  - lower batch size, for example: `LEAF_BATCH_SIZE=8 uv run python train_model.py`.
+- Model loading failure for older ViT checkpoint:
+  - keep `keras-hub` installed; compatibility shim is applied automatically.
+- Missing dataset folders:
+  - verify `dataset/train`, `dataset/val`, and `dataset/test` exist and are class-folder structured.
+
+## References
+
+1. Tan, M., and Le, Q. "EfficientNetV2: Smaller Models and Faster Training." ICML 2021.
+2. Loshchilov, I., and Hutter, F. "Decoupled Weight Decay Regularization." ICLR 2019.
+3. Zhang, H. et al. "mixup: Beyond Empirical Risk Minimization." ICLR 2018.
+4. Yun, S. et al. "CutMix: Regularization Strategy to Train Strong Classifiers with Localizable Features." ICCV 2019.
+5. Guo, C. et al. "On Calibration of Modern Neural Networks." ICML 2017.
+
+## License
+
+MIT License. See `LICENSE`.

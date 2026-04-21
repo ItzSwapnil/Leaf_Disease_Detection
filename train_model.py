@@ -3,6 +3,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 
 # Some notebook environments export an inline backend string that may be
@@ -50,6 +51,7 @@ from config import (
     MIXUP_PROB,
     NORMAL_PROB,
     NUM_CLASSES,
+    OPTIMIZER,
     OVERFITTING_STOP_ENABLED,
     OVERFITTING_STOP_MIN_GAP,
     OVERFITTING_STOP_PATIENCE,
@@ -75,10 +77,8 @@ from training_utils import (
     PreOverfitRestorer,
     WarmupCosineSchedule,
     _build_randaugment_layer,
-    build_adamw_optimizer,
+    build_optimizer,
     build_loss,
-    compute_class_weights_from_directory,
-    count_class_samples_from_directory,
     cutmix_batch_tf,
     mixup_batch_tf,
     resolve_augmentation_probabilities,
@@ -93,6 +93,199 @@ except ImportError:
     USE_CUTMIX = False
     CUTMIX_ALPHA = 1.0
 
+VALID_OPTIMIZERS = {
+    "adamw": "AdamW",
+    "adam": "Adam",
+    "sgd": "SGD",
+    "rmsprop": "RMSprop",
+}
+VALID_SAVE_MODES = {"with_optimizer", "without_optimizer", "all"}
+
+
+def _parse_fraction(raw_value, default_value):
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        value = float(default_value)
+    return max(1e-6, min(1.0, value))
+
+
+def _parse_class_equalizer(arg_value):
+    if arg_value is not None:
+        return str(arg_value).strip().lower() == "on"
+    env_value = os.getenv("LEAF_CLASS_EQUALIZER")
+    if env_value is None:
+        return True
+    return str(env_value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _normalize_optimizer_name(raw_value):
+    key = str(raw_value or OPTIMIZER or "AdamW").strip().lower()
+    if key not in VALID_OPTIMIZERS:
+        raise ValueError(
+            "Unsupported optimizer "
+            f"'{raw_value}'. Expected one of: {', '.join(VALID_OPTIMIZERS.values())}."
+        )
+    return VALID_OPTIMIZERS[key]
+
+
+def _normalize_save_mode(raw_value):
+    mode = str(raw_value or "with_optimizer").strip().lower().replace("-", "_")
+    if mode not in VALID_SAVE_MODES:
+        raise ValueError(
+            "Unsupported save mode "
+            f"'{raw_value}'. Expected one of: with_optimizer, without_optimizer, all."
+        )
+    return mode
+
+
+def _canonical_class_name(name):
+    """Normalize class names so small punctuation/whitespace differences still match."""
+    return re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
+
+
+def _resolve_validation_class_aliases(val_class_names, train_class_names):
+    """Map validation folder names to training class names using canonical aliases."""
+    train_set = set(train_class_names)
+    train_by_canonical = {}
+    for train_name in train_class_names:
+        key = _canonical_class_name(train_name)
+        if key in train_by_canonical and train_by_canonical[key] != train_name:
+            raise ValueError(
+                "Ambiguous canonical training class names detected: "
+                f"'{train_by_canonical[key]}' and '{train_name}'."
+            )
+        train_by_canonical[key] = train_name
+
+    val_to_train = {}
+    unmatched = []
+    for val_name in val_class_names:
+        if val_name in train_set:
+            val_to_train[val_name] = val_name
+            continue
+
+        key = _canonical_class_name(val_name)
+        mapped_train = train_by_canonical.get(key)
+        if mapped_train is None:
+            unmatched.append(val_name)
+            continue
+        val_to_train[val_name] = mapped_train
+
+    if unmatched:
+        raise ValueError(
+            "Validation classes could not be mapped to training classes: "
+            + ", ".join(sorted(unmatched))
+        )
+
+    return val_to_train
+
+
+def _collect_sampled_training_files(train_dir, class_names, fraction, seed):
+    rng = random.Random(seed)
+    filepaths = []
+    labels = []
+    full_counts = {}
+    sampled_counts = {}
+
+    for class_index, class_name in enumerate(class_names):
+        class_dir = os.path.join(train_dir, class_name)
+        class_files = [entry.path for entry in os.scandir(class_dir) if entry.is_file()]
+        class_files.sort()
+
+        full_counts[int(class_index)] = int(len(class_files))
+        if not class_files:
+            sampled_counts[int(class_index)] = 0
+            continue
+
+        if fraction >= 1.0:
+            selected = list(class_files)
+        else:
+            keep_count = max(1, int(math.ceil(len(class_files) * fraction)))
+            shuffled = list(class_files)
+            rng.shuffle(shuffled)
+            selected = shuffled[:keep_count]
+
+        sampled_counts[int(class_index)] = int(len(selected))
+        filepaths.extend(selected)
+        labels.extend([int(class_index)] * len(selected))
+
+    if not filepaths:
+        raise ValueError("No training files were found after applying the data fraction.")
+
+    combined = list(zip(filepaths, labels))
+    rng.shuffle(combined)
+    sampled_paths, sampled_labels = zip(*combined)
+    return list(sampled_paths), list(sampled_labels), full_counts, sampled_counts
+
+
+def _collect_validation_files(val_dir, val_to_train_map, class_indices):
+    filepaths = []
+    labels = []
+    counts_by_val_class = {}
+
+    for val_class_name in sorted(val_to_train_map.keys()):
+        train_class_name = val_to_train_map[val_class_name]
+        train_class_index = class_indices[train_class_name]
+        class_dir = os.path.join(val_dir, val_class_name)
+        class_files = [entry.path for entry in os.scandir(class_dir) if entry.is_file()]
+        class_files.sort()
+
+        counts_by_val_class[val_class_name] = len(class_files)
+        filepaths.extend(class_files)
+        labels.extend([train_class_index] * len(class_files))
+
+    if not filepaths:
+        raise ValueError("No validation files were found in the validation directory.")
+
+    return filepaths, labels, counts_by_val_class
+
+
+def _build_labeled_image_dataset(filepaths, labels, batch_size, shuffle, seed):
+    ds = tf.data.Dataset.from_tensor_slices((filepaths, labels))
+    if shuffle:
+        ds = ds.shuffle(
+            buffer_size=max(1, min(len(filepaths), 20000)),
+            seed=seed,
+            reshuffle_each_iteration=True,
+        )
+
+    def _decode(path, label):
+        image_bytes = tf.io.read_file(path)
+        image_tensor = tf.io.decode_image(
+            image_bytes,
+            channels=3,
+            expand_animations=False,
+        )
+        image_tensor = tf.image.resize(image_tensor, (IMG_SIZE, IMG_SIZE))
+        image_tensor = tf.cast(image_tensor, tf.float32)
+        one_hot = tf.one_hot(tf.cast(label, tf.int32), depth=NUM_CLASSES)
+        one_hot = tf.cast(one_hot, tf.float32)
+        return image_tensor, one_hot
+
+    ds = ds.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size, drop_remainder=False)
+    return ds
+
+
+def _compute_equalizer_weights_from_counts(counts_by_class):
+    counts = [int(counts_by_class[idx]) for idx in sorted(counts_by_class.keys())]
+    if not counts or any(count <= 0 for count in counts):
+        return None
+
+    mean_count = float(sum(counts)) / float(len(counts))
+    if mean_count <= 0.0:
+        return None
+
+    weights = {}
+    for idx, count in enumerate(counts):
+        weights[int(idx)] = mean_count / float(count)
+
+    avg_weight = float(sum(weights.values())) / float(len(weights))
+    if avg_weight <= 0.0:
+        return None
+
+    return {idx: float(weight / avg_weight) for idx, weight in weights.items()}
+
 # Main training entrypoint
 
 
@@ -106,12 +299,46 @@ def main():
         default=None,
         help="Backbone to use for training (defaults to LEAF_BASE_MODEL or EfficientNetV2B0).",
     )
+    parser.add_argument(
+        "--train-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Per-class random sampling fraction for train data (0..1]. "
+            "Defaults to LEAF_TRAIN_DATA_FRACTION."
+        ),
+    )
+    parser.add_argument(
+        "--optimizer",
+        default=None,
+        help="Optimizer for training (AdamW, Adam, SGD, RMSprop).",
+    )
+    parser.add_argument(
+        "--save-mode",
+        default=None,
+        help="Model save mode: with_optimizer, without_optimizer, or all.",
+    )
+    parser.add_argument(
+        "--class-equalizer",
+        choices=["on", "off"],
+        default=None,
+        help="Enable or disable strict per-class equalizer weighting.",
+    )
     args = parser.parse_args()
 
     backbone_name = resolve_backbone_name(
         args.base_model or os.getenv("LEAF_BASE_MODEL"),
         default=BASE_MODEL,
     )
+    train_data_fraction = _parse_fraction(
+        args.train_fraction,
+        os.getenv("LEAF_TRAIN_DATA_FRACTION", TRAIN_DATA_FRACTION),
+    )
+    optimizer_name = _normalize_optimizer_name(
+        args.optimizer or os.getenv("LEAF_TRAIN_OPTIMIZER") or OPTIMIZER
+    )
+    save_mode = _normalize_save_mode(args.save_mode or os.getenv("LEAF_SAVE_MODE"))
+    class_equalizer_enabled = _parse_class_equalizer(args.class_equalizer)
 
     env_batch_size = os.getenv("LEAF_BATCH_SIZE")
     batch_size = int(BATCH_SIZE)
@@ -133,6 +360,13 @@ def main():
 
     print(f"Training pipeline  |  Backbone: {backbone_name}")
     print("Target: 99%+ top-1 accuracy on PlantVillage-46")
+    print(
+        "Train options: "
+        f"fraction={train_data_fraction:.3f}, "
+        f"optimizer={optimizer_name}, "
+        f"save_mode={save_mode}, "
+        f"class_equalizer={'on' if class_equalizer_enabled else 'off'}"
+    )
 
     # Reproducibility
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -172,39 +406,81 @@ def main():
     print(f"\nLoading training data from: {TRAIN_DIR}")
     print(f"Image size: {IMG_SIZE}x{IMG_SIZE}  |  Batch size: {batch_size}")
 
-    train_ds = keras.utils.image_dataset_from_directory(
-        TRAIN_DIR,
-        labels="inferred",
-        label_mode="categorical",
-        image_size=(IMG_SIZE, IMG_SIZE),
+    train_class_names = sorted(
+        entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
+    )
+    if not train_class_names:
+        raise ValueError(f"No class folders found under training directory: {TRAIN_DIR}")
+
+    class_indices = {name: idx for idx, name in enumerate(train_class_names)}
+
+    sampled_paths, sampled_labels, full_counts, sampled_counts = (
+        _collect_sampled_training_files(
+            str(TRAIN_DIR),
+            train_class_names,
+            fraction=float(train_data_fraction),
+            seed=seed,
+        )
+    )
+    train_ds = _build_labeled_image_dataset(
+        sampled_paths,
+        sampled_labels,
         batch_size=batch_size,
         shuffle=True,
         seed=seed,
     )
-    val_ds = keras.utils.image_dataset_from_directory(
-        VAL_DIR,
-        labels="inferred",
-        label_mode="categorical",
-        image_size=(IMG_SIZE, IMG_SIZE),
+
+    val_class_names = sorted(entry.name for entry in os.scandir(VAL_DIR) if entry.is_dir())
+    if not val_class_names:
+        raise ValueError(f"No class folders found under validation directory: {VAL_DIR}")
+
+    val_to_train_map = _resolve_validation_class_aliases(
+        val_class_names=val_class_names,
+        train_class_names=train_class_names,
+    )
+    alias_changes = {
+        val_name: train_name
+        for val_name, train_name in val_to_train_map.items()
+        if val_name != train_name
+    }
+    if alias_changes:
+        print("Validation class alias mapping applied:")
+        for val_name, train_name in sorted(alias_changes.items()):
+            print(f"  - {val_name} -> {train_name}")
+
+    val_paths, val_labels, val_counts = _collect_validation_files(
+        str(VAL_DIR),
+        val_to_train_map=val_to_train_map,
+        class_indices=class_indices,
+    )
+    val_ds = _build_labeled_image_dataset(
+        val_paths,
+        val_labels,
         batch_size=batch_size,
         shuffle=False,
+        seed=seed,
     )
 
-    train_class_names = (
-        list(train_ds.class_names) if getattr(train_ds, "class_names", None) else []
-    )
-    if not train_class_names:
-        train_class_names = sorted(
-            entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
-        )
+    train_samples = len(sampled_paths)
+    val_samples = len(val_paths)
 
-    class_indices = {name: idx for idx, name in enumerate(train_class_names)}
-    _, train_samples = count_class_samples_from_directory(
-        str(TRAIN_DIR), train_class_names
+    print(
+        "Training subset selection: "
+        f"{train_samples} samples from {sum(full_counts.values())} total "
+        f"(fraction={train_data_fraction:.3f} per class)"
     )
-    _, val_samples = count_class_samples_from_directory(str(VAL_DIR), train_class_names)
-
-    print(f"Training samples: {train_samples}")
+    print(
+        "Per-class sampled counts: "
+        f"min={min(sampled_counts.values())}, "
+        f"max={max(sampled_counts.values())}, "
+        f"classes={len(sampled_counts)}"
+    )
+    print(
+        "Validation class counts: "
+        f"min={min(val_counts.values())}, "
+        f"max={max(val_counts.values())}, "
+        f"classes={len(val_counts)}"
+    )
     print(f"Validation samples: {val_samples}")
     print(f"Number of classes: {NUM_CLASSES}")
 
@@ -280,21 +556,8 @@ def main():
     print(f"Total parameters: {model.count_params():,}")
     trainable_params = sum(p.numpy().size for p in model.trainable_weights)
     print(f"Trainable parameters (phase 1): {trainable_params:,}")
-    full_steps_per_epoch = resolve_step_count(
-        STEPS_PER_EPOCH, train_samples, batch_size
-    )
-    train_data_fraction = float(TRAIN_DATA_FRACTION)
-    if 0.0 < train_data_fraction < 1.0:
-        steps_per_epoch = max(
-            1, int(math.ceil(full_steps_per_epoch * train_data_fraction))
-        )
-        print(
-            "Training subset per epoch: "
-            f"{steps_per_epoch}/{full_steps_per_epoch} batches "
-            f"(fraction={train_data_fraction:.2f}, reshuffled each epoch)"
-        )
-    else:
-        steps_per_epoch = full_steps_per_epoch
+    full_steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_samples, batch_size)
+    steps_per_epoch = full_steps_per_epoch
     validation_steps = resolve_step_count(VALIDATION_STEPS, val_samples, batch_size)
 
     phase1_epochs = max(0, int(EPOCHS_PHASE1))
@@ -306,17 +569,24 @@ def main():
         json.dump(class_indices, class_file, indent=2)
 
     # ── class weighting and loss ──────────────────────────────────────────
-    class_weight = compute_class_weights_from_directory(
-        str(TRAIN_DIR), train_class_names
-    )
-    if class_weight:
-        print("Class-balanced weighting enabled (inverse-sqrt frequency).")
-        class_names_by_idx = {idx: name for name, idx in class_indices.items()}
-        top = sorted(class_weight.items(), key=lambda item: item[1], reverse=True)[:6]
-        print(
-            "Highest class weights: "
-            + ", ".join(f"{class_names_by_idx.get(idx, idx)}={w:.2f}" for idx, w in top)
-        )
+    class_weight = None
+    if class_equalizer_enabled:
+        class_weight = _compute_equalizer_weights_from_counts(sampled_counts)
+        if class_weight:
+            print("Class equalizer enabled (strict inverse-frequency weighting).")
+            class_names_by_idx = {idx: name for name, idx in class_indices.items()}
+            top = sorted(class_weight.items(), key=lambda item: item[1], reverse=True)[:6]
+            print(
+                "Highest class weights: "
+                + ", ".join(
+                    f"{class_names_by_idx.get(idx, idx)}={weight:.2f}"
+                    for idx, weight in top
+                )
+            )
+        else:
+            print("Class equalizer requested, but weights could not be computed.")
+    else:
+        print("Class equalizer disabled; no class weighting will be used.")
 
     selected_loss, fit_class_weight = build_loss(class_weight)
 
@@ -380,7 +650,11 @@ def main():
 
     # ── callbacks ─────────────────────────────────────────────────────────
     checkpoint = BestModelSaver(
-        CHECKPOINT_PATH, monitor="val_accuracy", mode="max", verbose=1
+        CHECKPOINT_PATH,
+        monitor="val_accuracy",
+        mode="max",
+        verbose=1,
+        save_mode=save_mode,
     )
     early_stopping = EarlyStopping(
         monitor="val_accuracy",
@@ -475,7 +749,7 @@ def main():
     print(f"Phase 1 (head-only): {phase1_epochs} epochs")
     print(f"Phase 2 (full fine-tune): {phase2_epochs} epochs")
     print(f"Total epochs: {total_epochs}  |  Steps/epoch: {steps_per_epoch}")
-    print(f"Optimiser: AdamW  |  Label smoothing: {LABEL_SMOOTHING}")
+    print(f"Optimiser: {optimizer_name}  |  Label smoothing: {LABEL_SMOOTHING}")
     print(f"{'=' * 70}\n")
 
     run_start_time = time.time()
@@ -495,7 +769,9 @@ def main():
 
         with strategy.scope():
             model.compile(
-                optimizer=build_adamw_optimizer(phase1_lr),
+                optimizer=build_optimizer(
+                    phase1_lr, optimizer_name=optimizer_name
+                ),
                 loss=selected_loss,
                 metrics=["accuracy"],
             )
@@ -522,6 +798,7 @@ def main():
                     patience=int(OVERFITTING_STOP_PATIENCE),
                     verbose=1,
                     save_path=CHECKPOINT_PATH,
+                    save_mode=save_mode,
                 )
             )
         if tensorboard is not None:
@@ -573,7 +850,9 @@ def main():
 
         with strategy.scope():
             model.compile(
-                optimizer=build_adamw_optimizer(phase2_lr),
+                optimizer=build_optimizer(
+                    phase2_lr, optimizer_name=optimizer_name
+                ),
                 loss=selected_loss,
                 metrics=["accuracy"],
             )
@@ -601,6 +880,7 @@ def main():
                     patience=int(OVERFITTING_STOP_PATIENCE),
                     verbose=1,
                     save_path=CHECKPOINT_PATH,
+                    save_mode=save_mode,
                 )
             )
         if tensorboard is not None:
@@ -643,7 +923,16 @@ def main():
         if SAVE_LOG_ARCHIVE
         else None,
         "base_model": backbone_name,
+        "optimizer": optimizer_name,
+        "save_mode": save_mode,
+        "class_equalizer": bool(class_equalizer_enabled),
         "batch_size": int(batch_size),
+        "train_data_fraction": float(train_data_fraction),
+        "train_samples": int(train_samples),
+        "train_samples_per_class": {
+            train_class_names[idx]: int(sampled_counts[idx])
+            for idx in sorted(sampled_counts.keys())
+        },
         "use_mixup": USE_MIXUP,
         "use_cutmix": USE_CUTMIX,
         "epochs_phase1": phase1_epochs,

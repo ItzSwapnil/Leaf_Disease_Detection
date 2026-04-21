@@ -863,6 +863,56 @@
             color: #94a3b8;
             font-size: 0.78rem;
         }
+
+        .training-options-grid {
+            margin-top: 14px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+
+        .training-option {
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 10px;
+            padding: 10px 12px;
+            display: grid;
+            gap: 6px;
+        }
+
+        .training-option label {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .training-option small {
+            color: #94a3b8;
+            font-size: 0.74rem;
+            line-height: 1.35;
+        }
+
+        .train-range-value {
+            color: #86efac;
+            font-weight: 700;
+            min-width: 44px;
+            text-align: right;
+        }
+
+        .train-range {
+            width: 100%;
+            accent-color: #22c55e;
+        }
+
+        .training-note {
+            margin-top: 8px;
+            font-size: 0.78rem;
+            color: #9ca3af;
+        }
     </style>
 </head>
 <body>
@@ -1081,6 +1131,48 @@
                 <small>Used by the Train Model action (sent as --base-model).</small>
             </div>
 
+            <div class="training-options-grid">
+                <div class="training-option">
+                    <label for="trainDataPercentRange">
+                        <span>Train data per class</span>
+                        <span class="train-range-value" id="trainDataPercentValue">{{ '%.1f'|format(default_train_fraction_pct) }}%</span>
+                    </label>
+                    <input type="range" id="trainDataPercentRange" class="train-range" min="0.1" max="100" step="0.1" value="{{ '%.1f'|format(default_train_fraction_pct) }}">
+                    <small>Randomly samples this percentage from every class directory for each training run.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="trainOptimizerSelect">
+                        <span>Optimizer</span>
+                    </label>
+                    <select id="trainOptimizerSelect" class="model-select">
+                        {% for optimizer_name in training_optimizer_options %}
+                        <option value="{{ optimizer_name }}" {% if optimizer_name == default_training_optimizer %}selected{% endif %}>{{ optimizer_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <small>Applied to both training phases during Train Model runs.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="trainSaveModeSelect">
+                        <span>Model save mode</span>
+                    </label>
+                    <select id="trainSaveModeSelect" class="model-select">
+                        {% for save_mode in training_save_modes %}
+                        <option value="{{ save_mode.value }}" {% if save_mode.value == default_training_save_mode %}selected{% endif %}>{{ save_mode.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <small>Control whether checkpoints include optimizer state, inference-only weights, or both.</small>
+                </div>
+            </div>
+
+            <label class="archive-toggle" title="When enabled, class weighting compensates for class-imbalance so each class contributes more equally.">
+                <input type="checkbox" id="classEqualizerToggle" {% if default_class_equalizer %}checked{% endif %}>
+                <span>Enable class equalizer (balance class influence)</span>
+            </label>
+
+            <p class="training-note">Training options above apply to the Train Model action only.</p>
+
             <div id="jobsList" class="jobs-list">
                 <div class="jobs-empty">No workflow jobs yet.</div>
             </div>
@@ -1268,8 +1360,23 @@
                 const backboneSelect = document.getElementById('trainBackboneSelect');
                 const baseModel = backboneSelect ? backboneSelect.value : '';
                 const requestBody = { archive_logs: archiveLogs };
-                if (actionKey === 'train' && baseModel) {
-                    requestBody.base_model = baseModel;
+                if (actionKey === 'train') {
+                    if (baseModel) {
+                        requestBody.base_model = baseModel;
+                    }
+
+                    const trainDataPercentRange = document.getElementById('trainDataPercentRange');
+                    const trainOptimizerSelect = document.getElementById('trainOptimizerSelect');
+                    const trainSaveModeSelect = document.getElementById('trainSaveModeSelect');
+                    const classEqualizerToggle = document.getElementById('classEqualizerToggle');
+
+                    const trainFractionPercent = Number(trainDataPercentRange ? trainDataPercentRange.value : 100);
+                    requestBody.train_fraction_percent = Number.isFinite(trainFractionPercent)
+                        ? Math.max(0.1, Math.min(100, trainFractionPercent))
+                        : 100;
+                    requestBody.optimizer = trainOptimizerSelect ? trainOptimizerSelect.value : 'AdamW';
+                    requestBody.save_mode = trainSaveModeSelect ? trainSaveModeSelect.value : 'with_optimizer';
+                    requestBody.class_equalizer = !!(classEqualizerToggle && classEqualizerToggle.checked);
                 }
                 const response = await fetch(`/control/run/${actionKey}`, {
                     method: 'POST',
@@ -1321,6 +1428,30 @@
             const hours = Math.floor(mins / 60);
             const remMins = mins % 60;
             return `${hours}h ${remMins}m`;
+        }
+
+        function formatSaveMode(saveMode) {
+            const normalized = String(saveMode || '').toLowerCase();
+            if (normalized === 'without_optimizer') return 'without optimizer';
+            if (normalized === 'all') return 'with + without optimizer';
+            return 'with optimizer';
+        }
+
+        function formatTrainPercent(value) {
+            const num = Number(value);
+            if (!Number.isFinite(num)) return 'n/a';
+            const clamped = Math.max(0.1, Math.min(100, num));
+            if (clamped < 1) return `${clamped.toFixed(1)}%`;
+            return `${Number(clamped.toFixed(1)).toString()}%`;
+        }
+
+        function updateTrainDataPercentLabel() {
+            const range = document.getElementById('trainDataPercentRange');
+            const value = document.getElementById('trainDataPercentValue');
+            if (!range || !value) return;
+
+            const pct = Math.max(0.1, Math.min(100, Number(range.value || 100)));
+            value.textContent = formatTrainPercent(pct);
         }
 
         function captureLogScrollState() {
@@ -1376,12 +1507,26 @@
                     : formatEta(job.eta_seconds);
                 const stage = (job.progress_stage || 'pending').replace(/_/g, ' ');
                 const backboneMeta = job.base_model ? ` • Backbone: ${job.base_model}` : '';
+                const trainMetaParts = [];
+                if (job.train_fraction_pct != null) {
+                    trainMetaParts.push(`Data/class: ${formatTrainPercent(job.train_fraction_pct)}`);
+                }
+                if (job.optimizer) {
+                    trainMetaParts.push(`Opt: ${job.optimizer}`);
+                }
+                if (job.save_mode) {
+                    trainMetaParts.push(`Save: ${formatSaveMode(job.save_mode)}`);
+                }
+                if (job.class_equalizer !== null && job.class_equalizer !== undefined) {
+                    trainMetaParts.push(`Equalizer: ${job.class_equalizer ? 'on' : 'off'}`);
+                }
+                const trainMeta = trainMetaParts.length ? ` • ${trainMetaParts.join(' • ')}` : '';
                 return `
                     <div class="job-card" data-job-id="${job.id}">
                         <div class="job-top">
                             <div>
                                 <strong>${job.label}</strong>
-                                <div class="job-meta">${job.script}${backboneMeta} • Logs: ${job.archive_logs ? 'archive+latest' : 'latest-only'} • Runtime: ${formatRuntime(job.runtime_seconds)} • Exit: ${job.return_code ?? 'n/a'}</div>
+                                <div class="job-meta">${job.script}${backboneMeta}${trainMeta} • Logs: ${job.archive_logs ? 'archive+latest' : 'latest-only'} • Runtime: ${formatRuntime(job.runtime_seconds)} • Exit: ${job.return_code ?? 'n/a'}</div>
                             </div>
                             <span class="job-status ${job.status}">${job.status}</span>
                         </div>
@@ -1451,6 +1596,12 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
+            const trainDataPercentRange = document.getElementById('trainDataPercentRange');
+            if (trainDataPercentRange) {
+                trainDataPercentRange.addEventListener('input', updateTrainDataPercentLabel);
+                updateTrainDataPercentLabel();
+            }
+
             refreshControlPanel();
             jobsPollHandle = setInterval(() => {
                 refreshControlPanel();

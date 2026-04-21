@@ -89,6 +89,15 @@ KERAS_BATCH_PROGRESS_RE = re.compile(r"^\d+/\d+\s+")
 TRAIN_SCRIPT = "train_model.py"
 TRAIN_DESC = "Run baseline EfficientNet training pipeline."
 TRAIN_BACKBONES = list_backbone_names()
+TRAIN_OPTIMIZER_OPTIONS = ["AdamW", "Adam", "SGD", "RMSprop"]
+TRAIN_SAVE_MODES = [
+    {"value": "with_optimizer", "label": "Save with optimizer state"},
+    {
+        "value": "without_optimizer",
+        "label": "Save without optimizer state (inference-ready)",
+    },
+    {"value": "all", "label": "Save both variants"},
+]
 
 CONTROL_ACTIONS = {
     "train": {
@@ -282,12 +291,53 @@ def _to_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _create_job(action_key, archive_logs=False, base_model=None):
+def _to_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_train_optimizer(value):
+    raw = str(value or "").strip().lower()
+    for option in TRAIN_OPTIMIZER_OPTIONS:
+        if option.lower() == raw:
+            return option
+    return None
+
+
+def _normalize_save_mode(value):
+    raw = str(value or "").strip().lower().replace("-", "_")
+    allowed = {mode["value"] for mode in TRAIN_SAVE_MODES}
+    if raw in allowed:
+        return raw
+    return None
+
+
+def _create_job(action_key, archive_logs=False, base_model=None, train_options=None):
     action = CONTROL_ACTIONS[action_key]
     script = action["script"]
     script_args = []
+    train_options = train_options or {}
+
+    train_fraction = train_options.get("train_fraction")
+    train_fraction_pct = train_options.get("train_fraction_pct")
+    optimizer = train_options.get("optimizer")
+    save_mode = train_options.get("save_mode")
+    class_equalizer = train_options.get("class_equalizer")
+
     if action_key == "train" and base_model:
         script_args = ["--base-model", str(base_model)]
+    if action_key == "train" and train_fraction is not None:
+        script_args.extend(["--train-fraction", f"{float(train_fraction):.6f}"])
+    if action_key == "train" and optimizer:
+        script_args.extend(["--optimizer", str(optimizer)])
+    if action_key == "train" and save_mode:
+        script_args.extend(["--save-mode", str(save_mode)])
+    if action_key == "train" and class_equalizer is not None:
+        script_args.extend(
+            ["--class-equalizer", "on" if bool(class_equalizer) else "off"]
+        )
 
     command = [sys.executable, script, *script_args]
     env_overrides = {
@@ -296,6 +346,15 @@ def _create_job(action_key, archive_logs=False, base_model=None):
     }
     if action_key == "train" and base_model:
         env_overrides["LEAF_BASE_MODEL"] = str(base_model)
+    if action_key == "train" and train_fraction is not None:
+        env_overrides["LEAF_TRAIN_DATA_FRACTION"] = f"{float(train_fraction):.6f}"
+    if action_key == "train" and optimizer:
+        env_overrides["LEAF_TRAIN_OPTIMIZER"] = str(optimizer)
+    if action_key == "train" and save_mode:
+        env_overrides["LEAF_SAVE_MODE"] = str(save_mode)
+    if action_key == "train" and class_equalizer is not None:
+        env_overrides["LEAF_CLASS_EQUALIZER"] = "1" if class_equalizer else "0"
+
     job_id = uuid.uuid4().hex
     now = time.time()
     job = {
@@ -308,6 +367,11 @@ def _create_job(action_key, archive_logs=False, base_model=None):
         "command": " ".join(command),
         "archive_logs": bool(archive_logs),
         "base_model": base_model,
+        "train_fraction": train_fraction,
+        "train_fraction_pct": train_fraction_pct,
+        "optimizer": optimizer,
+        "save_mode": save_mode,
+        "class_equalizer": class_equalizer,
         "env_overrides": env_overrides,
         "status": "starting",
         "start_time": now,
@@ -445,6 +509,11 @@ def _job_response(job):
         "description": job["description"],
         "script": job["script"],
         "base_model": job.get("base_model"),
+        "train_fraction": job.get("train_fraction"),
+        "train_fraction_pct": job.get("train_fraction_pct"),
+        "optimizer": job.get("optimizer"),
+        "save_mode": job.get("save_mode"),
+        "class_equalizer": job.get("class_equalizer"),
         "command": job["command"],
         "archive_logs": bool(job.get("archive_logs", False)),
         "status": job["status"],
@@ -962,6 +1031,25 @@ def index():
     """Render the main page"""
     available_model_names = [_model_option_name(path) for path in _list_available_model_paths()]
     active_name = _model_option_name(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
+
+    default_fraction_pct = 100.0
+    env_fraction = _to_float(os.getenv("LEAF_TRAIN_DATA_FRACTION"), None)
+    if env_fraction is not None:
+        default_fraction_pct = max(0.1, min(100.0, env_fraction * 100.0))
+
+    default_optimizer = _normalize_train_optimizer(
+        os.getenv("LEAF_TRAIN_OPTIMIZER") or TRAIN_OPTIMIZER_OPTIONS[0]
+    ) or TRAIN_OPTIMIZER_OPTIONS[0]
+
+    default_save_mode = _normalize_save_mode(os.getenv("LEAF_SAVE_MODE"))
+    if default_save_mode is None:
+        default_save_mode = TRAIN_SAVE_MODES[0]["value"]
+
+    class_equalizer_env = os.getenv("LEAF_CLASS_EQUALIZER")
+    default_class_equalizer = True
+    if class_equalizer_env is not None:
+        default_class_equalizer = _to_bool(class_equalizer_env)
+
     return render_template(
         "index.html",
         control_actions=CONTROL_ACTIONS,
@@ -969,6 +1057,12 @@ def index():
         available_models=available_model_names,
         active_model_name=active_name,
         training_backbones=TRAIN_BACKBONES,
+        training_optimizer_options=TRAIN_OPTIMIZER_OPTIONS,
+        training_save_modes=TRAIN_SAVE_MODES,
+        default_train_fraction_pct=round(default_fraction_pct, 2),
+        default_training_optimizer=default_optimizer,
+        default_training_save_mode=default_save_mode,
+        default_class_equalizer=default_class_equalizer,
     )
 
 
@@ -1085,9 +1179,18 @@ def control_run(action_key):
     payload = request.get_json(silent=True) or {}
     archive_logs = _to_bool(payload.get("archive_logs"))
     base_model = (payload.get("base_model") or "").strip() if payload else ""
+    train_fraction_percent = payload.get("train_fraction_percent") if payload else None
+    optimizer = (payload.get("optimizer") or "").strip() if payload else ""
+    save_mode = (payload.get("save_mode") or "").strip() if payload else ""
+    class_equalizer = payload.get("class_equalizer") if payload else None
+
     if not payload and request.form:
         archive_logs = _to_bool(request.form.get("archive_logs"))
         base_model = (request.form.get("base_model") or "").strip()
+        train_fraction_percent = request.form.get("train_fraction_percent")
+        optimizer = (request.form.get("optimizer") or "").strip()
+        save_mode = (request.form.get("save_mode") or "").strip()
+        class_equalizer = request.form.get("class_equalizer")
 
     if base_model and action_key not in {"train"}:
         return jsonify(
@@ -1105,8 +1208,52 @@ def control_run(action_key):
                 }
             ), 400
 
+    train_options = None
+    if action_key == "train":
+        train_options = {}
+
+        fraction_value = _to_float(train_fraction_percent, 100.0)
+        if fraction_value is None or not (0.1 <= fraction_value <= 100.0):
+            return jsonify(
+                {"error": "Training data percentage must be between 0.1 and 100."}
+            ), 400
+        train_options["train_fraction_pct"] = round(float(fraction_value), 2)
+        train_options["train_fraction"] = float(fraction_value) / 100.0
+
+        resolved_optimizer = _normalize_train_optimizer(
+            optimizer or TRAIN_OPTIMIZER_OPTIONS[0]
+        )
+        if not resolved_optimizer:
+            return jsonify(
+                {
+                    "error": "Unknown optimizer selected for training.",
+                    "available_optimizers": TRAIN_OPTIMIZER_OPTIONS,
+                }
+            ), 400
+        train_options["optimizer"] = resolved_optimizer
+
+        resolved_save_mode = _normalize_save_mode(
+            save_mode or TRAIN_SAVE_MODES[0]["value"]
+        )
+        if not resolved_save_mode:
+            return jsonify(
+                {
+                    "error": "Unknown save mode selected for training.",
+                    "available_save_modes": [m["value"] for m in TRAIN_SAVE_MODES],
+                }
+            ), 400
+        train_options["save_mode"] = resolved_save_mode
+
+        if class_equalizer is None or class_equalizer == "":
+            train_options["class_equalizer"] = True
+        else:
+            train_options["class_equalizer"] = _to_bool(class_equalizer)
+
     job = _create_job(
-        action_key, archive_logs=archive_logs, base_model=base_model or None
+        action_key,
+        archive_logs=archive_logs,
+        base_model=base_model or None,
+        train_options=train_options,
     )
     thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
     thread.start()
