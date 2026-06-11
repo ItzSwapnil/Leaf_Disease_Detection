@@ -25,11 +25,16 @@ def test_backbone_registry_contains_efficientnetv2_variants():
 
 
 def test_resolve_backbone_name_uses_default_when_empty():
-    assert resolve_backbone_name("", default="EfficientNetV2S") == "EfficientNetV2S"
+    assert (
+        resolve_backbone_name("", default="EfficientNetV2S")
+        == "EfficientNetV2S"
+    )
 
 
 def test_resolve_backbone_name_allows_dinov3_backbone():
-    assert resolve_backbone_name("DINOv3", default="EfficientNetV2S") == "DINOv3"
+    assert (
+        resolve_backbone_name("DINOv3", default="EfficientNetV2S") == "DINOv3"
+    )
 
 
 def test_resolve_backbone_name_rejects_unknown_backbone():

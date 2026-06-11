@@ -68,7 +68,9 @@ def main():
     args = parser.parse_args()
 
     if args.archive_logs and args.latest_logs_only:
-        parser.error("Use either --archive-logs or --latest-logs-only, not both.")
+        parser.error(
+            "Use either --archive-logs or --latest-logs-only, not both."
+        )
 
     if args.base_model and args.task not in {"train", "resume"}:
         parser.error("--base-model can only be used with train or resume.")

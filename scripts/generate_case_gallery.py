@@ -19,7 +19,9 @@ def collect_sample_images(max_tiles=12):
     imgs = []
     for cls in classes:
         files = [
-            f for f in cls.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png")
+            f
+            for f in cls.iterdir()
+            if f.suffix.lower() in (".jpg", ".jpeg", ".png")
         ]
         if files:
             imgs.append(random.choice(files))

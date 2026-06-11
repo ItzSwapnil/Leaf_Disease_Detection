@@ -90,5 +90,11 @@ leaf-disease.ipynb
 
 reports/*
 
-
 !/dataset/README.md
+
+EXP/*
+
+zzplots/*
+
+
+dataset.zip

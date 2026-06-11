@@ -26,7 +26,9 @@ def _string_assignments(module: ast.Module) -> dict[str, str]:
     return values
 
 
-def _resolve_string(node: ast.AST, known: dict[str, str]) -> str | None:
+def _resolve_string(node: ast.AST | None, known: dict[str, str]) -> str | None:
+    if node is None:
+        return None
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return known.get(node.id) if isinstance(node, ast.Name) else None
@@ -78,7 +80,9 @@ def test_control_actions_reference_existing_scripts():
 
     expected_actions = {"train", "fine_tune", "evaluate", "generate_figures"}
     missing = expected_actions - set(actions)
-    assert not missing, f"Missing expected CONTROL_ACTIONS keys: {sorted(missing)}"
+    assert not missing, (
+        f"Missing expected CONTROL_ACTIONS keys: {sorted(missing)}"
+    )
 
     for action_key, relative_path in actions.items():
         script_path = PROJECT_ROOT / relative_path

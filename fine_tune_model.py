@@ -10,12 +10,15 @@ import tensorflow.keras as keras
 from tensorflow.keras.callbacks import CSVLogger, EarlyStopping, TensorBoard
 from tensorflow.keras.models import load_model
 
+from backbones import resolve_backbone_name
 from config import (
     ACCUMULATION_STEPS,
     CHECKPOINT_PATH,
+    CLASSIFIER_PATH,
+    CUTMIX_ALPHA,
+    CUTMIX_PROB,
     EARLY_STOPPING_PATIENCE,
     EMA_MOMENTUM,
-    FINAL_MODEL_PATH,
     FINE_TUNE_BATCH_SIZE,
     FINE_TUNE_DATA_FRACTION,
     FINE_TUNE_EPOCHS,
@@ -28,6 +31,8 @@ from config import (
     INTRA_OP_THREADS,
     LR_SCHEDULER,
     MIXUP_ALPHA,
+    MIXUP_PROB,
+    NORMAL_PROB,
     OVERFITTING_STOP_ENABLED,
     OVERFITTING_STOP_MIN_GAP,
     OVERFITTING_STOP_PATIENCE,
@@ -35,8 +40,11 @@ from config import (
     SAVE_RUN_MANIFESTS,
     TRAIN_DIR,
     UNFREEZE_LAYERS,
+    USE_ATTENTION_GUIDANCE,
+    USE_CUTMIX,
     USE_MIXUP,
     USE_OPTIMIZER_EMA,
+    USE_RANDAUGMENT,
     VAL_DIR,
     WEIGHT_DECAY,
 )
@@ -45,11 +53,15 @@ from preprocessing import preprocess_batch_for_model_tf
 from training_progress import IntervalMetricsLogger, ProgressEmitter
 from training_utils import (
     BestModelSaver,
+    GradCamEpochCollageCallback,
     PreOverfitRestorer,
     WarmupCosineSchedule,
+    _build_heavy_augmentation_layer,
     build_loss,
     compute_class_weights_from_directory,
+    cutmix_batch_tf,
     mixup_batch_tf,
+    resolve_augmentation_probabilities,
     tensorboard_available,
 )
 
@@ -151,7 +163,9 @@ def _prepare_subset(
         if max_batches <= 0:
             chosen_batches = total_batches
         else:
-            chosen_batches = max(1, int(round(total_batches * float(fraction))))
+            chosen_batches = max(
+                1, int(round(total_batches * float(fraction)))
+            )
             chosen_batches = min(chosen_batches, max_batches, total_batches)
 
     print(
@@ -192,7 +206,9 @@ def _unfreeze_top_layers(model, target_count: int) -> int:
 def _infer_backbone_from_model(model) -> str:
     """Best-effort backbone name from loaded model/layer names."""
     model_name = str(getattr(model, "name", "")).lower()
-    layer_names = [str(getattr(layer, "name", "")).lower() for layer in model.layers]
+    layer_names = [
+        str(getattr(layer, "name", "")).lower() for layer in model.layers
+    ]
     haystack = " ".join([model_name, *layer_names])
 
     if "dinov3" in haystack or "vit" in haystack:
@@ -245,7 +261,7 @@ def main():
         tf.config.threading.set_inter_op_parallelism_threads(INTER_OP_THREADS)
     except RuntimeError as exc:
         print(f"TensorFlow threading config skipped: {exc}")
-    logs_dir = os.path.join(os.path.dirname(FINAL_MODEL_PATH), "logs")
+    logs_dir = os.path.join(os.path.dirname(CLASSIFIER_PATH), "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
     gc.collect()
@@ -254,7 +270,7 @@ def main():
     print("SOTA Fine-Tuning Pipeline")
 
     # ── load checkpoint ───────────────────────────────────────────────────
-    checkpoint_source = _resolve_model_path(CHECKPOINT_PATH, FINAL_MODEL_PATH)
+    checkpoint_source = _resolve_model_path(CHECKPOINT_PATH, CLASSIFIER_PATH)
     print(f"Loading checkpoint: {checkpoint_source}")
     strategy = get_training_strategy()
     with strategy.scope():
@@ -266,15 +282,29 @@ def main():
         try:
             with open(latest_runs_path, "r", encoding="utf-8") as in_file:
                 latest_runs = json.load(in_file)
-            configured_base_model = (latest_runs.get("train") or {}).get("base_model")
+            configured_base_model = (latest_runs.get("train") or {}).get(
+                "base_model"
+            )
         except Exception:
             configured_base_model = None
     detected_backbone = _infer_backbone_from_model(model)
+    if configured_base_model:
+        try:
+            configured_base_model = resolve_backbone_name(
+                configured_base_model, default=configured_base_model
+            )
+        except ValueError:
+            configured_base_model = None
+
+    if detected_backbone == "Unknown" and configured_base_model:
+        detected_backbone = configured_base_model
+
     if detected_backbone == "Unknown":
         raise ValueError(
-            "Unable to infer backbone from loaded fine-tune model. "
+            "Unable to infer backbone from loaded fine-tune model or prior run metadata. "
             "Aborting to avoid incorrect preprocessing."
         )
+
     if configured_base_model:
         print(
             "Fine-tune backbone: "
@@ -287,7 +317,9 @@ def main():
     if int(FINE_TUNE_UNFREEZE_LAYERS) < 0 or int(UNFREEZE_LAYERS) < 0:
         unfreeze_target = -1
     else:
-        unfreeze_target = min(int(FINE_TUNE_UNFREEZE_LAYERS), int(UNFREEZE_LAYERS))
+        unfreeze_target = min(
+            int(FINE_TUNE_UNFREEZE_LAYERS), int(UNFREEZE_LAYERS)
+        )
     trainable_count = _unfreeze_top_layers(model, unfreeze_target)
     if unfreeze_target < 0:
         print(f"Unfroze full model ({trainable_count} trainable layers).")
@@ -297,7 +329,11 @@ def main():
     # ── data pipeline ─────────────────────────────────────────────────────
     batch_size = int(FINE_TUNE_BATCH_SIZE)
     env_ft_batch_size = os.getenv("LEAF_FINE_TUNE_BATCH_SIZE")
-    if env_ft_batch_size is None and detected_backbone == "DINOv3" and batch_size > 8:
+    if (
+        env_ft_batch_size is None
+        and detected_backbone == "DINOv3"
+        and batch_size > 8
+    ):
         target_batch = 32 if gpu_count > 1 else 16
         if batch_size > target_batch:
             batch_size = target_batch
@@ -327,18 +363,28 @@ def main():
     )
 
     def _prep(ds, training=False):
+        if training and USE_RANDAUGMENT:
+            print(
+                "Fine-tune augmentation: Heavy pipeline "
+                "(RandomResizedCrop+Flip+Rotation+ColorJitter+GaussianBlur+"
+                "GaussianNoise+RandomErasing)"
+            )
+            heavy_augment_fn = _build_heavy_augmentation_layer(
+                value_range=(0.0, 255.0),
+            )
+            ds = ds.map(
+                lambda x, y: (heavy_augment_fn(x, training=True), y),
+                num_parallel_calls=autotune,
+            )
         mapped = ds.map(
             lambda x, y: (
-                preprocess_batch_for_model_tf(x, backbone_name=detected_backbone),
+                preprocess_batch_for_model_tf(
+                    x, backbone_name=detected_backbone
+                ),
                 y,
             ),
             num_parallel_calls=autotune,
         )
-        if training and USE_MIXUP:
-            mapped = mapped.map(
-                lambda x, y: mixup_batch_tf(x, y, alpha=MIXUP_ALPHA),
-                num_parallel_calls=autotune,
-            )
         return mapped.prefetch(autotune)
 
     train_gen = _prep(train_ds, training=True)
@@ -359,24 +405,87 @@ def main():
     )
 
     # ── class weighting and loss ──────────────────────────────────────────
-    class_weight = compute_class_weights_from_directory(TRAIN_DIR, train_ds.class_names)
+    class_weight = compute_class_weights_from_directory(
+        TRAIN_DIR, train_ds.class_names
+    )
     if class_weight:
         print("Class-balanced weighting enabled for fine-tuning.")
 
-    selected_loss, fit_class_weight = build_loss(class_weight)
-    if USE_MIXUP and fit_class_weight:
-        print("MixUp active: disabling class_weight to avoid label-mix conflicts.")
-        fit_class_weight = None
+    selected_loss, fit_class_weight = build_loss(
+        class_weight, class_names=train_ds.class_names
+    )
 
-    if USE_MIXUP:
-        print(f"MixUp augmentation enabled (alpha={MIXUP_ALPHA}).")
+    # ── MixUp / CutMix augmentation (applied after preprocessing) ────────
+    if USE_MIXUP or USE_CUTMIX:
+        augmentation_desc = []
+        if USE_MIXUP:
+            augmentation_desc.append(f"MixUp(alpha={MIXUP_ALPHA})")
+        if USE_CUTMIX:
+            augmentation_desc.append(f"CutMix(alpha={CUTMIX_ALPHA})")
+        print(f"Augmentation: {' + '.join(augmentation_desc)}")
+        mixup_prob, cutmix_prob, normal_prob = (
+            resolve_augmentation_probabilities(
+                use_mixup=USE_MIXUP,
+                use_cutmix=USE_CUTMIX,
+                mixup_prob=float(MIXUP_PROB),
+                cutmix_prob=float(CUTMIX_PROB),
+                normal_prob=float(NORMAL_PROB),
+            )
+        )
+        print(
+            "Batch routing probabilities: "
+            f"MixUp={mixup_prob:.2f}, CutMix={cutmix_prob:.2f}, Normal={normal_prob:.2f}"
+        )
+        if fit_class_weight:
+            print(
+                "MixUp/CutMix active: disabling class_weight to avoid label-mix conflicts."
+            )
+            fit_class_weight = None
+
+        def _apply_batch_augmentation(images, labels):
+            route_sample = tf.random.uniform([])
+            if USE_MIXUP and USE_CUTMIX:
+                return tf.cond(
+                    route_sample < mixup_prob,
+                    lambda: mixup_batch_tf(
+                        images, labels, alpha=float(MIXUP_ALPHA)
+                    ),
+                    lambda: tf.cond(
+                        route_sample < (mixup_prob + cutmix_prob),
+                        lambda: cutmix_batch_tf(
+                            images, labels, alpha=float(CUTMIX_ALPHA)
+                        ),
+                        lambda: (images, labels),
+                    ),
+                )
+            if USE_MIXUP:
+                return tf.cond(
+                    route_sample < mixup_prob,
+                    lambda: mixup_batch_tf(
+                        images, labels, alpha=float(MIXUP_ALPHA)
+                    ),
+                    lambda: (images, labels),
+                )
+            return tf.cond(
+                route_sample < cutmix_prob,
+                lambda: cutmix_batch_tf(
+                    images, labels, alpha=float(CUTMIX_ALPHA)
+                ),
+                lambda: (images, labels),
+            )
+
+        train_gen = train_gen.map(
+            _apply_batch_augmentation, num_parallel_calls=autotune
+        )
 
     # ── learning rate schedule ────────────────────────────────────────────
     total_epochs = int(FINE_TUNE_EPOCHS)
     total_steps = max(1, int(steps_per_epoch) * total_epochs)
     from config import WARMUP_EPOCHS
 
-    warmup_steps = max(0, int(steps_per_epoch) * min(int(WARMUP_EPOCHS), total_epochs))
+    warmup_steps = max(
+        0, int(steps_per_epoch) * min(int(WARMUP_EPOCHS), total_epochs)
+    )
 
     if LR_SCHEDULER.lower() == "cosine":
         lr_schedule = WarmupCosineSchedule(
@@ -405,40 +514,55 @@ def main():
             and "gradient_accumulation_steps"
             in inspect.signature(keras.optimizers.AdamW).parameters
         ):
-            optimizer_kwargs["gradient_accumulation_steps"] = accumulation_steps
+            optimizer_kwargs["gradient_accumulation_steps"] = (
+                accumulation_steps
+            )
 
         if USE_OPTIMIZER_EMA:
             print(f"AdamW EMA enabled (momentum={EMA_MOMENTUM}).")
-        model.compile(
-            optimizer=keras.optimizers.AdamW(**optimizer_kwargs),
-            loss=selected_loss,
-            metrics=["accuracy"],
-        )
+
+        training_model = model
+        if USE_ATTENTION_GUIDANCE:
+            from saliency_alignment import SaliencyAlignedModel
+
+            with strategy.scope():
+                training_model = SaliencyAlignedModel(
+                    model, backbone_name=detected_backbone
+                )
+
+        with strategy.scope():
+            training_model.compile(
+                optimizer=keras.optimizers.AdamW(**optimizer_kwargs),
+                loss=selected_loss,
+                metrics=["accuracy"],
+            )
 
     # ── baseline evaluation ───────────────────────────────────────────────
     initial_best_val_acc = None
-    if os.path.exists(FINAL_MODEL_PATH):
+    if os.path.exists(CLASSIFIER_PATH):
         try:
             initial_best_val_acc = _evaluate_val_accuracy(
-                FINAL_MODEL_PATH, val_gen, validation_steps, strategy
+                CLASSIFIER_PATH, val_gen, validation_steps, strategy
             )
-            print(f"Baseline val_accuracy of saved model: {initial_best_val_acc:.6f}")
+            print(
+                f"Baseline val_accuracy of saved model: {initial_best_val_acc:.6f}"
+            )
         except Exception as exc:
             print(f"Could not evaluate baseline model: {exc}")
 
     # ── callbacks ─────────────────────────────────────────────────────────
     checkpoint = BestModelSaver(
-        FINAL_MODEL_PATH,
-        monitor="val_accuracy",
-        mode="max",
-        initial_best=initial_best_val_acc,
+        CLASSIFIER_PATH,
+        monitor="val_loss",
+        mode="min",
+        initial_best=None,  # Reset since we switched to val_loss (can't use baseline val_acc)
         verbose=1,
     )
     early_stopping = EarlyStopping(
-        monitor="val_accuracy",
+        monitor="val_loss",
         patience=int(EARLY_STOPPING_PATIENCE),
         min_delta=0.001,
-        mode="max",
+        mode="min",
         restore_best_weights=True,
         verbose=1,
     )
@@ -448,7 +572,7 @@ def main():
             min_gap=float(OVERFITTING_STOP_MIN_GAP),
             patience=int(OVERFITTING_STOP_PATIENCE),
             verbose=1,
-            save_path=FINAL_MODEL_PATH,
+            save_path=CLASSIFIER_PATH,
         )
         print(
             "Overfitting stop enabled: "
@@ -459,8 +583,12 @@ def main():
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_id = f"fine_tune_{run_stamp}"
     ft_history_latest = os.path.join(logs_dir, "fine_tune_history.csv")
-    ft_history_archive = os.path.join(logs_dir, f"fine_tune_history_{run_stamp}.csv")
-    ft_interval_latest = os.path.join(logs_dir, "fine_tune_interval_history.csv")
+    ft_history_archive = os.path.join(
+        logs_dir, f"fine_tune_history_{run_stamp}.csv"
+    )
+    ft_interval_latest = os.path.join(
+        logs_dir, "fine_tune_interval_history.csv"
+    )
     ft_interval_archive = os.path.join(
         logs_dir, f"fine_tune_interval_history_{run_stamp}.csv"
     )
@@ -513,7 +641,9 @@ def main():
         print("TensorBoard not installed; skipping TensorBoard callback.")
 
     print(f"\nBatch size: {batch_size}  |  Epochs: {total_epochs}")
-    print(f"Steps/epoch: {steps_per_epoch}  |  Validation steps: {validation_steps}")
+    print(
+        f"Steps/epoch: {steps_per_epoch}  |  Validation steps: {validation_steps}"
+    )
     print("\n--- Fine-tuning ---\n")
 
     progress = ProgressEmitter(
@@ -523,8 +653,15 @@ def main():
         run_start_time=time.time(),
     )
 
+    collage_callback = GradCamEpochCollageCallback(
+        val_dir=VAL_DIR,
+        class_names=train_ds.class_names,
+        backbone_name=detected_backbone,
+        output_dir="plots/gradcam_epochs_finetune",
+    )
+
     # ── training loop ─────────────────────────────────────────────────────
-    model.fit(
+    training_model.fit(
         train_gen,
         validation_data=val_gen,
         steps_per_epoch=steps_per_epoch,
@@ -540,6 +677,7 @@ def main():
                 *interval_loggers,
                 tensorboard,
                 progress,
+                collage_callback,
             ]
             if cb is not None
         ],
@@ -549,9 +687,9 @@ def main():
 
     # ── finalise ──────────────────────────────────────────────────────────
     gc.collect()
-    best_model_source = _resolve_model_path(FINAL_MODEL_PATH)
+    best_model_source = _resolve_model_path(CLASSIFIER_PATH)
     model = _load_model_robust(best_model_source)
-    model.save(FINAL_MODEL_PATH)
+    model.save(CLASSIFIER_PATH)
 
     fine_tune_manifest = {
         "run_id": run_id,
@@ -559,9 +697,13 @@ def main():
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "base_train_run_id": base_train_run_id,
         "fine_tune_history_latest": ft_history_latest,
-        "fine_tune_history_archive": ft_history_archive if SAVE_LOG_ARCHIVE else None,
+        "fine_tune_history_archive": ft_history_archive
+        if SAVE_LOG_ARCHIVE
+        else None,
         "fine_tune_interval_latest": ft_interval_latest,
-        "fine_tune_interval_archive": ft_interval_archive if SAVE_LOG_ARCHIVE else None,
+        "fine_tune_interval_archive": ft_interval_archive
+        if SAVE_LOG_ARCHIVE
+        else None,
         "use_mixup": USE_MIXUP,
         "steps_per_epoch": int(steps_per_epoch),
         "validation_steps": int(validation_steps),
@@ -581,7 +723,7 @@ def main():
     with open(latest_runs_path, "w", encoding="utf-8") as out_file:
         json.dump(latest_runs, out_file, indent=2)
     print("Fine-tuning complete")
-    print(f"Best model saved to: {FINAL_MODEL_PATH}")
+    print(f"Best classifier saved to: {CLASSIFIER_PATH}")
 
 
 if __name__ == "__main__":

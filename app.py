@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import uuid
+from typing import Any
 
 import numpy as np
 import tensorflow as tf
@@ -39,6 +40,8 @@ from inference_guard import (
     compute_prediction_diagnostics,
     evaluate_inference_safety,
 )
+from leaf_detector import detect_leaf_presence
+from leaf_detector_model import create_leaf_detector
 from model_paths import resolve_keras_model_path
 from preprocessing import preprocess_array_for_model
 from training_utils import WarmupCosineSchedule
@@ -51,7 +54,9 @@ def _log_tf_runtime_info():
     """Log TensorFlow build info and detected GPU devices at startup."""
     try:
         print(f"TensorFlow version: {tf.__version__}")
-        print(f"CUDA visible devices: {tf.config.list_physical_devices('GPU')}")
+        print(
+            f"CUDA visible devices: {tf.config.list_physical_devices('GPU')}"
+        )
         print(f"Built with CUDA: {tf.test.is_built_with_cuda()}")
         print(f"Built with ROCm: {tf.test.is_built_with_rocm()}")
     except Exception as exc:  # Best effort; do not block app startup
@@ -76,12 +81,14 @@ MODEL_LOAD_ERROR = None
 ACTIVE_MODEL_PATH = None
 # Backward compatibility alias for older helper scripts.
 MODEL_PATH = None
-MODEL_CACHE = {}
+MODEL_CACHE: dict[str, Any] = {}
+ACTIVE_BACKBONE = None
+LEAF_DETECTOR_MODEL = None
 
 # Keep complete per-job console history in memory for UI display.
 # Set to an integer to enable truncation if needed in low-memory environments.
 JOB_LOG_LIMIT = None
-JOBS = {}
+JOBS: dict[str, Any] = {}
 JOBS_LOCK = threading.Lock()
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 KERAS_BATCH_PROGRESS_RE = re.compile(r"^\d+/\d+\s+")
@@ -103,17 +110,17 @@ CONTROL_ACTIONS = {
     "train": {
         "label": "Train Model",
         "script": TRAIN_SCRIPT,
-        "description": TRAIN_DESC,
+        "description": "Train from scratch and save checkpoint (models/leaf_disease_checkpoint.keras)",
     },
     "fine_tune": {
         "label": "Fine Tune Model",
         "script": "fine_tune_model.py",
-        "description": "continue training from a saved checkpoint",
+        "description": "Fine-tune checkpoint into classifier (models/leaf_disease_classifier.keras)",
     },
     "refine": {
         "label": "Refine Model",
         "script": "refine_model.py",
-        "description": "run post-fine-tune refinement for deployment-ready weights",
+        "description": "Refine classifier into deployment model (models/leaf_disease_refined.keras)",
     },
     "evaluate": {
         "label": "Evaluate Model",
@@ -124,6 +131,16 @@ CONTROL_ACTIONS = {
         "label": "Generate Figures",
         "script": "scripts/generate_figures.py",
         "description": "build plots and analysis artifacts",
+    },
+    "train_leaf_detector": {
+        "label": "Train Leaf Detector",
+        "script": "train_leaf_detector.py",
+        "description": "train binary leaf/non-leaf detector used in stage-1 inference",
+    },
+    "gradcam_check": {
+        "label": "Grad-CAM Check",
+        "script": "scripts/gradcam_check.py",
+        "description": "generate Grad-CAM heatmaps to verify model focuses on leaf, not background",
     },
 }
 
@@ -160,7 +177,9 @@ def _list_available_model_paths():
 
 def _resolve_requested_model_path(model_name=None):
     available_paths = _list_available_model_paths()
-    option_to_path = {_model_option_name(path): path for path in available_paths}
+    option_to_path = {
+        _model_option_name(path): path for path in available_paths
+    }
     basename_to_paths = {}
     for path in available_paths:
         basename_to_paths.setdefault(os.path.basename(path), []).append(path)
@@ -216,6 +235,31 @@ def _resolve_requested_model_path(model_name=None):
 def _get_inference_model(model_name=None):
     global model, ACTIVE_MODEL_PATH, MODEL_PATH
 
+    from config import ENSEMBLE_MODEL_PATHS
+
+    if not model_name and ENSEMBLE_MODEL_PATHS:
+        models = []
+        for path in ENSEMBLE_MODEL_PATHS:
+            # We attempt to resolve the path. If it's absolute we use it, otherwise relative.
+            # ENSEMBLE_MODEL_PATHS are usually relative to MODELS_DIR or absolute.
+            try:
+                target_path = _resolve_requested_model_path(path)
+                if target_path in MODEL_CACHE:
+                    models.append(MODEL_CACHE[target_path])
+                else:
+                    loaded = _load_model_robust(target_path)
+                    MODEL_CACHE[target_path] = loaded
+                    models.append(loaded)
+            except ValueError as e:
+                print(
+                    f"[WARNING] Ensemble model path {path} failed to load: {e}"
+                )
+        if models:
+            model = models
+            ACTIVE_MODEL_PATH = "ensemble"
+            MODEL_PATH = "ensemble"
+            return model, ACTIVE_MODEL_PATH
+
     target_path = _resolve_requested_model_path(model_name)
     if target_path in MODEL_CACHE:
         model = MODEL_CACHE[target_path]
@@ -235,7 +279,9 @@ def _load_model_robust(model_path: str):
     """Load model with compatibility fallback for older KerasHub ViT configs."""
     custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
     try:
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
     except TypeError as exc:
         error_text = str(exc)
         if "ViTPatchingAndEmbedding" not in error_text:
@@ -251,7 +297,9 @@ def _load_model_robust(model_path: str):
             "Detected KerasHub ViT checkpoint compatibility mismatch; "
             "retrying load with compatibility shim."
         )
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
 
 
 def _patch_vit_layer_init_for_compat() -> bool:
@@ -276,6 +324,119 @@ def _patch_vit_layer_init_for_compat() -> bool:
     layer_cls.__init__ = _patched_init
     layer_cls._leaf_compat_patched = True
     return True
+
+
+def _infer_backbone_name(active_model, model_path: str | None = None) -> str:
+    """Best-effort backbone detection for selecting the correct preprocessing."""
+    path_hint = (model_path or "").lower()
+    if any(token in path_hint for token in ["dino", "vit", "refined"]):
+        return "DINOv3"
+
+    try:
+        for layer in getattr(active_model, "layers", []):
+            layer_name = (getattr(layer, "name", "") or "").lower()
+            class_name = layer.__class__.__name__.lower()
+            if any(
+                token in layer_name
+                for token in ["vit", "dino", "patching", "transformer"]
+            ):
+                return "DINOv3"
+            if any(
+                token in class_name
+                for token in ["vit", "patch", "transformer"]
+            ):
+                return "DINOv3"
+    except Exception:
+        pass
+
+    return "EfficientNetV2B0"
+
+
+def _model_has_internal_preprocessing(active_model) -> bool:
+    """Detect whether a model already performs input preprocessing internally."""
+    try:
+        for layer in getattr(active_model, "layers", []):
+            lname = (getattr(layer, "name", "") or "").lower()
+            lclass = layer.__class__.__name__.lower()
+            if "dinov3_preprocess" in lname:
+                return True
+            if lclass in {"rescaling", "normalization"}:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _infer_model_num_classes(active_model):
+    """Best-effort extraction of output class count from a loaded Keras model."""
+    try:
+        output_shape = active_model.output_shape
+        if isinstance(output_shape, list):
+            output_shape = output_shape[0]
+        if not output_shape:
+            return None
+        # Most classifiers expose shape like (None, num_classes).
+        last_dim = output_shape[-1]
+        if isinstance(last_dim, int) and last_dim > 0:
+            return int(last_dim)
+    except Exception:
+        return None
+    return None
+
+
+def _load_class_indices_map(path):
+    """Load and reverse a class-indices JSON map (label -> idx) into idx -> label."""
+    with open(path, "r") as f:
+        label_to_idx = json.load(f)
+    return {int(v): k for k, v in label_to_idx.items()}
+
+
+def _resolve_class_indices_for_model(model_path, active_model):
+    """Select class indices JSON that matches the active model output size when possible."""
+    expected_classes = _infer_model_num_classes(active_model)
+    model_dir = os.path.dirname(model_path)
+    model_stem = os.path.splitext(os.path.basename(model_path))[0]
+
+    candidates = [
+        os.path.join(model_dir, "class_indices.json"),
+        os.path.join(model_dir, f"{model_stem}.class_indices.json"),
+        os.path.join(model_dir, f"{model_stem}_class_indices.json"),
+        str(CLASS_INDICES_PATH),
+    ]
+
+    checked = []
+    for candidate in candidates:
+        if not candidate or not os.path.exists(candidate):
+            continue
+        try:
+            idx_to_label = _load_class_indices_map(candidate)
+            checked.append((candidate, len(idx_to_label)))
+            if (
+                expected_classes is None
+                or len(idx_to_label) == expected_classes
+            ):
+                print(
+                    f"Using class indices: {candidate} "
+                    f"({len(idx_to_label)} classes, model expects {expected_classes})"
+                )
+                return idx_to_label
+        except Exception as exc:
+            print(f"Skipping invalid class indices file {candidate}: {exc}")
+
+    if checked:
+        # Fallback to first readable mapping, but warn loudly on mismatch.
+        fallback_path = checked[0][0]
+        idx_to_label = _load_class_indices_map(fallback_path)
+        print(
+            "WARNING: No class index file matched model output dimension. "
+            f"Using fallback {fallback_path} ({len(idx_to_label)} classes; "
+            f"model expects {expected_classes}). Predictions may map to wrong labels."
+        )
+        return idx_to_label
+
+    raise FileNotFoundError(
+        "No readable class_indices JSON found. Tried: " + ", ".join(candidates)
+    )
 
 
 def _is_allowed_upload(filename):
@@ -314,7 +475,48 @@ def _normalize_save_mode(value):
     return None
 
 
-def _create_job(action_key, archive_logs=False, base_model=None, train_options=None):
+def _normalize_leaf_detection_mode(value):
+    raw = str(value or "auto").strip().lower()
+    if raw in {"auto", "model", "heuristic", "off"}:
+        return raw
+    return "auto"
+
+
+def _get_leaf_detector_model():
+    global LEAF_DETECTOR_MODEL
+    if LEAF_DETECTOR_MODEL is not None:
+        return LEAF_DETECTOR_MODEL
+
+    try:
+        LEAF_DETECTOR_MODEL = create_leaf_detector()
+        print("Leaf detector model loaded for UI-controlled inference.")
+    except Exception as exc:
+        print(f"Leaf detector model unavailable: {exc}")
+        LEAF_DETECTOR_MODEL = None
+    return LEAF_DETECTOR_MODEL
+
+
+def _parse_pipeline_options(payload):
+    source = payload or {}
+    options = {
+        "leaf_detection_mode": _normalize_leaf_detection_mode(
+            source.get("leaf_detection_mode")
+        ),
+        "use_background_removal": _to_bool(
+            source.get("use_background_removal")
+        ),
+        "use_safety_gate": _to_bool(source.get("use_safety_gate")),
+    }
+    if "use_background_removal" not in source:
+        options["use_background_removal"] = True
+    if "use_safety_gate" not in source:
+        options["use_safety_gate"] = True
+    return options
+
+
+def _create_job(
+    action_key, archive_logs=False, base_model=None, train_options=None
+):
     action = CONTROL_ACTIONS[action_key]
     script = action["script"]
     script_args = []
@@ -329,7 +531,9 @@ def _create_job(action_key, archive_logs=False, base_model=None, train_options=N
     if action_key == "train" and base_model:
         script_args = ["--base-model", str(base_model)]
     if action_key == "train" and train_fraction is not None:
-        script_args.extend(["--train-fraction", f"{float(train_fraction):.6f}"])
+        script_args.extend(
+            ["--train-fraction", f"{float(train_fraction):.6f}"]
+        )
     if action_key == "train" and optimizer:
         script_args.extend(["--optimizer", str(optimizer)])
     if action_key == "train" and save_mode:
@@ -347,7 +551,9 @@ def _create_job(action_key, archive_logs=False, base_model=None, train_options=N
     if action_key == "train" and base_model:
         env_overrides["LEAF_BASE_MODEL"] = str(base_model)
     if action_key == "train" and train_fraction is not None:
-        env_overrides["LEAF_TRAIN_DATA_FRACTION"] = f"{float(train_fraction):.6f}"
+        env_overrides["LEAF_TRAIN_DATA_FRACTION"] = (
+            f"{float(train_fraction):.6f}"
+        )
     if action_key == "train" and optimizer:
         env_overrides["LEAF_TRAIN_OPTIMIZER"] = str(optimizer)
     if action_key == "train" and save_mode:
@@ -395,7 +601,9 @@ def _append_job_log(job, line):
 
     cleaned = line.replace("\r", " ").replace("\b", "")
     cleaned = ANSI_ESCAPE_RE.sub("", cleaned)
-    cleaned = "".join(ch for ch in cleaned if ch == "\t" or 32 <= ord(ch) <= 126)
+    cleaned = "".join(
+        ch for ch in cleaned if ch == "\t" or 32 <= ord(ch) <= 126
+    )
     cleaned = cleaned.strip()
 
     if not cleaned:
@@ -407,12 +615,14 @@ def _append_job_log(job, line):
     # Keras/TensorFlow batch progress emits carriage-return updates.
     # Keep a single live-updating progress line instead of appending a new line for each step.
     is_batch_progress = (
-        KERAS_BATCH_PROGRESS_RE.match(cleaned) is not None and "ms/step" in cleaned
+        KERAS_BATCH_PROGRESS_RE.match(cleaned) is not None
+        and "ms/step" in cleaned
     )
     if is_batch_progress and job["logs"]:
         prev = job["logs"][-1]
         prev_is_batch = (
-            KERAS_BATCH_PROGRESS_RE.match(prev) is not None and "ms/step" in prev
+            KERAS_BATCH_PROGRESS_RE.match(prev) is not None
+            and "ms/step" in prev
         )
         if prev_is_batch:
             job["logs"][-1] = cleaned
@@ -435,7 +645,9 @@ def _parse_progress_line(job, raw_line):
 
     try:
         payload = json.loads(line[len(prefix) :])
-        progress = float(payload.get("progress_pct", job.get("progress_pct", 0.0)))
+        progress = float(
+            payload.get("progress_pct", job.get("progress_pct", 0.0))
+        )
         eta = payload.get("eta_seconds")
 
         job["progress_pct"] = max(0.0, min(100.0, progress))
@@ -903,42 +1115,129 @@ DISEASE_INFO = {
 
 def load_model_and_classes():
     """Load the model and class indices"""
-    global model, class_indices, MODEL_LOAD_ERROR, ACTIVE_MODEL_PATH, MODEL_PATH
+    global \
+        model, \
+        class_indices, \
+        MODEL_LOAD_ERROR, \
+        ACTIVE_MODEL_PATH, \
+        MODEL_PATH, \
+        ACTIVE_BACKBONE
 
     model = None
     class_indices = None
     MODEL_LOAD_ERROR = None
     ACTIVE_MODEL_PATH = None
     MODEL_PATH = None
+    ACTIVE_BACKBONE = None
 
     print("Loading model...")
     model, model_path = _get_inference_model()
     MODEL_PATH = model_path
+
+    # Use the first model in ensemble to infer backbone
+    first_model = model[0] if isinstance(model, list) else model
+    ACTIVE_BACKBONE = _infer_backbone_name(first_model, model_path)
     print(f"Loaded model file: {model_path}")
+    print(f"Detected inference backbone: {ACTIVE_BACKBONE}")
 
-    with open(CLASS_INDICES_PATH, "r") as f:
-        class_indices = json.load(f)
-
-    # Reverse the indices to get class names from predictions
-    class_indices = {v: k for k, v in class_indices.items()}
+    class_indices = _resolve_class_indices_for_model(model_path, model)
     print("Model loaded successfully.")
     return model, class_indices, ACTIVE_MODEL_PATH
 
 
-def predict_disease(img_path, inference_model=None):
+def predict_disease(img_path, inference_model=None, pipeline_options=None):
     """Predict disease from image"""
     active_model = inference_model or model
     if active_model is None or class_indices is None:
         raise RuntimeError("Model or class indices are not loaded.")
 
-    img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
-    img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
-    img_array = preprocess_array_for_model(img_array)
+    options = _parse_pipeline_options(pipeline_options)
+    stage_details = []
+
+    leaf_validation = assess_leaf_likelihood(img_path, IMG_SIZE)
+
+    if options["leaf_detection_mode"] != "off":
+        leaf_result = None
+        leaf_source = "heuristic"
+
+        if options["leaf_detection_mode"] in {"auto", "model"}:
+            detector = _get_leaf_detector_model()
+            if detector is not None:
+                leaf_result = detector.predict(img_path)
+                leaf_source = "trained_model"
+            elif options["leaf_detection_mode"] == "model":
+                raise RuntimeError(
+                    "Leaf detector model is not available. "
+                    "Train it from the Web UI using 'Train Leaf Detector'."
+                )
+
+        if leaf_result is None:
+            leaf_result = detect_leaf_presence(img_path, img_size=IMG_SIZE)
+
+        stage_details.append(
+            {
+                "stage": "leaf_detection",
+                "source": leaf_source,
+                "is_leaf": bool(leaf_result.get("is_leaf", False)),
+                "leaf_score": float(leaf_result.get("leaf_score", 0.0)),
+                "reason": leaf_result.get("reason", ""),
+            }
+        )
+
+        if not leaf_result.get("is_leaf", False):
+            return {
+                "class_name": "Unknown",
+                "confidence": 0.0,
+                "plant": "Leaf Validation",
+                "disease": "Not a leaf image",
+                "description": "Stage-1 leaf detection rejected this image.",
+                "symptoms": "No disease analysis was run because the image was not identified as a leaf.",
+                "treatment": leaf_result.get("reason")
+                or "Upload a clear close-up image of a single leaf.",
+                "prevention": "Use a plain background and ensure the leaf fills most of the frame.",
+                "is_healthy": False,
+                "is_valid_leaf": False,
+                "rejected": True,
+                "validation": {
+                    "leaf_score": float(leaf_result.get("leaf_score", 0.0)),
+                    "vegetation_ratio": float(
+                        leaf_validation.get("vegetation_ratio", 0.0)
+                    ),
+                    "confidence_margin": 0.0,
+                    "entropy_bits": 0.0,
+                    "rejection_reasons": [
+                        leaf_result.get("reason") or "Leaf not detected"
+                    ],
+                },
+                "pipeline": {
+                    "options": options,
+                    "stages": stage_details,
+                },
+            }
+
+    model_input_array = None
+    stage_details.append({"stage": "background_removal", "applied": False})
+
+    if model_input_array is None:
+        img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
+        model_input_array = np.expand_dims(image.img_to_array(img), axis=0)
+
+    # Skip external preprocessing when model already has an internal preprocess block.
+    if not _model_has_internal_preprocessing(active_model):
+        model_input_array = preprocess_array_for_model(
+            model_input_array, backbone_name=ACTIVE_BACKBONE
+        )
 
     # Make prediction
-    predictions = active_model.predict(img_array, verbose=0)
-    diagnostics = compute_prediction_diagnostics(predictions[0])
+    if isinstance(active_model, list):
+        all_preds = [
+            m.predict(model_input_array, verbose=0)[0] for m in active_model
+        ]
+        prediction_probs = np.mean(all_preds, axis=0)
+        diagnostics = compute_prediction_diagnostics(prediction_probs)
+    else:
+        predictions = active_model.predict(model_input_array, verbose=0)
+        diagnostics = compute_prediction_diagnostics(predictions[0])
     predicted_class_idx = int(diagnostics["top1_index"])
     confidence = float(diagnostics["top1_prob"]) * 100.0
     confidence_margin = float(diagnostics["confidence_margin"]) * 100.0
@@ -947,39 +1246,65 @@ def predict_disease(img_path, inference_model=None):
     # Get class name
     class_name = class_indices.get(predicted_class_idx, "Unknown")
 
-    leaf_validation = assess_leaf_likelihood(img_path, IMG_SIZE)
-    safety = evaluate_inference_safety(
-        diagnostics=diagnostics,
-        leaf_validation=leaf_validation,
-        confidence_threshold=CONFIDENCE_REJECT_THRESHOLD,
-        entropy_threshold_bits=ENTROPY_REJECT_THRESHOLD,
-        msp_threshold=OOD_MSP_THRESHOLD,
-        min_margin=0.12,
+    safety = {"reject": False, "reasons": [], "uncertainty_score": 0}
+    if options["use_safety_gate"]:
+        safety = evaluate_inference_safety(
+            diagnostics=diagnostics,
+            leaf_validation=leaf_validation,
+            confidence_threshold=CONFIDENCE_REJECT_THRESHOLD,
+            entropy_threshold_bits=ENTROPY_REJECT_THRESHOLD,
+            msp_threshold=OOD_MSP_THRESHOLD,
+            min_margin=0.08,
+        )
+
+    stage_details.append(
+        {
+            "stage": "classification",
+            "class_name": class_name,
+            "confidence": round(confidence, 2),
+            "confidence_margin": round(confidence_margin, 2),
+            "entropy_bits": round(entropy_bits, 4),
+        }
+    )
+    stage_details.append(
+        {
+            "stage": "safety_gate",
+            "enabled": options["use_safety_gate"],
+            "rejected": bool(safety.get("reject", False)),
+            "reasons": safety.get("reasons", []),
+        }
     )
 
     if safety["reject"]:
-        guidance = (
-            "Upload a clear, close-up image of a single leaf under good lighting."
-        )
+        guidance = "Upload a clear, close-up image of a single leaf under good lighting."
         if leaf_validation["reason"]:
             guidance = f"{leaf_validation['reason']} {guidance}"
         else:
             safety_reason = (
-                ", ".join(safety["reasons"]) if safety["reasons"] else "low trust score"
+                ", ".join(safety["reasons"])
+                if safety["reasons"]
+                else "low trust score"
             )
-            guidance = f"Inference was rejected due to {safety_reason}. {guidance}"
+            guidance = (
+                f"Inference was rejected due to {safety_reason}. {guidance}"
+            )
+
+        parts = class_name.split("___")
+        plant = parts[0].replace("_", " ") if len(parts) > 0 else "Unknown"
+        disease = parts[1].replace("_", " ") if len(parts) > 1 else class_name
 
         return {
-            "class_name": "Unknown",
+            "class_name": class_name,
             "confidence": round(confidence, 2),
-            "plant": "Unknown",
-            "disease": "Unknown / needs human review",
-            "description": "The uploaded photo was rejected by the runtime safety gate because the image appears out-of-domain or prediction confidence is not trustworthy.",
-            "symptoms": "No disease analysis was performed because inference quality checks failed.",
+            "plant": plant,
+            "disease": disease,
+            "description": "The model produced a prediction, but the runtime safety gate flagged the image as low-trust or out-of-domain.",
+            "symptoms": "A best-guess prediction is available, but the image quality checks failed.",
             "treatment": guidance,
             "prevention": "Use a plain background and make sure the leaf fills most of the frame.",
-            "is_healthy": False,
+            "is_healthy": "healthy" in class_name.lower(),
             "is_valid_leaf": False,
+            "rejected": True,
             "validation": {
                 "leaf_score": leaf_validation["leaf_score"],
                 "vegetation_ratio": leaf_validation["vegetation_ratio"],
@@ -988,13 +1313,19 @@ def predict_disease(img_path, inference_model=None):
                 "uncertainty_score": int(safety["uncertainty_score"]),
                 "rejection_reasons": safety["reasons"],
             },
+            "pipeline": {
+                "options": options,
+                "stages": stage_details,
+            },
         }
 
     # Get disease info
     info = DISEASE_INFO.get(
         class_name,
         {
-            "plant": class_name.split("___")[0] if "___" in class_name else "Unknown",
+            "plant": class_name.split("___")[0]
+            if "___" in class_name
+            else "Unknown",
             "disease": class_name.split("___")[1]
             if "___" in class_name
             else class_name,
@@ -1023,23 +1354,34 @@ def predict_disease(img_path, inference_model=None):
             "entropy_bits": round(entropy_bits, 4),
             "rejection_reasons": [],
         },
+        "pipeline": {
+            "options": options,
+            "stages": stage_details,
+        },
     }
 
 
 @app.route("/")
 def index():
     """Render the main page"""
-    available_model_names = [_model_option_name(path) for path in _list_available_model_paths()]
-    active_name = _model_option_name(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
+    available_model_names = [
+        _model_option_name(path) for path in _list_available_model_paths()
+    ]
+    active_name = (
+        _model_option_name(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
+    )
 
     default_fraction_pct = 100.0
     env_fraction = _to_float(os.getenv("LEAF_TRAIN_DATA_FRACTION"), None)
     if env_fraction is not None:
         default_fraction_pct = max(0.1, min(100.0, env_fraction * 100.0))
 
-    default_optimizer = _normalize_train_optimizer(
-        os.getenv("LEAF_TRAIN_OPTIMIZER") or TRAIN_OPTIMIZER_OPTIONS[0]
-    ) or TRAIN_OPTIMIZER_OPTIONS[0]
+    default_optimizer = (
+        _normalize_train_optimizer(
+            os.getenv("LEAF_TRAIN_OPTIMIZER") or TRAIN_OPTIMIZER_OPTIONS[0]
+        )
+        or TRAIN_OPTIMIZER_OPTIONS[0]
+    )
 
     default_save_mode = _normalize_save_mode(os.getenv("LEAF_SAVE_MODE"))
     if default_save_mode is None:
@@ -1063,6 +1405,9 @@ def index():
         default_training_optimizer=default_optimizer,
         default_training_save_mode=default_save_mode,
         default_class_equalizer=default_class_equalizer,
+        default_leaf_detection_mode="auto",
+        default_use_background_removal=True,
+        default_use_safety_gate=True,
     )
 
 
@@ -1085,9 +1430,18 @@ def predict():
         return jsonify({"error": "No file selected"}), 400
 
     if not _is_allowed_upload(filename_input):
-        return jsonify({"error": "Unsupported file type. Use JPG, PNG, or WEBP."}), 400
+        return jsonify(
+            {"error": "Unsupported file type. Use JPG, PNG, or WEBP."}
+        ), 400
 
     selected_model_name = (request.form.get("model_name") or "").strip()
+    pipeline_options = {
+        "leaf_detection_mode": request.form.get("leaf_detection_mode", "auto"),
+        "use_background_removal": request.form.get(
+            "use_background_removal", "on"
+        ),
+        "use_safety_gate": request.form.get("use_safety_gate", "on"),
+    }
 
     if file:
         # Save file temporarily
@@ -1103,7 +1457,11 @@ def predict():
             )
 
             # Make prediction
-            result = predict_disease(filepath, inference_model=inference_model)
+            result = predict_disease(
+                filepath,
+                inference_model=inference_model,
+                pipeline_options=pipeline_options,
+            )
             result["model_name"] = _model_option_name(active_model_path)
 
             # Read image for preview
@@ -1139,7 +1497,10 @@ def health():
             "active_model": _model_option_name(ACTIVE_MODEL_PATH)
             if ACTIVE_MODEL_PATH
             else None,
-            "available_models": [_model_option_name(path) for path in _list_available_model_paths()],
+            "available_models": [
+                _model_option_name(path)
+                for path in _list_available_model_paths()
+            ],
         }
     )
 
@@ -1168,7 +1529,10 @@ def control_run(action_key):
 
     with JOBS_LOCK:
         for job in JOBS.values():
-            if job["action"] == action_key and job["status"] in {"starting", "running"}:
+            if job["action"] == action_key and job["status"] in {
+                "starting",
+                "running",
+            }:
                 return jsonify(
                     {
                         "error": "This action is already running.",
@@ -1179,7 +1543,9 @@ def control_run(action_key):
     payload = request.get_json(silent=True) or {}
     archive_logs = _to_bool(payload.get("archive_logs"))
     base_model = (payload.get("base_model") or "").strip() if payload else ""
-    train_fraction_percent = payload.get("train_fraction_percent") if payload else None
+    train_fraction_percent = (
+        payload.get("train_fraction_percent") if payload else None
+    )
     optimizer = (payload.get("optimizer") or "").strip() if payload else ""
     save_mode = (payload.get("save_mode") or "").strip() if payload else ""
     class_equalizer = payload.get("class_equalizer") if payload else None
@@ -1194,7 +1560,9 @@ def control_run(action_key):
 
     if base_model and action_key not in {"train"}:
         return jsonify(
-            {"error": "Base model selection is only available for training actions."}
+            {
+                "error": "Base model selection is only available for training actions."
+            }
         ), 400
 
     if action_key == "train":
@@ -1215,7 +1583,9 @@ def control_run(action_key):
         fraction_value = _to_float(train_fraction_percent, 100.0)
         if fraction_value is None or not (0.1 <= fraction_value <= 100.0):
             return jsonify(
-                {"error": "Training data percentage must be between 0.1 and 100."}
+                {
+                    "error": "Training data percentage must be between 0.1 and 100."
+                }
             ), 400
         train_options["train_fraction_pct"] = round(float(fraction_value), 2)
         train_options["train_fraction"] = float(fraction_value) / 100.0
@@ -1239,7 +1609,9 @@ def control_run(action_key):
             return jsonify(
                 {
                     "error": "Unknown save mode selected for training.",
-                    "available_save_modes": [m["value"] for m in TRAIN_SAVE_MODES],
+                    "available_save_modes": [
+                        m["value"] for m in TRAIN_SAVE_MODES
+                    ],
                 }
             ), 400
         train_options["save_mode"] = resolved_save_mode
@@ -1258,7 +1630,9 @@ def control_run(action_key):
     thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
     thread.start()
 
-    return jsonify({"message": f"{job['label']} started.", "job": _job_response(job)})
+    return jsonify(
+        {"message": f"{job['label']} started.", "job": _job_response(job)}
+    )
 
 
 @app.route("/control/jobs", methods=["GET"])
@@ -1286,7 +1660,9 @@ def control_stop(job_id):
 
     process = job.get("process")
     if job["status"] not in {"starting", "running"} or process is None:
-        return jsonify({"error": "Job is not running.", "job": _job_response(job)}), 409
+        return jsonify(
+            {"error": "Job is not running.", "job": _job_response(job)}
+        ), 409
 
     job["stop_requested"] = True
     try:

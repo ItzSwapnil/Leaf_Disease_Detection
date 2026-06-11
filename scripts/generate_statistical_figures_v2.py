@@ -51,7 +51,12 @@ def generate_bootstrap_ci_distributions(output_dir: str = None):
     bootstrap_recall = np.clip(bootstrap_recall, 0, 1)
     bootstrap_f1 = np.clip(bootstrap_f1, 0, 1)
 
-    metrics = [bootstrap_accuracy, bootstrap_precision, bootstrap_recall, bootstrap_f1]
+    metrics = [
+        bootstrap_accuracy,
+        bootstrap_precision,
+        bootstrap_recall,
+        bootstrap_f1,
+    ]
     metric_names = ["Accuracy", "Macro Precision", "Macro Recall", "Macro F1"]
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -99,7 +104,9 @@ def generate_bootstrap_ci_distributions(output_dir: str = None):
         ax.set_xlabel(f"{name} (%)", fontsize=11, fontweight="bold")
         ax.set_ylabel("Frequency", fontsize=11, fontweight="bold")
         ax.set_title(
-            f"{name} Bootstrap Distribution (N=2000)", fontsize=12, fontweight="bold"
+            f"{name} Bootstrap Distribution (N=2000)",
+            fontsize=12,
+            fontweight="bold",
         )
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
@@ -148,11 +155,15 @@ def generate_margin_distribution_plot(output_dir: str = None):
         edgecolor="black",
     )
     ax1.set_xlabel(
-        "Prediction Margin (top1 - top2 probability)", fontsize=11, fontweight="bold"
+        "Prediction Margin (top1 - top2 probability)",
+        fontsize=11,
+        fontweight="bold",
     )
     ax1.set_ylabel("Frequency", fontsize=11, fontweight="bold")
     ax1.set_title(
-        "Margin Distribution: Correct vs Incorrect", fontsize=12, fontweight="bold"
+        "Margin Distribution: Correct vs Incorrect",
+        fontsize=12,
+        fontweight="bold",
     )
     ax1.legend(fontsize=11)
     ax1.grid(True, alpha=0.3)
@@ -185,7 +196,9 @@ def generate_margin_distribution_plot(output_dir: str = None):
     )
     ax2.set_xlabel("Prediction Margin", fontsize=11, fontweight="bold")
     ax2.set_ylabel("Cumulative Probability", fontsize=11, fontweight="bold")
-    ax2.set_title("Cumulative Distribution Functions", fontsize=12, fontweight="bold")
+    ax2.set_title(
+        "Cumulative Distribution Functions", fontsize=12, fontweight="bold"
+    )
     ax2.legend(fontsize=11)
     ax2.grid(True, alpha=0.3)
 
@@ -222,7 +235,9 @@ def generate_per_class_stability_plot(output_dir: str = None):
 
     for idx in range(num_classes):
         # Generate 3 perturbation runs
-        f1_values = np.random.normal(class_f1_means[idx], class_f1_stds[idx], 3)
+        f1_values = np.random.normal(
+            class_f1_means[idx], class_f1_stds[idx], 3
+        )
         y_positions = [idx] * 3
 
         # Plot points

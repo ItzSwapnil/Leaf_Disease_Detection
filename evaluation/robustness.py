@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import tensorflow as tf
@@ -37,7 +37,9 @@ def apply_gaussian_blur(images: np.ndarray, sigma: float) -> np.ndarray:
     kernel = tf.tile(kernel_2d, (1, 1, channels, 1))
 
     x = tf.convert_to_tensor(images, dtype=tf.float32)
-    blurred = tf.nn.depthwise_conv2d(x, kernel, strides=[1, 1, 1, 1], padding="SAME")
+    blurred = tf.nn.depthwise_conv2d(
+        x, kernel, strides=[1, 1, 1, 1], padding="SAME"
+    )
     return _clip_preprocessed(np.asarray(blurred.numpy(), dtype=np.float32))
 
 
@@ -142,7 +144,7 @@ def evaluate_robustness_suite(
     base_probs = np.asarray(predictor(images), dtype=np.float64)
     base_metrics = _metrics_from_probs(labels, base_probs)
 
-    report = {
+    report: dict[str, Any] = {
         "status": "ok",
         "samples": int(images.shape[0]),
         "base": base_metrics,

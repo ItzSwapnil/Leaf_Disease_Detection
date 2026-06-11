@@ -3,78 +3,62 @@ from __future__ import annotations
 import os
 from typing import Iterable, Optional
 
-from config import EFFNET_MODEL_PATH, FINAL_MODEL_PATH
+from config import (
+    CHECKPOINT_PATH,
+    CLASSIFIER_PATH,
+    EFFNET_MODEL_PATH,
+    FINAL_MODEL_PATH,
+    MODELS_DIR,
+)
 
 
-def resolve_keras_model_path(preferred_paths: Optional[Iterable[str]] = None) -> str:
-    """Resolve one of the canonical model paths strictly.
-
-    Allowed model files:
-    - models/leaf_disease_refined.keras (DINOv3)
-    - models/leaf_disease_EfficientNetV2-S.keras (EfficientNetV2-S)
-    - models/EfficientNetv2B0/* (EfficientNetV2-B0 variants)
-    - models/EfficientNetv2S/* (EfficientNetV2-S variants)
-    """
-
-    allowed = {
-        os.path.abspath(str(FINAL_MODEL_PATH)),
-        os.path.abspath(str(EFFNET_MODEL_PATH)),
-        # EfficientNetV2-B0 variants
-        os.path.abspath(
-            os.path.join(
-                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2B0", "leaf_disease_classifier.keras"
-            )
-        ),
-        os.path.abspath(
-            os.path.join(
-                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2B0", "leaf_disease_checkpoint.keras"
-            )
-        ),
-        # EfficientNetV2-S variants
-        os.path.abspath(
-            os.path.join(
-                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2S", "leaf_disease_classifier.keras"
-            )
-        ),
-        os.path.abspath(
-            os.path.join(
-                os.path.dirname(str(FINAL_MODEL_PATH)), "EfficientNetv2S", "leaf_disease_checkpoint.keras"
-            )
-        ),
-        # Legacy patterns (backward compat)
-        os.path.abspath(
-            os.path.join(
-                os.path.dirname(str(EFFNET_MODEL_PATH)), "leaf_disease_classifier.keras"
-            )
-        ),
-        os.path.abspath(
-            os.path.join(
-                os.path.dirname(str(EFFNET_MODEL_PATH)), "leaf_disease_checkpoint.keras"
-            )
-        ),
-    }
-
+def resolve_keras_model_path(
+    preferred_paths: Optional[Iterable[str]] = None,
+) -> str:
     if preferred_paths:
         for path in preferred_paths:
             if not path:
                 continue
             normalized = os.path.abspath(str(path))
-            if normalized not in allowed:
-                raise ValueError(
-                    "Only canonical model paths are allowed: "
-                    f"{sorted(allowed)}. Received: {normalized}"
-                )
-
             if os.path.exists(normalized):
                 return normalized
 
-    for candidate in [
+    canonical_candidates = [
         os.path.abspath(str(FINAL_MODEL_PATH)),
+        os.path.abspath(str(CLASSIFIER_PATH)),
+        os.path.abspath(str(CHECKPOINT_PATH)),
         os.path.abspath(str(EFFNET_MODEL_PATH)),
-    ]:
+    ]
+
+    for candidate in canonical_candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    models_root = os.path.abspath(str(MODELS_DIR))
+    discovered: list[str] = []
+    if os.path.isdir(models_root):
+        for root, _, files in os.walk(models_root):
+            discovered.extend(
+                os.path.abspath(os.path.join(root, filename))
+                for filename in files
+                if filename.lower().endswith((".keras", ".h5"))
+            )
+
+    for candidate in sorted(discovered):
         if os.path.exists(candidate):
             return candidate
 
     raise FileNotFoundError(
-        f"No canonical model file found. Expected one of: {sorted(allowed)}"
+        "No model file found. Expected one of: "
+        f"{canonical_candidates} or any .keras/.h5 under {models_root}"
     )
+
+
+resolve_model_path = resolve_keras_model_path
+
+
+# Globally register custom layers so load_model doesn't fail
+try:
+    import training_utils  # noqa: F401
+except ImportError:
+    pass

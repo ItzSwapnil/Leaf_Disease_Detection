@@ -1,29 +1,37 @@
 from __future__ import annotations
 
 import os
-from typing import Mapping
+from typing import Any, Mapping
 
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 
 
 def plot_reliability_diagram(
-    calibration: Mapping[str, object],
+    calibration: Mapping[str, Any],
     out_path: str,
     title: str = "Reliability Diagram",
 ) -> str:
     """Render and save a reliability diagram from calibration statistics."""
     bin_edges = np.asarray(calibration.get("bin_edges", []), dtype=np.float64)
-    bin_accuracy = np.asarray(calibration.get("bin_accuracy", []), dtype=np.float64)
-    bin_confidence = np.asarray(calibration.get("bin_confidence", []), dtype=np.float64)
-    bin_counts = np.asarray(calibration.get("bin_counts", []), dtype=np.float64)
+    bin_accuracy = np.asarray(
+        calibration.get("bin_accuracy", []), dtype=np.float64
+    )
+    bin_confidence = np.asarray(
+        calibration.get("bin_confidence", []), dtype=np.float64
+    )
+    bin_counts = np.asarray(
+        calibration.get("bin_counts", []), dtype=np.float64
+    )
     ece = float(calibration.get("ece", 0.0))
 
     if bin_edges.size < 2:
-        raise ValueError("Calibration payload must include non-empty bin_edges.")
+        raise ValueError(
+            "Calibration payload must include non-empty bin_edges."
+        )
 
     centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     widths = np.diff(bin_edges)
@@ -36,7 +44,9 @@ def plot_reliability_diagram(
         constrained_layout=True,
     )
 
-    ax_main.plot([0.0, 1.0], [0.0, 1.0], linestyle="--", color="#666666", linewidth=1.2)
+    ax_main.plot(
+        [0.0, 1.0], [0.0, 1.0], linestyle="--", color="#666666", linewidth=1.2
+    )
     ax_main.bar(
         centers,
         bin_accuracy,

@@ -47,7 +47,9 @@ def _load_model_robust(model_path: str):
     """Load model with custom object support."""
     custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
     try:
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
     except Exception as e:
         print(f"Error loading model: {e}")
         raise
@@ -85,7 +87,9 @@ def generate_gaussian_blur_degradation(model, test_dataset, output_dir: str):
                 )
                 # Clip to valid range
                 x = tf.clip_by_value(x, 0, 255)
-            return preprocess_batch_for_model_tf(x, backbone_name=backbone_name), y
+            return preprocess_batch_for_model_tf(
+                x, backbone_name=backbone_name
+            ), y
 
         blurred_ds = test_dataset.map(
             blur_augment, num_parallel_calls=tf.data.AUTOTUNE
@@ -96,7 +100,9 @@ def generate_gaussian_blur_degradation(model, test_dataset, output_dir: str):
         y_pred = np.argmax(preds, axis=1)
 
         # Collect ground truth
-        y_true = np.concatenate([labels.numpy() for _, labels in test_dataset], axis=0)
+        y_true = np.concatenate(
+            [labels.numpy() for _, labels in test_dataset], axis=0
+        )
 
         # Compute metrics
         accuracy = np.mean(y_pred == y_true)
@@ -132,10 +138,14 @@ def generate_gaussian_blur_degradation(model, test_dataset, output_dir: str):
         color="#A23B72",
     )
 
-    ax.set_xlabel("Gaussian Blur Kernel Size (pixels)", fontsize=12, fontweight="bold")
+    ax.set_xlabel(
+        "Gaussian Blur Kernel Size (pixels)", fontsize=12, fontweight="bold"
+    )
     ax.set_ylabel("Performance Metric", fontsize=12, fontweight="bold")
     ax.set_title(
-        "Robustness Degradation: Gaussian Blur Effects", fontsize=14, fontweight="bold"
+        "Robustness Degradation: Gaussian Blur Effects",
+        fontsize=14,
+        fontweight="bold",
     )
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.legend(fontsize=11)
@@ -143,7 +153,11 @@ def generate_gaussian_blur_degradation(model, test_dataset, output_dir: str):
 
     # Add baseline reference line
     ax.axhline(
-        y=accuracies[0], color="gray", linestyle=":", alpha=0.5, label="Baseline"
+        y=accuracies[0],
+        color="gray",
+        linestyle=":",
+        alpha=0.5,
+        label="Baseline",
     )
 
     plt.tight_layout()
@@ -155,7 +169,9 @@ def generate_gaussian_blur_degradation(model, test_dataset, output_dir: str):
     plt.close()
 
     # Save metrics
-    with open(os.path.join(output_dir, "robustness_blur_metrics.json"), "w") as f:
+    with open(
+        os.path.join(output_dir, "robustness_blur_metrics.json"), "w"
+    ) as f:
         json.dump(predictions_by_kernel, f, indent=2)
 
     print("  ✓ Saved: robustness_blur_degradation.png")
@@ -171,7 +187,9 @@ def generate_brightness_contrast_sweep(model, test_dataset, output_dir: str):
 
     Simulates: varying lighting, exposure issues, image processing artifacts.
     """
-    print("\n[Robustness] Generating brightness/contrast sensitivity curves...")
+    print(
+        "\n[Robustness] Generating brightness/contrast sensitivity curves..."
+    )
 
     backbone_name = _infer_backbone(model)
 
@@ -191,7 +209,9 @@ def generate_brightness_contrast_sweep(model, test_dataset, output_dir: str):
                 x = tf.image.adjust_contrast(x, c_factor)
                 # Clip to valid range
                 x = tf.clip_by_value(x, 0, 255)
-                return preprocess_batch_for_model_tf(x, backbone_name=backbone_name), y
+                return preprocess_batch_for_model_tf(
+                    x, backbone_name=backbone_name
+                ), y
 
             augmented_ds = test_dataset.map(
                 augment_bc, num_parallel_calls=tf.data.AUTOTUNE
@@ -207,7 +227,9 @@ def generate_brightness_contrast_sweep(model, test_dataset, output_dir: str):
 
     # Plot heatmap
     fig, ax = plt.subplots(figsize=(10, 8))
-    im = ax.imshow(perf_matrix, cmap="RdYlGn", vmin=0.85, vmax=1.0, aspect="auto")
+    im = ax.imshow(
+        perf_matrix, cmap="RdYlGn", vmin=0.85, vmax=1.0, aspect="auto"
+    )
 
     ax.set_xticks(range(len(contrast_factors)))
     ax.set_yticks(range(len(brightness_factors)))
@@ -300,12 +322,14 @@ def generate_jpeg_compression_sweep(model, test_dataset, output_dir: str):
                 x_compressed, backbone_name=backbone_name
             ), y
 
-        compressed_ds = test_dataset.map(compress_batch, num_parallel_calls=1).prefetch(
-            tf.data.AUTOTUNE
-        )
+        compressed_ds = test_dataset.map(
+            compress_batch, num_parallel_calls=1
+        ).prefetch(tf.data.AUTOTUNE)
         preds = model.predict(compressed_ds, verbose=0)
         y_pred = np.argmax(preds, axis=1)
-        y_true = np.concatenate([labels.numpy() for _, labels in test_dataset], axis=0)
+        y_true = np.concatenate(
+            [labels.numpy() for _, labels in test_dataset], axis=0
+        )
 
         accuracy = np.mean(y_pred == y_true)
         from sklearn.metrics import f1_score
@@ -398,8 +422,14 @@ def generate_occlusion_sensitivity(model, test_dataset, output_dir: str):
                         mask,
                         tf.stack(
                             tf.meshgrid(
-                                tf.range(x_start, min(x_start + patch_size, IMG_SIZE)),
-                                tf.range(y_start, min(y_start + patch_size, IMG_SIZE)),
+                                tf.range(
+                                    x_start,
+                                    min(x_start + patch_size, IMG_SIZE),
+                                ),
+                                tf.range(
+                                    y_start,
+                                    min(y_start + patch_size, IMG_SIZE),
+                                ),
                                 indexing="ij",
                             ),
                             axis=-1,
@@ -420,12 +450,14 @@ def generate_occlusion_sensitivity(model, test_dataset, output_dir: str):
                 x_occluded, backbone_name=backbone_name
             ), y
 
-        occluded_ds = test_dataset.map(occlude_patch, num_parallel_calls=1).prefetch(
-            tf.data.AUTOTUNE
-        )
+        occluded_ds = test_dataset.map(
+            occlude_patch, num_parallel_calls=1
+        ).prefetch(tf.data.AUTOTUNE)
         preds = model.predict(occluded_ds, verbose=0)
         y_pred = np.argmax(preds, axis=1)
-        y_true = np.concatenate([labels.numpy() for _, labels in test_dataset], axis=0)
+        y_true = np.concatenate(
+            [labels.numpy() for _, labels in test_dataset], axis=0
+        )
 
         accuracy = np.mean(y_pred == y_true)
         accuracies.append(accuracy)
@@ -443,11 +475,15 @@ def generate_occlusion_sensitivity(model, test_dataset, output_dir: str):
         markeredgewidth=2,
     )
 
-    ax.fill_between(occlusion_percentages, accuracies, alpha=0.2, color="#6A4C93")
+    ax.fill_between(
+        occlusion_percentages, accuracies, alpha=0.2, color="#6A4C93"
+    )
 
     ax.set_xlabel("Occlusion Coverage (%)", fontsize=12, fontweight="bold")
     ax.set_ylabel("Accuracy", fontsize=12, fontweight="bold")
-    ax.set_title("Robustness Under Random Occlusion", fontsize=14, fontweight="bold")
+    ax.set_title(
+        "Robustness Under Random Occlusion", fontsize=14, fontweight="bold"
+    )
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.set_ylim([0, 1.05])
 
@@ -460,7 +496,9 @@ def generate_occlusion_sensitivity(model, test_dataset, output_dir: str):
     plt.close()
 
     print("  ✓ Saved: robustness_occlusion_sensitivity.png")
-    print(f"    Baseline: {accuracies[0]:.4f} | 50% occlusion: {accuracies[-1]:.4f}")
+    print(
+        f"    Baseline: {accuracies[0]:.4f} | 50% occlusion: {accuracies[-1]:.4f}"
+    )
 
 
 def generate_combined_stress_test(model, test_dataset, output_dir: str):
@@ -517,7 +555,8 @@ def generate_combined_stress_test(model, test_dataset, output_dir: str):
             0,
             lambda x, y: (
                 preprocess_batch_for_model_tf(
-                    tf.image.adjust_brightness(x, -0.3), backbone_name=backbone_name
+                    tf.image.adjust_brightness(x, -0.3),
+                    backbone_name=backbone_name,
                 ),
                 y,
             ),
@@ -527,7 +566,8 @@ def generate_combined_stress_test(model, test_dataset, output_dir: str):
             0,
             lambda x, y: (
                 preprocess_batch_for_model_tf(
-                    tf.image.adjust_contrast(x, 1.5), backbone_name=backbone_name
+                    tf.image.adjust_contrast(x, 1.5),
+                    backbone_name=backbone_name,
                 ),
                 y,
             ),
@@ -542,7 +582,9 @@ def generate_combined_stress_test(model, test_dataset, output_dir: str):
         ).prefetch(tf.data.AUTOTUNE)
         preds = model.predict(augmented_ds, verbose=0)
         y_pred = np.argmax(preds, axis=1)
-        y_true = np.concatenate([labels.numpy() for _, labels in test_dataset], axis=0)
+        y_true = np.concatenate(
+            [labels.numpy() for _, labels in test_dataset], axis=0
+        )
         accuracy = np.mean(y_pred == y_true)
         accuracies_by_condition.append(accuracy)
 
@@ -600,12 +642,17 @@ def main():
         "--model-path", type=str, default=None, help="Path to keras model"
     )
     parser.add_argument(
-        "--output-dir", type=str, default=PLOTS_DIR, help="Output directory for plots"
+        "--output-dir",
+        type=str,
+        default=PLOTS_DIR,
+        help="Output directory for plots",
     )
     args = parser.parse_args()
 
     # Load model
-    model_path = args.model_path or resolve_keras_model_path([FINAL_MODEL_PATH])
+    model_path = args.model_path or resolve_keras_model_path(
+        [FINAL_MODEL_PATH]
+    )
     print(f"\n[Robustness Suite] Loading model from: {model_path}")
     model = _load_model_robust(model_path)
 

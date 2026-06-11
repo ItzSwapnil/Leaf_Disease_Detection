@@ -26,9 +26,24 @@ def create_comparative_architecture():
 
     eff_layers = [
         ("Input\n224×224×3 RGB", "#87CEEB", 0.7, "Input"),
-        ("MBConv Blocks\n(Efficient Inverted Bottleneck)\n6 blocks, 128 filters", "#90EE90", 1.2, "Backbone\nStart"),
-        ("MBConv Blocks\n9 blocks, 160 filters", "#90EE90", 1.2, "Backbone\nMid"),
-        ("MBConv Blocks\n15 blocks, 256 filters", "#90EE90", 1.2, "Backbone\nEnd"),
+        (
+            "MBConv Blocks\n(Efficient Inverted Bottleneck)\n6 blocks, 128 filters",
+            "#90EE90",
+            1.2,
+            "Backbone\nStart",
+        ),
+        (
+            "MBConv Blocks\n9 blocks, 160 filters",
+            "#90EE90",
+            1.2,
+            "Backbone\nMid",
+        ),
+        (
+            "MBConv Blocks\n15 blocks, 256 filters",
+            "#90EE90",
+            1.2,
+            "Backbone\nEnd",
+        ),
         ("Conv 1×1 Head\n1280 filters", "#FFE4B5", 0.8, "Head"),
         ("GlobalAvgPool\n1280-dim", "#FFD700", 0.6, "Pool"),
         ("BatchNormalization\n1280-dim", "#FFFACD", 0.6, "Norm"),
@@ -50,31 +65,48 @@ def create_comparative_architecture():
 
         # Draw box
         rect = FancyBboxPatch(
-            (1, y - height/2), 8, height,
+            (1, y - height / 2),
+            8,
+            height,
             boxstyle="round,pad=0.1",
             facecolor=color,
             edgecolor="darkblue",
             linewidth=2,
-            alpha=0.85
+            alpha=0.85,
         )
         ax_eff.add_patch(rect)
 
         # Add text
-        ax_eff.text(5, y, desc, ha="center", va="center",
-                   fontsize=9, fontweight="bold", wrap=True)
+        ax_eff.text(
+            5,
+            y,
+            desc,
+            ha="center",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            wrap=True,
+        )
 
         # Draw arrow to next layer
         if i < len(eff_layers) - 1:
             ax_eff.annotate(
                 "",
-                xy=(5, y - height/2 - 0.1),
-                xytext=(5, y - height/2 - 0.4),
-                arrowprops=dict(arrowstyle="->", color="darkblue", lw=2.5)
+                xy=(5, y - height / 2 - 0.1),
+                xytext=(5, y - height / 2 - 0.4),
+                arrowprops=dict(arrowstyle="->", color="darkblue", lw=2.5),
             )
 
     # Add title and info box for EfficientNetV2
-    ax_eff.text(5, 13.8, "EfficientNetV2-B0 (CNN)",
-               ha="center", va="bottom", fontsize=14, fontweight="bold")
+    ax_eff.text(
+        5,
+        13.8,
+        "EfficientNetV2-B0 (CNN)",
+        ha="center",
+        va="bottom",
+        fontsize=14,
+        fontweight="bold",
+    )
 
     info_eff = (
         "Backbone: Efficient Inverted Bottleneck (MBConv)\n"
@@ -86,10 +118,16 @@ def create_comparative_architecture():
         "Pre-training: ImageNet-1k supervised"
     )
 
-    ax_eff.text(5, 0.8, info_eff, ha="center", va="top",
-               fontsize=9, bbox=dict(boxstyle="round,pad=0.8",
-               facecolor="lightblue", alpha=0.7),
-               family="monospace")
+    ax_eff.text(
+        5,
+        0.8,
+        info_eff,
+        ha="center",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.8", facecolor="lightblue", alpha=0.7),
+        family="monospace",
+    )
 
     # ==================== DINOv3 ViT (Right) ====================
     ax_dino.set_xlim(0, 10)
@@ -98,8 +136,18 @@ def create_comparative_architecture():
 
     dino_layers = [
         ("Input\n224×224×3 RGB", "#87CEEB", 0.7, "Input"),
-        ("Patch Embedding\n16×16 patches -> token sequence", "#FFB6C1", 1.0, "Tokenize"),
-        ("Transformer Blocks ×12\n(Multi-Head Attention + FFN)", "#90EE90", 1.4, "Transformer"),
+        (
+            "Patch Embedding\n16×16 patches -> token sequence",
+            "#FFB6C1",
+            1.0,
+            "Tokenize",
+        ),
+        (
+            "Transformer Blocks ×12\n(Multi-Head Attention + FFN)",
+            "#90EE90",
+            1.4,
+            "Transformer",
+        ),
         ("Backbone Output Embedding\nfeature vector", "#FFD700", 0.7, "Pool"),
         ("BatchNormalization", "#FFFACD", 0.6, "Norm"),
         ("Dense(512) + Swish\nDropout(0.4)", "#F08080", 0.8, "Dense 1"),
@@ -120,31 +168,48 @@ def create_comparative_architecture():
 
         # Draw box
         rect = FancyBboxPatch(
-            (1, y - height/2), 8, height,
+            (1, y - height / 2),
+            8,
+            height,
             boxstyle="round,pad=0.1",
             facecolor=color,
             edgecolor="darkgreen",
             linewidth=2,
-            alpha=0.85
+            alpha=0.85,
         )
         ax_dino.add_patch(rect)
 
         # Add text
-        ax_dino.text(5, y, desc, ha="center", va="center",
-                    fontsize=9, fontweight="bold", wrap=True)
+        ax_dino.text(
+            5,
+            y,
+            desc,
+            ha="center",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            wrap=True,
+        )
 
         # Draw arrow to next layer
         if i < len(dino_layers) - 1:
             ax_dino.annotate(
                 "",
-                xy=(5, y - height/2 - 0.1),
-                xytext=(5, y - height/2 - 0.4),
-                arrowprops=dict(arrowstyle="->", color="darkgreen", lw=2.5)
+                xy=(5, y - height / 2 - 0.1),
+                xytext=(5, y - height / 2 - 0.4),
+                arrowprops=dict(arrowstyle="->", color="darkgreen", lw=2.5),
             )
 
     # Add title and info box for DINOv3
-    ax_dino.text(5, 13.8, "DINOv3 Vision Transformer",
-                ha="center", va="bottom", fontsize=14, fontweight="bold")
+    ax_dino.text(
+        5,
+        13.8,
+        "DINOv3 Vision Transformer",
+        ha="center",
+        va="bottom",
+        fontsize=14,
+        fontweight="bold",
+    )
 
     info_dino = (
         "Backbone: Vision Transformer (ViT-Base)\n"
@@ -156,10 +221,16 @@ def create_comparative_architecture():
         "Pre-training: DINO-style self-supervision"
     )
 
-    ax_dino.text(5, 0.8, info_dino, ha="center", va="top",
-                fontsize=9, bbox=dict(boxstyle="round,pad=0.8",
-                facecolor="lightgreen", alpha=0.7),
-                family="monospace")
+    ax_dino.text(
+        5,
+        0.8,
+        info_dino,
+        ha="center",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.8", facecolor="lightgreen", alpha=0.7),
+        family="monospace",
+    )
 
     # ==================== Overall Figure ====================
     fig.suptitle(
@@ -182,7 +253,9 @@ def create_comparative_architecture():
         ha="center",
         va="bottom",
         fontsize=9,
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8),
+        bbox=dict(
+            boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8
+        ),
     )
 
     plt.tight_layout(rect=[0, 0.09, 1, 0.96])
@@ -196,6 +269,6 @@ def create_comparative_architecture():
 
 if __name__ == "__main__":
     create_comparative_architecture()
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("Comparative architecture visualization created successfully")
-    print("="*70)
+    print("=" * 70)

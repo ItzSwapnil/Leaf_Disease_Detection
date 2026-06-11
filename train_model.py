@@ -55,14 +55,13 @@ from config import (
     OVERFITTING_STOP_ENABLED,
     OVERFITTING_STOP_MIN_GAP,
     OVERFITTING_STOP_PATIENCE,
-    RANDAUGMENT_MAGNITUDE,
-    RANDAUGMENT_NUM_LAYERS,
     SAVE_LOG_ARCHIVE,
     SAVE_RUN_MANIFESTS,
     STEPS_PER_EPOCH,
     TRAIN_DATA_FRACTION,
     TRAIN_DIR,
     UNFREEZE_LAYERS,
+    USE_ATTENTION_GUIDANCE,
     USE_MIXUP,
     USE_RANDAUGMENT,
     VAL_DIR,
@@ -74,13 +73,16 @@ from preprocessing import preprocess_batch_for_model_tf
 from training_progress import IntervalMetricsLogger, ProgressEmitter
 from training_utils import (
     BestModelSaver,
+    FamilyDeviationClassifier,
+    GradCamEpochCollageCallback,
     PreOverfitRestorer,
     WarmupCosineSchedule,
-    _build_randaugment_layer,
-    build_optimizer,
+    _build_heavy_augmentation_layer,
     build_loss,
+    build_optimizer,
     cutmix_batch_tf,
     mixup_batch_tf,
+    parse_class_structure,
     resolve_augmentation_probabilities,
     resolve_step_count,
     tensorboard_available,
@@ -189,12 +191,14 @@ def _collect_sampled_training_files(train_dir, class_names, fraction, seed):
 
     for class_index, class_name in enumerate(class_names):
         class_dir = os.path.join(train_dir, class_name)
-        class_files = [entry.path for entry in os.scandir(class_dir) if entry.is_file()]
+        class_files = [
+            entry.path for entry in os.scandir(class_dir) if entry.is_file()
+        ]
         class_files.sort()
 
-        full_counts[int(class_index)] = int(len(class_files))
+        full_counts[class_index] = len(class_files)
         if not class_files:
-            sampled_counts[int(class_index)] = 0
+            sampled_counts[class_index] = 0
             continue
 
         if fraction >= 1.0:
@@ -205,17 +209,24 @@ def _collect_sampled_training_files(train_dir, class_names, fraction, seed):
             rng.shuffle(shuffled)
             selected = shuffled[:keep_count]
 
-        sampled_counts[int(class_index)] = int(len(selected))
+        sampled_counts[class_index] = len(selected)
         filepaths.extend(selected)
-        labels.extend([int(class_index)] * len(selected))
+        labels.extend([class_index] * len(selected))
 
     if not filepaths:
-        raise ValueError("No training files were found after applying the data fraction.")
+        raise ValueError(
+            "No training files were found after applying the data fraction."
+        )
 
     combined = list(zip(filepaths, labels))
     rng.shuffle(combined)
     sampled_paths, sampled_labels = zip(*combined)
-    return list(sampled_paths), list(sampled_labels), full_counts, sampled_counts
+    return (
+        list(sampled_paths),
+        list(sampled_labels),
+        full_counts,
+        sampled_counts,
+    )
 
 
 def _collect_validation_files(val_dir, val_to_train_map, class_indices):
@@ -227,7 +238,9 @@ def _collect_validation_files(val_dir, val_to_train_map, class_indices):
         train_class_name = val_to_train_map[val_class_name]
         train_class_index = class_indices[train_class_name]
         class_dir = os.path.join(val_dir, val_class_name)
-        class_files = [entry.path for entry in os.scandir(class_dir) if entry.is_file()]
+        class_files = [
+            entry.path for entry in os.scandir(class_dir) if entry.is_file()
+        ]
         class_files.sort()
 
         counts_by_val_class[val_class_name] = len(class_files)
@@ -235,7 +248,9 @@ def _collect_validation_files(val_dir, val_to_train_map, class_indices):
         labels.extend([train_class_index] * len(class_files))
 
     if not filepaths:
-        raise ValueError("No validation files were found in the validation directory.")
+        raise ValueError(
+            "No validation files were found in the validation directory."
+        )
 
     return filepaths, labels, counts_by_val_class
 
@@ -251,24 +266,24 @@ def _build_labeled_image_dataset(filepaths, labels, batch_size, shuffle, seed):
 
     def _decode(path, label):
         image_bytes = tf.io.read_file(path)
-        image_tensor = tf.io.decode_image(
-            image_bytes,
-            channels=3,
-            expand_animations=False,
-        )
+        image_tensor = tf.io.decode_jpeg(image_bytes, channels=3)
         image_tensor = tf.image.resize(image_tensor, (IMG_SIZE, IMG_SIZE))
         image_tensor = tf.cast(image_tensor, tf.float32)
         one_hot = tf.one_hot(tf.cast(label, tf.int32), depth=NUM_CLASSES)
         one_hot = tf.cast(one_hot, tf.float32)
         return image_tensor, one_hot
 
-    ds = ds.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
+    # Sequential file reading is REQUIRED here when running on WSL2 /mnt/c/
+    # Concurrent reads over the Windows/Linux 9P file system bridge causes severe IO thrashing
+    ds = ds.map(_decode, num_parallel_calls=1)
     ds = ds.batch(batch_size, drop_remainder=False)
     return ds
 
 
 def _compute_equalizer_weights_from_counts(counts_by_class):
-    counts = [int(counts_by_class[idx]) for idx in sorted(counts_by_class.keys())]
+    counts = [
+        int(counts_by_class[idx]) for idx in sorted(counts_by_class.keys())
+    ]
     if not counts or any(count <= 0 for count in counts):
         return None
 
@@ -276,15 +291,16 @@ def _compute_equalizer_weights_from_counts(counts_by_class):
     if mean_count <= 0.0:
         return None
 
-    weights = {}
-    for idx, count in enumerate(counts):
-        weights[int(idx)] = mean_count / float(count)
+    weights = {
+        idx: mean_count / float(count) for idx, count in enumerate(counts)
+    }
 
     avg_weight = float(sum(weights.values())) / float(len(weights))
     if avg_weight <= 0.0:
         return None
 
     return {idx: float(weight / avg_weight) for idx, weight in weights.items()}
+
 
 # Main training entrypoint
 
@@ -337,7 +353,9 @@ def main():
     optimizer_name = _normalize_optimizer_name(
         args.optimizer or os.getenv("LEAF_TRAIN_OPTIMIZER") or OPTIMIZER
     )
-    save_mode = _normalize_save_mode(args.save_mode or os.getenv("LEAF_SAVE_MODE"))
+    save_mode = _normalize_save_mode(
+        args.save_mode or os.getenv("LEAF_SAVE_MODE")
+    )
     class_equalizer_enabled = _parse_class_equalizer(args.class_equalizer)
 
     env_batch_size = os.getenv("LEAF_BATCH_SIZE")
@@ -349,7 +367,7 @@ def main():
         except Exception:
             batch_size = int(BATCH_SIZE)
     elif backbone_name == "DINOv3" and batch_size > 8:
-        target_batch = 32 if gpu_count > 1 else 16
+        target_batch = 16 if gpu_count > 1 else 8
         if batch_size > target_batch:
             batch_size = target_batch
             print(
@@ -396,12 +414,19 @@ def main():
     else:
         keras.mixed_precision.set_global_policy("float32")
 
-    os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
-    logs_dir = os.path.join(os.path.dirname(CHECKPOINT_PATH), "logs")
+    models_dir = os.path.dirname(CHECKPOINT_PATH)
+    if os.path.exists(models_dir):
+        print(f"Purging model directory for clean training: {models_dir}")
+        import shutil
+
+        shutil.rmtree(models_dir, ignore_errors=True)
+    os.makedirs(models_dir, exist_ok=True)
+    logs_dir = os.path.join(models_dir, "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
     # ── data loading ──────────────────────────────────────────────────────
     autotune = tf.data.AUTOTUNE
+    dataset_parallelism = autotune
 
     print(f"\nLoading training data from: {TRAIN_DIR}")
     print(f"Image size: {IMG_SIZE}x{IMG_SIZE}  |  Batch size: {batch_size}")
@@ -410,7 +435,9 @@ def main():
         entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
     )
     if not train_class_names:
-        raise ValueError(f"No class folders found under training directory: {TRAIN_DIR}")
+        raise ValueError(
+            f"No class folders found under training directory: {TRAIN_DIR}"
+        )
 
     class_indices = {name: idx for idx, name in enumerate(train_class_names)}
 
@@ -430,9 +457,13 @@ def main():
         seed=seed,
     )
 
-    val_class_names = sorted(entry.name for entry in os.scandir(VAL_DIR) if entry.is_dir())
+    val_class_names = sorted(
+        entry.name for entry in os.scandir(VAL_DIR) if entry.is_dir()
+    )
     if not val_class_names:
-        raise ValueError(f"No class folders found under validation directory: {VAL_DIR}")
+        raise ValueError(
+            f"No class folders found under validation directory: {VAL_DIR}"
+        )
 
     val_to_train_map = _resolve_validation_class_aliases(
         val_class_names=val_class_names,
@@ -490,17 +521,19 @@ def main():
 
     if USE_RANDAUGMENT:
         print(
-            "Augmentation: "
-            "RandomFlip+RandomRotation+RandomTranslation+RandomZoom+RandomContrast"
+            "Augmentation: Heavy pipeline "
+            "(RandomResizedCrop+Flip+Rotation+ColorJitter+GaussianBlur+"
+            "GaussianNoise+RandomErasing)"
         )
-        randaugment_layer = _build_randaugment_layer(
-            num_layers=int(RANDAUGMENT_NUM_LAYERS),
-            magnitude=float(RANDAUGMENT_MAGNITUDE),
+        heavy_augment_fn = _build_heavy_augmentation_layer(
             value_range=(0.0, 255.0),
         )
         train_ds = train_ds.map(
-            lambda images, labels: (randaugment_layer(images, training=True), labels),
-            num_parallel_calls=autotune,
+            lambda images, labels: (
+                heavy_augment_fn(images, training=True),
+                labels,
+            ),
+            num_parallel_calls=dataset_parallelism,
         )
 
     train_ds = train_ds.map(
@@ -508,17 +541,21 @@ def main():
             preprocess_batch_for_model_tf(images, backbone_name=backbone_name),
             labels,
         ),
-        num_parallel_calls=autotune,
+        num_parallel_calls=dataset_parallelism,
     )
     val_ds = val_ds.map(
         lambda images, labels: (
             preprocess_batch_for_model_tf(images, backbone_name=backbone_name),
             labels,
         ),
-        num_parallel_calls=autotune,
+        num_parallel_calls=dataset_parallelism,
     )
 
+    train_ds = train_ds.prefetch(autotune)
     val_ds = val_ds.prefetch(autotune)
+
+    # Parse healthy baseline mapping for Family-Based Disease Learning
+    healthy_partners = parse_class_structure(train_class_names)
 
     # ── model construction ────────────────────────────────────────────────
     strategy = get_training_strategy()
@@ -533,7 +570,9 @@ def main():
 
         x = base_model.output
         output_shape = getattr(base_model, "output_shape", None)
-        output_rank = len(output_shape) if isinstance(output_shape, tuple) else None
+        output_rank = (
+            len(output_shape) if isinstance(output_shape, tuple) else None
+        )
         if output_rank == 4:
             x = GlobalAveragePooling2D()(x)
         elif output_rank == 3:
@@ -549,16 +588,27 @@ def main():
         x = Dropout(DROPOUT_RATE)(x)
         x = Dense(DENSE_UNITS // 2, activation="swish")(x)
         x = Dropout(DROPOUT_RATE * 0.5)(x)
-        outputs = Dense(NUM_CLASSES, activation="softmax", dtype="float32")(x)
+        logits = FamilyDeviationClassifier(
+            num_classes=NUM_CLASSES,
+            healthy_partners=healthy_partners,
+            name="family_deviation_classifier",
+        )(x)
+        outputs = keras.layers.Activation(
+            "softmax", dtype="float32", name="softmax_output"
+        )(logits)
         model = Model(inputs=base_model.input, outputs=outputs)
 
     print(f"\nBackbone: {backbone_name}")
     print(f"Total parameters: {model.count_params():,}")
     trainable_params = sum(p.numpy().size for p in model.trainable_weights)
     print(f"Trainable parameters (phase 1): {trainable_params:,}")
-    full_steps_per_epoch = resolve_step_count(STEPS_PER_EPOCH, train_samples, batch_size)
+    full_steps_per_epoch = resolve_step_count(
+        STEPS_PER_EPOCH, train_samples, batch_size
+    )
     steps_per_epoch = full_steps_per_epoch
-    validation_steps = resolve_step_count(VALIDATION_STEPS, val_samples, batch_size)
+    validation_steps = resolve_step_count(
+        VALIDATION_STEPS, val_samples, batch_size
+    )
 
     phase1_epochs = max(0, int(EPOCHS_PHASE1))
     phase2_epochs = max(0, int(EPOCHS_PHASE2))
@@ -573,9 +623,15 @@ def main():
     if class_equalizer_enabled:
         class_weight = _compute_equalizer_weights_from_counts(sampled_counts)
         if class_weight:
-            print("Class equalizer enabled (strict inverse-frequency weighting).")
-            class_names_by_idx = {idx: name for name, idx in class_indices.items()}
-            top = sorted(class_weight.items(), key=lambda item: item[1], reverse=True)[:6]
+            print(
+                "Class equalizer enabled (strict inverse-frequency weighting)."
+            )
+            class_names_by_idx = {
+                idx: name for name, idx in class_indices.items()
+            }
+            top = sorted(
+                class_weight.items(), key=lambda item: item[1], reverse=True
+            )[:6]
             print(
                 "Highest class weights: "
                 + ", ".join(
@@ -584,11 +640,15 @@ def main():
                 )
             )
         else:
-            print("Class equalizer requested, but weights could not be computed.")
+            print(
+                "Class equalizer requested, but weights could not be computed."
+            )
     else:
         print("Class equalizer disabled; no class weighting will be used.")
 
-    selected_loss, fit_class_weight = build_loss(class_weight)
+    selected_loss, fit_class_weight = build_loss(
+        class_weight, class_names=train_class_names
+    )
 
     # ── mixup / cutmix ───────────────────────────────────────────────────
     if USE_MIXUP or USE_CUTMIX:
@@ -598,12 +658,14 @@ def main():
         if USE_CUTMIX:
             augmentation_desc.append(f"CutMix(alpha={CUTMIX_ALPHA})")
         print(f"Augmentation: {' + '.join(augmentation_desc)}")
-        mixup_prob, cutmix_prob, normal_prob = resolve_augmentation_probabilities(
-            use_mixup=USE_MIXUP,
-            use_cutmix=USE_CUTMIX,
-            mixup_prob=float(MIXUP_PROB),
-            cutmix_prob=float(CUTMIX_PROB),
-            normal_prob=float(NORMAL_PROB),
+        mixup_prob, cutmix_prob, normal_prob = (
+            resolve_augmentation_probabilities(
+                use_mixup=USE_MIXUP,
+                use_cutmix=USE_CUTMIX,
+                mixup_prob=float(MIXUP_PROB),
+                cutmix_prob=float(CUTMIX_PROB),
+                normal_prob=float(NORMAL_PROB),
+            )
         )
         print(
             "Batch routing probabilities: "
@@ -620,7 +682,9 @@ def main():
             if USE_MIXUP and USE_CUTMIX:
                 return tf.cond(
                     route_sample < mixup_prob,
-                    lambda: mixup_batch_tf(images, labels, alpha=float(MIXUP_ALPHA)),
+                    lambda: mixup_batch_tf(
+                        images, labels, alpha=float(MIXUP_ALPHA)
+                    ),
                     lambda: tf.cond(
                         route_sample < (mixup_prob + cutmix_prob),
                         lambda: cutmix_batch_tf(
@@ -632,16 +696,22 @@ def main():
             if USE_MIXUP:
                 return tf.cond(
                     route_sample < mixup_prob,
-                    lambda: mixup_batch_tf(images, labels, alpha=float(MIXUP_ALPHA)),
+                    lambda: mixup_batch_tf(
+                        images, labels, alpha=float(MIXUP_ALPHA)
+                    ),
                     lambda: (images, labels),
                 )
             return tf.cond(
                 route_sample < cutmix_prob,
-                lambda: cutmix_batch_tf(images, labels, alpha=float(CUTMIX_ALPHA)),
+                lambda: cutmix_batch_tf(
+                    images, labels, alpha=float(CUTMIX_ALPHA)
+                ),
                 lambda: (images, labels),
             )
 
-        train_ds = train_ds.map(_apply_batch_augmentation, num_parallel_calls=autotune)
+        train_ds = train_ds.map(
+            _apply_batch_augmentation, num_parallel_calls=dataset_parallelism
+        )
 
     train_ds = train_ds.prefetch(autotune)
 
@@ -651,15 +721,15 @@ def main():
     # ── callbacks ─────────────────────────────────────────────────────────
     checkpoint = BestModelSaver(
         CHECKPOINT_PATH,
-        monitor="val_accuracy",
-        mode="max",
+        monitor="val_loss",
+        mode="min",
         verbose=1,
         save_mode=save_mode,
     )
     early_stopping = EarlyStopping(
-        monitor="val_accuracy",
+        monitor="val_loss",
         patience=EARLY_STOPPING_PATIENCE,
-        mode="max",
+        mode="min",
         restore_best_weights=True,
         verbose=1,
     )
@@ -676,7 +746,9 @@ def main():
     train_history_archive_path = os.path.join(
         logs_dir, f"train_history_{run_stamp}.csv"
     )
-    train_interval_latest_path = os.path.join(logs_dir, "train_interval_history.csv")
+    train_interval_latest_path = os.path.join(
+        logs_dir, "train_interval_history.csv"
+    )
     train_interval_archive_path = os.path.join(
         logs_dir, f"train_interval_history_{run_stamp}.csv"
     )
@@ -684,10 +756,14 @@ def main():
 
     csv_loggers_phase1 = [CSVLogger(train_history_latest_path, append=False)]
     if SAVE_LOG_ARCHIVE:
-        csv_loggers_phase1.append(CSVLogger(train_history_archive_path, append=False))
+        csv_loggers_phase1.append(
+            CSVLogger(train_history_archive_path, append=False)
+        )
     csv_loggers_phase2 = [CSVLogger(train_history_latest_path, append=True)]
     if SAVE_LOG_ARCHIVE:
-        csv_loggers_phase2.append(CSVLogger(train_history_archive_path, append=True))
+        csv_loggers_phase2.append(
+            CSVLogger(train_history_archive_path, append=True)
+        )
 
     interval_loggers_phase1 = [
         IntervalMetricsLogger(
@@ -749,10 +825,18 @@ def main():
     print(f"Phase 1 (head-only): {phase1_epochs} epochs")
     print(f"Phase 2 (full fine-tune): {phase2_epochs} epochs")
     print(f"Total epochs: {total_epochs}  |  Steps/epoch: {steps_per_epoch}")
-    print(f"Optimiser: {optimizer_name}  |  Label smoothing: {LABEL_SMOOTHING}")
+    print(
+        f"Optimiser: {optimizer_name}  |  Label smoothing: {LABEL_SMOOTHING}"
+    )
     print(f"{'=' * 70}\n")
 
     run_start_time = time.time()
+
+    collage_callback = GradCamEpochCollageCallback(
+        val_dir=VAL_DIR,
+        class_names=train_class_names,
+        backbone_name=backbone_name,
+    )
 
     # ── phase 1: train classification head only ───────────────────────────
     if phase1_epochs > 0:
@@ -767,8 +851,27 @@ def main():
             total_steps=phase1_total_steps,
         )
 
+        training_model = model
+        if USE_ATTENTION_GUIDANCE:
+            from saliency_alignment import SaliencyAlignedModel
+
+            disease_class_indices = [
+                idx
+                for idx, name in enumerate(train_class_names)
+                if "healthy" not in name.lower()
+                and "background" not in name.lower()
+            ]
+
+            with strategy.scope():
+                training_model = SaliencyAlignedModel(
+                    model,
+                    backbone_name=backbone_name,
+                    disease_class_indices=disease_class_indices,
+                    enable_penalties=False,  # Phase 1: backbone frozen
+                )
+
         with strategy.scope():
-            model.compile(
+            training_model.compile(
                 optimizer=build_optimizer(
                     phase1_lr, optimizer_name=optimizer_name
                 ),
@@ -790,6 +893,7 @@ def main():
             *csv_loggers_phase1,
             *interval_loggers_phase1,
             progress_phase1,
+            collage_callback,
         ]
         if OVERFITTING_STOP_ENABLED:
             phase1_callbacks.append(
@@ -804,7 +908,7 @@ def main():
         if tensorboard is not None:
             phase1_callbacks.append(tensorboard)
 
-        phase1_history = model.fit(
+        phase1_history = training_model.fit(
             train_source,
             steps_per_epoch=steps_per_epoch,
             validation_data=val_source,
@@ -835,7 +939,9 @@ def main():
                 layer.trainable = False
                 bn_frozen += 1
         if bn_frozen > 0:
-            print(f"Froze {bn_frozen} BatchNormalization layers for stability.")
+            print(
+                f"Froze {bn_frozen} BatchNormalization layers for stability."
+            )
 
         phase2_total_steps = max(1, steps_per_epoch * phase2_epochs)
         phase2_warmup_steps = max(
@@ -848,8 +954,27 @@ def main():
             total_steps=phase2_total_steps,
         )
 
+        training_model = model
+        if USE_ATTENTION_GUIDANCE:
+            from saliency_alignment import SaliencyAlignedModel
+
+            disease_class_indices = [
+                idx
+                for idx, name in enumerate(train_class_names)
+                if "healthy" not in name.lower()
+                and "background" not in name.lower()
+            ]
+
+            with strategy.scope():
+                training_model = SaliencyAlignedModel(
+                    model,
+                    backbone_name=backbone_name,
+                    disease_class_indices=disease_class_indices,
+                    enable_penalties=True,  # Phase 2: backbone unfrozen
+                )
+
         with strategy.scope():
-            model.compile(
+            training_model.compile(
                 optimizer=build_optimizer(
                     phase2_lr, optimizer_name=optimizer_name
                 ),
@@ -857,7 +982,9 @@ def main():
                 metrics=["accuracy"],
             )
 
-        total_epochs_phase2_view = max(1, completed_phase1_epochs + phase2_epochs)
+        total_epochs_phase2_view = max(
+            1, completed_phase1_epochs + phase2_epochs
+        )
         progress_phase2 = ProgressEmitter(
             stage="phase2_finetune",
             total_epochs=total_epochs_phase2_view,
@@ -872,6 +999,7 @@ def main():
             *csv_loggers_phase2,
             *interval_loggers_phase2,
             progress_phase2,
+            collage_callback,
         ]
         if OVERFITTING_STOP_ENABLED:
             phase2_callbacks.append(
@@ -886,7 +1014,7 @@ def main():
         if tensorboard is not None:
             phase2_callbacks.append(tensorboard)
 
-        model.fit(
+        training_model.fit(
             train_source,
             steps_per_epoch=steps_per_epoch,
             validation_data=val_source,

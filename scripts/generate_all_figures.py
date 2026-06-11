@@ -95,7 +95,12 @@ def main():
             "generate_figures.py",
             "Core Validation & Results Figures (DINOv3)",
             5400,
-            ["--model-path", str(ROOT / "models" / "leaf_disease_refined.keras"), "--output-dir", str(DINO_PLOTS_DIR)],
+            [
+                "--model-path",
+                str(ROOT / "models" / "leaf_disease_refined.keras"),
+                "--output-dir",
+                str(DINO_PLOTS_DIR),
+            ],
         ),
         (
             "generate_robustness_figures.py",
@@ -133,7 +138,9 @@ def main():
         effnet_b0_dir / "leaf_disease_classifier.keras",
         effnet_b0_dir / "leaf_disease_checkpoint.keras",
     ]
-    effnet_b0_model = next((path for path in effnet_b0_candidates if path.exists()), None)
+    effnet_b0_model = next(
+        (path for path in effnet_b0_candidates if path.exists()), None
+    )
 
     if effnet_b0_dir.exists() and effnet_b0_model is not None:
         scripts_to_run.extend(
@@ -142,7 +149,12 @@ def main():
                     "generate_figures.py",
                     "Core Validation & Results Figures (EfficientNetV2-B0)",
                     5400,
-                    ["--model-path", str(effnet_b0_model), "--output-dir", str(EFFICIENTNET_B0_PLOTS_DIR)],
+                    [
+                        "--model-path",
+                        str(effnet_b0_model),
+                        "--output-dir",
+                        str(EFFICIENTNET_B0_PLOTS_DIR),
+                    ],
                 ),
                 (
                     "generate_robustness_figures.py",
@@ -185,7 +197,9 @@ def main():
         effnet_s_dir / "leaf_disease_classifier.keras",
         effnet_s_dir / "leaf_disease_checkpoint.keras",
     ]
-    effnet_s_model = next((path for path in effnet_s_candidates if path.exists()), None)
+    effnet_s_model = next(
+        (path for path in effnet_s_candidates if path.exists()), None
+    )
 
     if effnet_s_dir.exists() and effnet_s_model is not None:
         scripts_to_run.extend(
@@ -194,7 +208,12 @@ def main():
                     "generate_figures.py",
                     "Core Validation & Results Figures (EfficientNetV2-S)",
                     5400,
-                    ["--model-path", str(effnet_s_model), "--output-dir", str(EFFICIENTNET_S_PLOTS_DIR)],
+                    [
+                        "--model-path",
+                        str(effnet_s_model),
+                        "--output-dir",
+                        str(EFFICIENTNET_S_PLOTS_DIR),
+                    ],
                 ),
                 (
                     "generate_robustness_figures.py",
@@ -244,14 +263,21 @@ def main():
 
     for script_name, description, timeout_seconds, args in scripts_to_run:
         results[description] = run_script(
-            script_name, description, timeout_seconds=timeout_seconds, args=args
+            script_name,
+            description,
+            timeout_seconds=timeout_seconds,
+            args=args,
         )
 
     moved_files = relocate_misplaced_shared_plots()
     if moved_files:
-        print(f"\nMoved {len(moved_files)} misplaced model-specific shared plot(s):")
+        print(
+            f"\nMoved {len(moved_files)} misplaced model-specific shared plot(s):"
+        )
         for source, destination in moved_files:
-            print(f"  - {source.name}: {source.parent.name} -> {destination.parent.name}")
+            print(
+                f"  - {source.name}: {source.parent.name} -> {destination.parent.name}"
+            )
 
     elapsed_time = time.time() - start_time
 
@@ -276,7 +302,9 @@ def main():
         print("\n✓✓✓ ALL FIGURE GENERATION COMPLETE ✓✓✓")
         return 0
     else:
-        print(f"\n⚠ {total - successful} suite(s) failed. Review errors above.")
+        print(
+            f"\n⚠ {total - successful} suite(s) failed. Review errors above."
+        )
         return 1
 
 

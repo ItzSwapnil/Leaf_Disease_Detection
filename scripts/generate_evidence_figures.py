@@ -54,7 +54,9 @@ def validate_artifacts(eval_report: dict) -> list[str]:
             ("macro_f1", macro_f1),
         ]:
             if not _clamp01(value):
-                issues.append(f"Core metric out of range [0,1]: {name}={value}")
+                issues.append(
+                    f"Core metric out of range [0,1]: {name}={value}"
+                )
 
     robust = eval_report.get("robustness", {}) or {}
     robust_base = (robust.get("base") or {}).get("accuracy")
@@ -178,7 +180,9 @@ def plot_run_timeline(latest_runs: dict, out_dir: Path) -> None:
     x0 = items[0][1]
     xs = [(dt - x0).total_seconds() / 3600.0 for _, dt in items]
     ys = list(range(len(items)))
-    labels = [f"{stage} ({dt.strftime('%Y-%m-%d %H:%M')})" for stage, dt in items]
+    labels = [
+        f"{stage} ({dt.strftime('%Y-%m-%d %H:%M')})" for stage, dt in items
+    ]
 
     plt.figure(figsize=(9.0, 3.8))
     plt.scatter(xs, ys, s=120)
@@ -191,7 +195,9 @@ def plot_run_timeline(latest_runs: dict, out_dir: Path) -> None:
 
 def write_provenance_report(out_dir: Path, payload: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    with (out_dir / "evidence_plot_report.json").open("w", encoding="utf-8") as f:
+    with (out_dir / "evidence_plot_report.json").open(
+        "w", encoding="utf-8"
+    ) as f:
         json.dump(payload, f, indent=2)
 
 
@@ -247,7 +253,8 @@ def main() -> None:
     report["issues"] = issues
     if args.strict and issues:
         raise ValueError(
-            "Artifact consistency checks failed in strict mode: " + " | ".join(issues)
+            "Artifact consistency checks failed in strict mode: "
+            + " | ".join(issues)
         )
 
     plot_calibration(eval_report, out_dir)
@@ -259,7 +266,9 @@ def main() -> None:
     plot_selective_risk(eval_report, out_dir)
     _append_status(report, "selective_risk_coverage_points.png", "generated")
 
-    robustness_issue = any("robustness base accuracy" in text for text in issues)
+    robustness_issue = any(
+        "robustness base accuracy" in text for text in issues
+    )
     if robustness_issue and not args.allow_unsafe_robustness_plot:
         _append_status(
             report,
@@ -276,7 +285,10 @@ def main() -> None:
         _append_status(report, "run_lineage_timeline.png", "generated")
     else:
         _append_status(
-            report, "run_lineage_timeline.png", "skipped", "disabled by default"
+            report,
+            "run_lineage_timeline.png",
+            "skipped",
+            "disabled by default",
         )
 
     write_provenance_report(out_dir, report)

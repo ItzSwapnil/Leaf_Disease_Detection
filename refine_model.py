@@ -13,16 +13,25 @@ import tensorflow as tf
 import tensorflow.keras as keras
 from tensorflow.keras.callbacks import CSVLogger, TensorBoard
 
+from backbones import resolve_backbone_name
 from config import (
+    CLASSIFIER_PATH,
+    CUTMIX_ALPHA,
+    CUTMIX_PROB,
     FINAL_MODEL_PATH,
     IMG_SIZE,
     INTER_OP_THREADS,
     INTRA_OP_THREADS,
     MIXUP_ALPHA,
+    MIXUP_PROB,
+    NORMAL_PROB,
     SAVE_LOG_ARCHIVE,
     SAVE_RUN_MANIFESTS,
     TRAIN_DIR,
+    USE_ATTENTION_GUIDANCE,
+    USE_CUTMIX,
     USE_MIXUP,
+    USE_RANDAUGMENT,
     VAL_DIR,
 )
 from fine_tune_model import (
@@ -34,13 +43,17 @@ from hardware import configure_tensorflow, get_training_strategy
 from preprocessing import preprocess_batch_for_model_tf
 from training_progress import IntervalMetricsLogger, ProgressEmitter
 from training_utils import (
+    GradCamEpochCollageCallback,
     RollingPreOverfitRestorer,
     WarmupCosineSchedule,
+    _build_heavy_augmentation_layer,
     build_adamw_optimizer,
     build_loss,
     compute_class_weights_from_directory,
     count_class_samples_from_directory,
+    cutmix_batch_tf,
     mixup_batch_tf,
+    resolve_augmentation_probabilities,
     resolve_step_count,
     tensorboard_available,
 )
@@ -82,13 +95,38 @@ def _resolve_output_path(default_path: str) -> str:
     return str(output_path)
 
 
+def _resolve_source_model_path(requested_path: str) -> str:
+    requested = Path(str(requested_path))
+    models_dir = Path(FINAL_MODEL_PATH).parent
+    candidates = [
+        requested,
+        models_dir / "leaf_disease_classifier.keras",
+        models_dir / "leaf_disease_checkpoint.keras",
+        models_dir / "leaf_disease_checkpoint_no_optimizer.keras",
+        models_dir / "leaf_disease_refined.keras",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            if candidate != requested:
+                print(
+                    "Requested source model was not found; "
+                    f"falling back to existing model: {candidate}"
+                )
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "No refinement source model found. Checked: "
+        + ", ".join(str(path) for path in candidates)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Refine the saved classifier into a new model with rolling pre-overfit restoration."
     )
     parser.add_argument(
         "--model-path",
-        default=_parse_path_env("LEAF_REFINE_MODEL_PATH", FINAL_MODEL_PATH),
+        default=_parse_path_env("LEAF_REFINE_MODEL_PATH", CLASSIFIER_PATH),
         help="Source model to refine (defaults to models/leaf_disease_classifier.keras).",
     )
     parser.add_argument(
@@ -162,6 +200,7 @@ def main():
         help="How many recent safe checkpoints to keep in the rolling restore window.",
     )
     args = parser.parse_args()
+    resolved_model_path = _resolve_source_model_path(args.model_path)
 
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     seed_env = os.environ.get("RUN_SEED")
@@ -191,19 +230,12 @@ def main():
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     print("Refinement Pipeline")
-    print(f"Source model: {args.model_path}")
+    print(f"Source model: {resolved_model_path}")
     print(f"Output model: {args.output_path}")
 
     strategy = get_training_strategy()
     with strategy.scope():
-        model = _load_model_robust(args.model_path)
-
-    detected_backbone = _infer_backbone_from_model(model)
-    if detected_backbone == "Unknown":
-        raise ValueError(
-            "Unable to infer backbone from the loaded model. "
-            "Refinement aborted to avoid using incorrect preprocessing."
-        )
+        model = _load_model_robust(resolved_model_path)
 
     latest_runs_path_obj = logs_dir / "latest_runs.json"
     recorded_backbone = None
@@ -211,9 +243,29 @@ def main():
         try:
             with open(latest_runs_path_obj, "r", encoding="utf-8") as in_file:
                 latest_runs_data = json.load(in_file)
-            recorded_backbone = (latest_runs_data.get("train") or {}).get("base_model")
+            recorded_backbone = (latest_runs_data.get("train") or {}).get(
+                "base_model"
+            )
         except Exception:
             recorded_backbone = None
+
+    if recorded_backbone:
+        try:
+            recorded_backbone = resolve_backbone_name(
+                recorded_backbone, default=recorded_backbone
+            )
+        except ValueError:
+            recorded_backbone = None
+
+    detected_backbone = _infer_backbone_from_model(model)
+    if detected_backbone == "Unknown" and recorded_backbone:
+        detected_backbone = recorded_backbone
+
+    if detected_backbone == "Unknown":
+        raise ValueError(
+            "Unable to infer backbone from the loaded model or prior run metadata. "
+            "Refinement aborted to avoid using incorrect preprocessing."
+        )
 
     print(f"Refine backbone: {detected_backbone}")
     if recorded_backbone:
@@ -268,7 +320,9 @@ def main():
     )
 
     train_class_names = (
-        list(train_ds.class_names) if getattr(train_ds, "class_names", None) else []
+        list(train_ds.class_names)
+        if getattr(train_ds, "class_names", None)
+        else []
     )
     if not train_class_names:
         train_class_names = sorted(
@@ -278,7 +332,9 @@ def main():
     _, train_samples = count_class_samples_from_directory(
         str(TRAIN_DIR), train_class_names
     )
-    _, val_samples = count_class_samples_from_directory(str(VAL_DIR), train_class_names)
+    _, val_samples = count_class_samples_from_directory(
+        str(VAL_DIR), train_class_names
+    )
 
     print(f"Training samples: {train_samples}")
     print(f"Validation samples: {val_samples}")
@@ -287,16 +343,38 @@ def main():
     train_options.experimental_deterministic = False
     train_ds = train_ds.with_options(train_options)
 
+    # Apply heavy augmentation before preprocessing
+    if USE_RANDAUGMENT:
+        print(
+            "Refine augmentation: Heavy pipeline "
+            "(RandomResizedCrop+Flip+Rotation+ColorJitter+GaussianBlur+"
+            "GaussianNoise+RandomErasing)"
+        )
+        heavy_augment_fn = _build_heavy_augmentation_layer(
+            value_range=(0.0, 255.0),
+        )
+        train_ds = train_ds.map(
+            lambda images, labels: (
+                heavy_augment_fn(images, training=True),
+                labels,
+            ),
+            num_parallel_calls=autotune,
+        )
+
     train_ds = train_ds.map(
         lambda images, labels: (
-            preprocess_batch_for_model_tf(images, backbone_name=detected_backbone),
+            preprocess_batch_for_model_tf(
+                images, backbone_name=detected_backbone
+            ),
             labels,
         ),
         num_parallel_calls=autotune,
     )
     val_ds = val_ds.map(
         lambda images, labels: (
-            preprocess_batch_for_model_tf(images, backbone_name=detected_backbone),
+            preprocess_batch_for_model_tf(
+                images, backbone_name=detected_backbone
+            ),
             labels,
         ),
         num_parallel_calls=autotune,
@@ -309,19 +387,79 @@ def main():
     if class_weight:
         print("Class-balanced weighting enabled for refinement.")
 
-    selected_loss, fit_class_weight = build_loss(class_weight)
-    if USE_MIXUP and fit_class_weight:
-        print("MixUp active: disabling class_weight to avoid label-mix conflicts.")
-        fit_class_weight = None
-    if USE_MIXUP:
-        print(f"MixUp augmentation enabled (alpha={MIXUP_ALPHA}).")
+    selected_loss, fit_class_weight = build_loss(
+        class_weight, class_names=train_class_names
+    )
+
+    # ── MixUp / CutMix augmentation (applied after preprocessing) ────────
+    if USE_MIXUP or USE_CUTMIX:
+        augmentation_desc = []
+        if USE_MIXUP:
+            augmentation_desc.append(f"MixUp(alpha={MIXUP_ALPHA})")
+        if USE_CUTMIX:
+            augmentation_desc.append(f"CutMix(alpha={CUTMIX_ALPHA})")
+        print(f"Augmentation: {' + '.join(augmentation_desc)}")
+        mixup_prob, cutmix_prob, normal_prob = (
+            resolve_augmentation_probabilities(
+                use_mixup=USE_MIXUP,
+                use_cutmix=USE_CUTMIX,
+                mixup_prob=float(MIXUP_PROB),
+                cutmix_prob=float(CUTMIX_PROB),
+                normal_prob=float(NORMAL_PROB),
+            )
+        )
+        if fit_class_weight:
+            print(
+                "MixUp/CutMix active: disabling class_weight to avoid label-mix conflicts."
+            )
+            fit_class_weight = None
+
+        def _apply_batch_augmentation(images, labels):
+            route_sample = tf.random.uniform([])
+            if USE_MIXUP and USE_CUTMIX:
+                return tf.cond(
+                    route_sample < mixup_prob,
+                    lambda: mixup_batch_tf(
+                        images, labels, alpha=float(MIXUP_ALPHA)
+                    ),
+                    lambda: tf.cond(
+                        route_sample < (mixup_prob + cutmix_prob),
+                        lambda: cutmix_batch_tf(
+                            images, labels, alpha=float(CUTMIX_ALPHA)
+                        ),
+                        lambda: (images, labels),
+                    ),
+                )
+            if USE_MIXUP:
+                return tf.cond(
+                    route_sample < mixup_prob,
+                    lambda: mixup_batch_tf(
+                        images, labels, alpha=float(MIXUP_ALPHA)
+                    ),
+                    lambda: (images, labels),
+                )
+            return tf.cond(
+                route_sample < cutmix_prob,
+                lambda: cutmix_batch_tf(
+                    images, labels, alpha=float(CUTMIX_ALPHA)
+                ),
+                lambda: (images, labels),
+            )
+
+        train_ds = train_ds.map(
+            _apply_batch_augmentation, num_parallel_calls=autotune
+        )
+
+    train_ds = train_ds.prefetch(autotune)
 
     train_data_fraction = float(args.data_fraction)
     full_steps_per_epoch = resolve_step_count(
         args.max_steps_per_epoch, train_samples, batch_size
     )
     if 0.0 < train_data_fraction < 1.0:
-        steps_per_epoch = max(1, int(round(full_steps_per_epoch * train_data_fraction)))
+        steps_per_epoch = max(
+            1, int(round(full_steps_per_epoch * train_data_fraction))
+        )
         print(
             "Refinement subset per epoch: "
             f"{steps_per_epoch}/{full_steps_per_epoch} batches "
@@ -333,16 +471,6 @@ def main():
         args.validation_steps, val_samples, batch_size
     )
 
-    if USE_MIXUP:
-        train_ds = train_ds.map(
-            lambda images, labels: mixup_batch_tf(
-                images, labels, alpha=float(MIXUP_ALPHA)
-            ),
-            num_parallel_calls=autotune,
-        )
-
-    train_ds = train_ds.prefetch(autotune)
-
     total_epochs = max(1, int(args.epochs))
     warmup_steps = max(0, steps_per_epoch * min(1, total_epochs))
     total_steps = max(1, steps_per_epoch * total_epochs)
@@ -353,8 +481,17 @@ def main():
         total_steps=total_steps,
     )
 
+    training_model = model
+    if USE_ATTENTION_GUIDANCE:
+        from saliency_alignment import SaliencyAlignedModel
+
+        with strategy.scope():
+            training_model = SaliencyAlignedModel(
+                model, backbone_name=detected_backbone
+            )
+
     with strategy.scope():
-        model.compile(
+        training_model.compile(
             optimizer=build_adamw_optimizer(lr_schedule),
             loss=selected_loss,
             metrics=["accuracy"],
@@ -367,7 +504,9 @@ def main():
     refine_history_latest = str(logs_dir / "refine_history.csv")
     refine_history_archive = str(logs_dir / f"refine_history_{run_stamp}.csv")
     refine_interval_latest = str(logs_dir / "refine_interval_history.csv")
-    refine_interval_archive = str(logs_dir / f"refine_interval_history_{run_stamp}.csv")
+    refine_interval_archive = str(
+        logs_dir / f"refine_interval_history_{run_stamp}.csv"
+    )
     latest_runs_path = str(logs_dir / "latest_runs.json")
 
     csv_loggers = [CSVLogger(refine_history_latest, append=False)]
@@ -427,10 +566,18 @@ def main():
         run_start_time=run_start_time,
     )
 
+    collage_callback = GradCamEpochCollageCallback(
+        val_dir=VAL_DIR,
+        class_names=train_class_names,
+        backbone_name=detected_backbone,
+        output_dir="plots/gradcam_epochs_refine",
+    )
+
     callbacks: list[keras.callbacks.Callback] = [
         *csv_loggers,
         *interval_loggers,
         progress,
+        collage_callback,
         RollingPreOverfitRestorer(
             min_gap=float(args.overfit_gap),
             patience=int(args.overfit_patience),
@@ -443,7 +590,7 @@ def main():
     if tensorboard is not None:
         callbacks.append(tensorboard)
 
-    model.fit(
+    training_model.fit(
         train_ds,
         steps_per_epoch=steps_per_epoch,
         validation_data=val_ds,
@@ -474,7 +621,7 @@ def main():
         "run_id": run_id,
         "run_stamp": run_stamp,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "source_model": args.model_path,
+        "source_model": resolved_model_path,
         "output_model": str(output_path),
         "batch_size": int(batch_size),
         "epochs": total_epochs,

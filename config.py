@@ -66,6 +66,28 @@ def _env_csv(name: str) -> list[str]:
     return [token.strip() for token in raw_value.split(",") if token.strip()]
 
 
+def _env_int_list(name: str, default_csv: str) -> tuple[int, ...]:
+    """Parse a comma-separated int list with fallback defaults."""
+    raw_value = os.getenv(name, default_csv)
+    values: list[int] = []
+    for token in raw_value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            values.append(int(token))
+        except Exception:
+            continue
+
+    if not values:
+        fallback = [
+            part.strip() for part in default_csv.split(",") if part.strip()
+        ]
+        values = [int(part) for part in fallback]
+
+    return tuple(values)
+
+
 def _env_float_list(name: str, default_csv: str) -> tuple[float, ...]:
     """Parse a comma-separated float list with fallback defaults."""
     raw_value = os.getenv(name, default_csv)
@@ -80,7 +102,9 @@ def _env_float_list(name: str, default_csv: str) -> tuple[float, ...]:
             continue
 
     if not values:
-        fallback = [part.strip() for part in default_csv.split(",") if part.strip()]
+        fallback = [
+            part.strip() for part in default_csv.split(",") if part.strip()
+        ]
         values = [float(part) for part in fallback]
 
     return tuple(values)
@@ -94,14 +118,72 @@ IMG_SIZE = 224  # EfficientNetV2-B0 native resolution
 NUM_CLASSES = 46  # Total classes: 13 healthy + 33 disease
 
 # ============================================================
+#           HEAVY AUGMENTATION (background invariance)
+# ============================================================
+# These augmentations force the model to learn disease-specific
+# leaf features instead of exploiting the plain background.
+
+USE_RANDOM_RESIZED_CROP = _env_bool("LEAF_USE_RANDOM_RESIZED_CROP", True)
+RANDOM_CROP_SCALE_MIN = _env_float("LEAF_RANDOM_CROP_SCALE_MIN", 0.6)
+RANDOM_CROP_SCALE_MAX = _env_float("LEAF_RANDOM_CROP_SCALE_MAX", 1.0)
+RANDOM_CROP_RATIO_MIN = _env_float("LEAF_RANDOM_CROP_RATIO_MIN", 0.75)
+RANDOM_CROP_RATIO_MAX = _env_float("LEAF_RANDOM_CROP_RATIO_MAX", 1.33)
+
+USE_COLOR_JITTER = _env_bool("LEAF_USE_COLOR_JITTER", True)
+COLOR_JITTER_BRIGHTNESS = _env_float("LEAF_COLOR_JITTER_BRIGHTNESS", 0.3)
+COLOR_JITTER_CONTRAST = _env_float("LEAF_COLOR_JITTER_CONTRAST", 0.3)
+COLOR_JITTER_SATURATION = _env_float("LEAF_COLOR_JITTER_SATURATION", 0.3)
+COLOR_JITTER_HUE = _env_float("LEAF_COLOR_JITTER_HUE", 0.1)
+
+USE_GAUSSIAN_BLUR = _env_bool("LEAF_USE_GAUSSIAN_BLUR", True)
+GAUSSIAN_BLUR_PROB = _env_float("LEAF_GAUSSIAN_BLUR_PROB", 0.3)
+GAUSSIAN_BLUR_SIGMA_MIN = _env_float("LEAF_GAUSSIAN_BLUR_SIGMA_MIN", 0.1)
+GAUSSIAN_BLUR_SIGMA_MAX = _env_float("LEAF_GAUSSIAN_BLUR_SIGMA_MAX", 2.0)
+
+USE_GAUSSIAN_NOISE = _env_bool("LEAF_USE_GAUSSIAN_NOISE", True)
+GAUSSIAN_NOISE_PROB = _env_float("LEAF_GAUSSIAN_NOISE_PROB", 0.3)
+GAUSSIAN_NOISE_SIGMA = _env_float("LEAF_GAUSSIAN_NOISE_SIGMA", 0.05)
+
+USE_RANDOM_ERASING = _env_bool("LEAF_USE_RANDOM_ERASING", True)
+RANDOM_ERASING_PROB = _env_float("LEAF_RANDOM_ERASING_PROB", 0.3)
+RANDOM_ERASING_SCALE_MIN = _env_float("LEAF_RANDOM_ERASING_SCALE_MIN", 0.05)
+RANDOM_ERASING_SCALE_MAX = _env_float("LEAF_RANDOM_ERASING_SCALE_MAX", 0.33)
+USE_BACKGROUND_RANDOMIZATION = _env_bool(
+    "LEAF_USE_BACKGROUND_RANDOMIZATION", True
+)
+
+# ============================================================
+#                 ATTENTION GUIDANCE HYPERPARAMETERS
+# ============================================================
+USE_ATTENTION_GUIDANCE = _env_bool("LEAF_USE_ATTENTION_GUIDANCE", True)
+ATTENTION_BG_PENALTY_WEIGHT = _env_float(
+    "LEAF_ATTENTION_BG_PENALTY_WEIGHT", 2.0
+)
+ATTENTION_SPARSITY_WEIGHT = _env_float("LEAF_ATTENTION_SPARSITY_WEIGHT", 0.3)
+ATTENTION_DISEASE_REWARD_WEIGHT = _env_float(
+    "LEAF_ATTENTION_DISEASE_REWARD_WEIGHT", 0.05
+)
+# Multi-block ViT attention regularization: regularize multiple
+# encoder blocks for consistent attention throughout the network.
+# Default: blocks 8, 10, 11 of the 12-block ViT-Base encoder.
+ATTENTION_VIT_BLOCK_INDICES = _env_int_list(
+    "LEAF_ATTENTION_VIT_BLOCK_INDICES", "8,10,11"
+)
+# Backward-compatible single-block fallback (only used if
+# ATTENTION_VIT_BLOCK_INDICES is empty, which shouldn't happen).
+ATTENTION_VIT_BLOCK_IDX = _env_int("LEAF_ATTENTION_VIT_BLOCK_IDX", 10)
+
+# ============================================================
 #                 TRAINING HYPERPARAMETERS
 # ============================================================
 
 BATCH_SIZE = 32  # Safer default for 8 GB laptop GPUs at 224x224 + fp16
-EPOCHS_PHASE1 = 5  # Phase 1: frozen-backbone head warm-up
-EPOCHS_PHASE2 = 10  # Phase 2: full-model fine-tuning
-LEARNING_RATE_PHASE1 = 2e-3  # Aggressive LR for head-only training
-LEARNING_RATE_PHASE2 = 1e-4  # Lower LR for backbone fine-tuning
+EPOCHS_PHASE1 = _env_int("LEAF_EPOCHS_PHASE1", 5)
+EPOCHS_PHASE2 = _env_int("LEAF_EPOCHS_PHASE2", 10)
+LEARNING_RATE_PHASE1 = 2e-4  # Safe LR for head-only + class equalizer
+LEARNING_RATE_PHASE2 = (
+    5e-5  # Lower LR for backbone fine-tuning (reduced to limit overfitting)
+)
 LEARNING_RATE_RESUME = 1e-6  # Resume/continued training LR
 
 # Step control (0 = use all batches in the dataset)
@@ -111,19 +193,20 @@ TRAIN_DATA_FRACTION = _env_float("LEAF_TRAIN_DATA_FRACTION", 1.0)
 
 # Optimiser settings (AdamW + cosine annealing)
 OPTIMIZER = "AdamW"
-WEIGHT_DECAY = 0.01
+WEIGHT_DECAY = 0.02  # Increased for stronger regularization
 LR_SCHEDULER = "cosine"
 WARMUP_EPOCHS = 1
 ACCUMULATION_STEPS = _env_int("LEAF_ACCUMULATION_STEPS", 1)
 
 # Regularisation
-DROPOUT_RATE = 0.4
-LABEL_SMOOTHING = 0.1
+DROPOUT_RATE = 0.5  # Increased from 0.4 for stronger regularization
+LABEL_SMOOTHING = 0.15  # Increased from 0.1 to discourage overconfidence
 USE_FOCAL_LOSS = False  # CrossEntropy + label smoothing preferred
+USE_HIERARCHICAL_LOSS = _env_bool("LEAF_USE_HIERARCHICAL_LOSS", True)
 FOCAL_GAMMA = 2.0
-USE_MIXUP = True
+USE_MIXUP = _env_bool("LEAF_USE_MIXUP", False)
 MIXUP_ALPHA = 0.3
-USE_CUTMIX = True
+USE_CUTMIX = _env_bool("LEAF_USE_CUTMIX", False)
 CUTMIX_ALPHA = 1.0
 MIXUP_PROB = _env_float("LEAF_MIXUP_PROB", 0.4)
 CUTMIX_PROB = _env_float("LEAF_CUTMIX_PROB", 0.4)
@@ -148,12 +231,14 @@ TEMPERATURE_SCALING_STEPS = _env_int("LEAF_TEMPERATURE_SCALING_STEPS", 400)
 TEMPERATURE_SCALING_LR = _env_float("LEAF_TEMPERATURE_SCALING_LR", 0.01)
 BOOTSTRAP_SAMPLES = _env_int("LEAF_BOOTSTRAP_SAMPLES", 2000)
 BOOTSTRAP_SEED = _env_int("LEAF_BOOTSTRAP_SEED", 42)
-CONFIDENCE_REJECT_THRESHOLD = _env_float("LEAF_CONFIDENCE_REJECT_THRESHOLD", 0.92)
+CONFIDENCE_REJECT_THRESHOLD = _env_float(
+    "LEAF_CONFIDENCE_REJECT_THRESHOLD", 0.85
+)
 # Entropy threshold mode:
 # - <= 1.0: normalized entropy ratio (0..1)
 # - > 1.0: entropy in bits
-ENTROPY_REJECT_THRESHOLD = _env_float("LEAF_ENTROPY_REJECT_THRESHOLD", 0.7)
-OOD_MSP_THRESHOLD = _env_float("LEAF_OOD_MSP_THRESHOLD", 0.75)
+ENTROPY_REJECT_THRESHOLD = _env_float("LEAF_ENTROPY_REJECT_THRESHOLD", 0.8)
+OOD_MSP_THRESHOLD = _env_float("LEAF_OOD_MSP_THRESHOLD", 0.7)
 OOD_MAX_SAMPLES = _env_int("LEAF_OOD_MAX_SAMPLES", 2048)
 OOD_MAHALANOBIS_REG = _env_float("LEAF_OOD_MAHALANOBIS_REG", 1e-3)
 MC_DROPOUT_ENABLED = _env_bool("LEAF_MC_DROPOUT_ENABLED", True)
@@ -162,14 +247,18 @@ MC_DROPOUT_MAX_SAMPLES = _env_int("LEAF_MC_DROPOUT_MAX_SAMPLES", 2048)
 ROBUSTNESS_EVAL_ENABLED = _env_bool("LEAF_ROBUSTNESS_EVAL_ENABLED", True)
 ROBUSTNESS_MAX_SAMPLES = _env_int("LEAF_ROBUSTNESS_MAX_SAMPLES", 512)
 ROBUSTNESS_SEED = _env_int("LEAF_ROBUSTNESS_SEED", 42)
-ROBUSTNESS_BLUR_SIGMAS = _env_float_list("LEAF_ROBUSTNESS_BLUR_SIGMAS", "0.5,1.0,2.0")
+ROBUSTNESS_BLUR_SIGMAS = _env_float_list(
+    "LEAF_ROBUSTNESS_BLUR_SIGMAS", "0.5,1.0,2.0"
+)
 ROBUSTNESS_BRIGHTNESS_FACTORS = _env_float_list(
     "LEAF_ROBUSTNESS_BRIGHTNESS_FACTORS", "0.8,0.6,1.2"
 )
 ROBUSTNESS_NOISE_SIGMAS = _env_float_list(
     "LEAF_ROBUSTNESS_NOISE_SIGMAS", "0.01,0.03,0.05"
 )
-ROBUSTNESS_FOG_LEVELS = _env_float_list("LEAF_ROBUSTNESS_FOG_LEVELS", "0.1,0.2")
+ROBUSTNESS_FOG_LEVELS = _env_float_list(
+    "LEAF_ROBUSTNESS_FOG_LEVELS", "0.1,0.2"
+)
 ROBUSTNESS_OCCLUSION_FRACS = _env_float_list(
     "LEAF_ROBUSTNESS_OCCLUSION_FRACS", "0.1,0.2"
 )
@@ -194,7 +283,13 @@ TEST_DIR = BASE_DIR / "dataset" / "test"
 
 # Model artefact paths
 MODELS_DIR = BASE_DIR / "models"
-CHECKPOINT_MODEL_PATH = MODELS_DIR / "leaf_disease_checkpoint.keras"
+CHECKPOINT_MODEL_PATH = (
+    MODELS_DIR / "leaf_disease_checkpoint.keras"
+)  # train output
+CLASSIFIER_MODEL_PATH = (
+    MODELS_DIR / "leaf_disease_classifier.keras"
+)  # fine-tune output
+REFINED_MODEL_PATH = MODELS_DIR / "leaf_disease_refined.keras"  # refine output
 # Strict canonical model path used across inference/evaluation/figure generation.
 FINAL_MODEL_FILE_PATH = MODELS_DIR / "leaf_disease_refined.keras"
 EFFNET_MODEL_FILE_PATH = (
@@ -225,7 +320,7 @@ INTER_OP_THREADS = 4
 
 # Backbone: EfficientNetV2-B0 offers the best accuracy/speed trade-off
 # for transfer learning on laptop-class hardware.
-BASE_MODEL = "EfficientNetV2B0"
+BASE_MODEL = "DINOv3"
 
 # Classification head
 DENSE_UNITS = 512
@@ -240,7 +335,9 @@ FINE_TUNE_EPOCHS = _env_int("LEAF_FINE_TUNE_EPOCHS", 10)
 FINE_TUNE_BATCH_SIZE = _env_int("LEAF_FINE_TUNE_BATCH_SIZE", 32)
 FINE_TUNE_LEARNING_RATE = _env_float("LEAF_FINE_TUNE_LEARNING_RATE", 5e-5)
 FINE_TUNE_DATA_FRACTION = _env_float("LEAF_FINE_TUNE_DATA_FRACTION", 1.0)
-FINE_TUNE_MAX_STEPS_PER_EPOCH = _env_int("LEAF_FINE_TUNE_MAX_STEPS_PER_EPOCH", 0)
+FINE_TUNE_MAX_STEPS_PER_EPOCH = _env_int(
+    "LEAF_FINE_TUNE_MAX_STEPS_PER_EPOCH", 0
+)
 FINE_TUNE_VAL_MAX_STEPS = _env_int("LEAF_FINE_TUNE_VAL_MAX_STEPS", 0)
 
 # Stop when overfitting emerges (instead of only waiting on val_accuracy plateau)
@@ -272,6 +369,8 @@ EFFNET_BEST_MODEL = str(EFFNET_MODEL_FILE_PATH)
 # ============================================================
 
 CHECKPOINT_PATH = str(CHECKPOINT_MODEL_PATH)
+CLASSIFIER_PATH = str(CLASSIFIER_MODEL_PATH)
+REFINED_PATH = str(REFINED_MODEL_PATH)
 FINAL_MODEL_PATH = str(FINAL_MODEL_FILE_PATH)
 EFFNET_MODEL_PATH = str(EFFNET_MODEL_FILE_PATH)
 CLASS_INDICES_PATH = str(CLASS_INDICES_PATH)

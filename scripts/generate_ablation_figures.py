@@ -22,7 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.figure_paths import OTHERS_PLOTS_DIR, prepare_plot_directories  # noqa: E402
+from scripts.figure_paths import (  # noqa: E402
+    OTHERS_PLOTS_DIR,
+    prepare_plot_directories,
+)
 
 PLOTS_DIR = OTHERS_PLOTS_DIR
 prepare_plot_directories()
@@ -89,7 +92,9 @@ def generate_augmentation_ablation(output_dir: str = None):
     ax.set_xticks(range(len(strategies)))
     ax.set_xticklabels(strategies, fontsize=11, rotation=15, ha="right")
     ax.set_ylabel("Accuracy", fontsize=11, fontweight="bold")
-    ax.set_title("Impact of Augmentation on Accuracy", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Impact of Augmentation on Accuracy", fontsize=12, fontweight="bold"
+    )
     ax.set_ylim([0.94, 1.0])
     ax.grid(True, alpha=0.3, axis="y")
     for i, (bar, val) in enumerate(zip(bars, accuracies)):
@@ -115,7 +120,9 @@ def generate_augmentation_ablation(output_dir: str = None):
     ax.set_xticks(range(len(strategies)))
     ax.set_xticklabels(strategies, fontsize=11, rotation=15, ha="right")
     ax.set_ylabel("Macro F1", fontsize=11, fontweight="bold")
-    ax.set_title("Impact of Augmentation on Macro F1", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Impact of Augmentation on Macro F1", fontsize=12, fontweight="bold"
+    )
     ax.set_ylim([0.94, 1.0])
     ax.grid(True, alpha=0.3, axis="y")
     for i, (bar, val) in enumerate(zip(bars, f1_scores)):
@@ -140,7 +147,9 @@ def generate_augmentation_ablation(output_dir: str = None):
     )
     ax.set_xticks(range(len(strategies)))
     ax.set_xticklabels(strategies, fontsize=11, rotation=15, ha="right")
-    ax.set_ylabel("Expected Calibration Error (ECE)", fontsize=11, fontweight="bold")
+    ax.set_ylabel(
+        "Expected Calibration Error (ECE)", fontsize=11, fontweight="bold"
+    )
     ax.set_title(
         "Impact of Augmentation on Calibration", fontsize=12, fontweight="bold"
     )
@@ -214,7 +223,9 @@ def generate_temperature_scaling_ablation(output_dir: str = None):
     ax1.fill_between(temperatures, ece_values, alpha=0.2, color="#3498db")
 
     ax1.set_xlabel("Temperature (T)", fontsize=11, fontweight="bold")
-    ax1.set_ylabel("Expected Calibration Error", fontsize=11, fontweight="bold")
+    ax1.set_ylabel(
+        "Expected Calibration Error", fontsize=11, fontweight="bold"
+    )
     ax1.set_title(
         "Calibration Improvement: Temperature Scaling Effect",
         fontsize=12,
@@ -283,7 +294,9 @@ def generate_confidence_threshold_ablation(output_dir: str = None):
     accuracy_covered = (
         0.9879 + (1 - thresholds) * 0.005
     )  # Slightly improves on high-confidence samples
-    coverage = 1 - (1 - thresholds) ** 2  # Coverage decreases with stricter threshold
+    coverage = (
+        1 - (1 - thresholds) ** 2
+    )  # Coverage decreases with stricter threshold
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -314,7 +327,9 @@ def generate_confidence_threshold_ablation(output_dir: str = None):
         color="#3498db",
         label="Coverage (%)",
     )
-    ax2.set_ylabel("Coverage (%)", fontsize=12, fontweight="bold", color="#3498db")
+    ax2.set_ylabel(
+        "Coverage (%)", fontsize=12, fontweight="bold", color="#3498db"
+    )
     ax2.tick_params(axis="y", labelcolor="#3498db")
     ax2.set_ylim([0, 105])
 
@@ -428,7 +443,9 @@ def generate_backbone_comparison(output_dir: str = None):
         linewidth=1.5,
     )
     ax.set_ylabel("Time (ms)", fontsize=11, fontweight="bold")
-    ax.set_title("Inference Latency (Single Image)", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Inference Latency (Single Image)", fontsize=12, fontweight="bold"
+    )
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars, metrics["Inference Time (ms)"]):
         ax.text(
@@ -465,7 +482,10 @@ def generate_backbone_comparison(output_dir: str = None):
         )
 
     plt.suptitle(
-        "Backbone Architecture Ablation Study", fontsize=14, fontweight="bold", y=1.00
+        "Backbone Architecture Ablation Study",
+        fontsize=14,
+        fontweight="bold",
+        y=1.00,
     )
     plt.tight_layout()
     plt.savefig(
@@ -498,7 +518,9 @@ def generate_regularization_ablation(output_dir: str = None):
     # Metrics
     train_acc = [0.9995, 0.9987, 0.9876, 0.9745, 0.9712]
     val_acc = [0.9612, 0.9745, 0.9812, 0.9879, 0.9879]
-    generalization_gap = [train_acc[i] - val_acc[i] for i in range(len(strategies))]
+    generalization_gap = [
+        train_acc[i] - val_acc[i] for i in range(len(strategies))
+    ]
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -532,7 +554,9 @@ def generate_regularization_ablation(output_dir: str = None):
     ax.set_xticklabels(strategies, fontsize=10)
     ax.set_ylabel("Accuracy", fontsize=11, fontweight="bold")
     ax.set_title(
-        "Regularization Impact on Train vs Validation", fontsize=12, fontweight="bold"
+        "Regularization Impact on Train vs Validation",
+        fontsize=12,
+        fontweight="bold",
     )
     ax.set_ylim([0.96, 1.0])
     ax.legend(fontsize=11)
@@ -540,7 +564,9 @@ def generate_regularization_ablation(output_dir: str = None):
 
     # Generalization gap
     ax = axes[1]
-    colors_gap = ["#e74c3c" if gap > 0.02 else "#2ecc71" for gap in generalization_gap]
+    colors_gap = [
+        "#e74c3c" if gap > 0.02 else "#2ecc71" for gap in generalization_gap
+    ]
     bars = ax.bar(
         strategies,
         generalization_gap,
@@ -550,9 +576,13 @@ def generate_regularization_ablation(output_dir: str = None):
         linewidth=1.5,
     )
 
-    ax.set_ylabel("Generalization Gap (Train - Val)", fontsize=11, fontweight="bold")
+    ax.set_ylabel(
+        "Generalization Gap (Train - Val)", fontsize=11, fontweight="bold"
+    )
     ax.set_title(
-        "Overfitting Reduction via Regularization", fontsize=12, fontweight="bold"
+        "Overfitting Reduction via Regularization",
+        fontsize=12,
+        fontweight="bold",
     )
     ax.axhline(
         0.01,

@@ -30,7 +30,9 @@ TRAIN_HISTORY_PATH = ROOT / "models" / "logs" / "train_history.csv"
 FINE_TUNE_HISTORY_PATH = ROOT / "models" / "logs" / "fine_tune_history.csv"
 REFINE_HISTORY_PATH = ROOT / "models" / "logs" / "refine_history.csv"
 LATEST_RUNS_PATH = ROOT / "models" / "logs" / "latest_runs.json"
-MISCLASS_SUMMARY_PATH = ROOT / "reports" / "misclassifications" / "summary.json"
+MISCLASS_SUMMARY_PATH = (
+    ROOT / "reports" / "misclassifications" / "summary.json"
+)
 
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 sns.set_theme(style="whitegrid")
@@ -71,7 +73,8 @@ def load_report() -> dict:
 def load_class_order() -> list[str]:
     class_indices = json.loads(CLASS_INDEX_PATH.read_text(encoding="utf-8"))
     return [
-        label for label, _ in sorted(class_indices.items(), key=lambda item: item[1])
+        label
+        for label, _ in sorted(class_indices.items(), key=lambda item: item[1])
     ]
 
 
@@ -101,7 +104,9 @@ def load_history() -> list[dict]:
         return rows
 
     train_rows = _read_rows(TRAIN_HISTORY_PATH, "train", 0)
-    fine_rows = _read_rows(FINE_TUNE_HISTORY_PATH, "fine_tune", len(train_rows))
+    fine_rows = _read_rows(
+        FINE_TUNE_HISTORY_PATH, "fine_tune", len(train_rows)
+    )
     refine_rows = _read_rows(
         REFINE_HISTORY_PATH, "refine", len(train_rows) + len(fine_rows)
     )
@@ -112,7 +117,9 @@ def load_phase_metadata(history: list[dict]) -> dict:
     latest_runs = {}
     if LATEST_RUNS_PATH.exists():
         try:
-            latest_runs = json.loads(LATEST_RUNS_PATH.read_text(encoding="utf-8"))
+            latest_runs = json.loads(
+                LATEST_RUNS_PATH.read_text(encoding="utf-8")
+            )
         except Exception:
             latest_runs = {}
 
@@ -139,7 +146,8 @@ def load_phase_metadata(history: list[dict]) -> dict:
     }
 
     phase_rows = {
-        key: [row for row in history if row["phase"] == key] for key in phase_order
+        key: [row for row in history if row["phase"] == key]
+        for key in phase_order
     }
     offsets = {}
     running = 0
@@ -148,7 +156,9 @@ def load_phase_metadata(history: list[dict]) -> dict:
         running += len(phase_rows[phase])
 
     starts = {
-        phase: offsets[phase] + 1 for phase in phase_order if len(phase_rows[phase]) > 0
+        phase: offsets[phase] + 1
+        for phase in phase_order
+        if len(phase_rows[phase]) > 0
     }
     warmup_ends: dict[str, int] = {}
     if len(phase_rows["train"]) > 0 and train_warmup_epochs > 0:
@@ -161,12 +171,16 @@ def load_phase_metadata(history: list[dict]) -> dict:
         rows = phase_rows[phase]
         if not rows:
             continue
-        best_local = max(rows, key=lambda row: row["val_accuracy"])["local_epoch"]
+        best_local = max(rows, key=lambda row: row["val_accuracy"])[
+            "local_epoch"
+        ]
         best_by_phase[phase] = offsets[phase] + best_local
 
     global_best_raw = None
     if history:
-        global_best_raw = max(history, key=lambda row: row["val_accuracy"])["epoch"]
+        global_best_raw = max(history, key=lambda row: row["val_accuracy"])[
+            "epoch"
+        ]
 
     restore_markers = []
     for phase in phase_order:
@@ -229,7 +243,10 @@ def resolve_dataset_class(
 ) -> str | None:
     target = canonical_label(target_label)
     for class_name in split_counts:
-        if canonical_label(class_name) == target and (split_dir / class_name).is_dir():
+        if (
+            canonical_label(class_name) == target
+            and (split_dir / class_name).is_dir()
+        ):
             return class_name
     return next(
         (
@@ -273,7 +290,9 @@ def plot_crop_distribution(counts: dict) -> None:
     x = np.arange(len(crops))
     plt.figure(figsize=(14, 6))
     plt.bar(x, train_vals, label="Train", color="#2a9d8f")
-    plt.bar(x, val_vals, bottom=train_vals, label="Validation", color="#e9c46a")
+    plt.bar(
+        x, val_vals, bottom=train_vals, label="Validation", color="#e9c46a"
+    )
     bottom = np.array(train_vals) + np.array(val_vals)
     plt.bar(x, test_vals, bottom=bottom, label="Test", color="#f4a261")
     plt.xticks(x, crops, rotation=45, ha="right")
@@ -285,7 +304,9 @@ def plot_crop_distribution(counts: dict) -> None:
 
 def plot_class_imbalance(counts: dict) -> None:
     items = sorted(
-        counts["train"]["per_class"].items(), key=lambda item: item[1], reverse=True
+        counts["train"]["per_class"].items(),
+        key=lambda item: item[1],
+        reverse=True,
     )
     labels = [pretty_label(label) for label, _ in items]
     values = np.array([value for _, value in items], dtype=float)
@@ -295,7 +316,11 @@ def plot_class_imbalance(counts: dict) -> None:
     axes[0].plot(ranks, values, color="#264653", linewidth=2.4)
     axes[0].fill_between(ranks, values, color="#2a9d8f", alpha=0.18)
     axes[0].scatter(
-        [1, len(values)], [values[0], values[-1]], color="#e76f51", s=80, zorder=5
+        [1, len(values)],
+        [values[0], values[-1]],
+        color="#e76f51",
+        s=80,
+        zorder=5,
     )
     axes[0].set_ylabel("Training images")
     axes[0].set_xlabel("Class rank (descending)")
@@ -321,7 +346,10 @@ def plot_class_imbalance(counts: dict) -> None:
     bottom_values = [value for _, value in bottom]
 
     axes[1].barh(
-        np.arange(len(top_labels)), top_values, color="#457b9d", label="Largest classes"
+        np.arange(len(top_labels)),
+        top_values,
+        color="#457b9d",
+        label="Largest classes",
     )
     axes[1].barh(
         np.arange(len(bottom_labels)) + len(top_labels) + 1,
@@ -342,7 +370,9 @@ def plot_class_imbalance(counts: dict) -> None:
 
 def plot_top_bottom_classes(counts: dict) -> None:
     items = sorted(
-        counts["train"]["per_class"].items(), key=lambda item: item[1], reverse=True
+        counts["train"]["per_class"].items(),
+        key=lambda item: item[1],
+        reverse=True,
     )
     largest = items[:10]
     smallest = list(reversed(items[-10:]))
@@ -380,7 +410,9 @@ def plot_per_class_f1(report: dict) -> None:
         color=color_values,
     )
     plt.yticks(
-        np.arange(len(ordered)), [pretty_label(label) for label in ordered], fontsize=8
+        np.arange(len(ordered)),
+        [pretty_label(label) for label in ordered],
+        fontsize=8,
     )
     plt.xlabel("Validation F1 (%)")
     plt.title("Per-Class Validation F1 Ranked from Lowest to Highest")
@@ -418,7 +450,9 @@ def plot_precision_recall_support(report: dict) -> None:
     plt.ylabel("Recall (%)")
     plt.xlim(80, 101)
     plt.ylim(80, 101)
-    plt.title("Per-Class Precision vs Recall (Marker Size = Validation Support)")
+    plt.title(
+        "Per-Class Precision vs Recall (Marker Size = Validation Support)"
+    )
     save_plot(PLOTS_DIR / "precision_recall_support.png")
 
 
@@ -436,7 +470,9 @@ def plot_crop_level_f1(report: dict) -> None:
 
     plt.figure(figsize=(12, 6))
     bars = plt.bar(
-        np.arange(len(ordered)), values, color=sns.color_palette("crest", len(ordered))
+        np.arange(len(ordered)),
+        values,
+        color=sns.color_palette("crest", len(ordered)),
     )
     plt.xticks(np.arange(len(ordered)), ordered, rotation=45, ha="right")
     plt.ylabel("Macro F1 across crop classes (%)")
@@ -489,7 +525,8 @@ def plot_error_share_by_crop(report: dict, class_order: list[str]) -> None:
         reverse=True,
     )
     error_rates = [
-        100.0 * crop_errors[crop] / max(crop_support[crop], 1.0) for crop in ordered
+        100.0 * crop_errors[crop] / max(crop_support[crop], 1.0)
+        for crop in ordered
     ]
     total_errors = [int(crop_errors[crop]) for crop in ordered]
 
@@ -500,18 +537,28 @@ def plot_error_share_by_crop(report: dict, class_order: list[str]) -> None:
     ax1.set_title("Validation Error Burden by Crop")
     ax2 = ax1.twinx()
     ax2.plot(
-        np.arange(len(ordered)), total_errors, color="#264653", marker="o", linewidth=2
+        np.arange(len(ordered)),
+        total_errors,
+        color="#264653",
+        marker="o",
+        linewidth=2,
     )
     ax2.set_ylabel("Absolute errors")
     save_plot(PLOTS_DIR / "error_share_by_crop.png")
 
 
 def plot_rice_confusion(report: dict, class_order: list[str]) -> None:
-    rice_labels = [label for label in class_order if label.startswith("Rice___")]
+    rice_labels = [
+        label for label in class_order if label.startswith("Rice___")
+    ]
     indices = [class_order.index(label) for label in rice_labels]
-    cm = np.array(report["confusion_matrix"], dtype=float)[np.ix_(indices, indices)]
+    cm = np.array(report["confusion_matrix"], dtype=float)[
+        np.ix_(indices, indices)
+    ]
     row_sums = cm.sum(axis=1, keepdims=True)
-    normalized = np.divide(cm, row_sums, out=np.zeros_like(cm), where=row_sums > 0)
+    normalized = np.divide(
+        cm, row_sums, out=np.zeros_like(cm), where=row_sums > 0
+    )
 
     plt.figure(figsize=(7, 6))
     sns.heatmap(
@@ -519,8 +566,12 @@ def plot_rice_confusion(report: dict, class_order: list[str]) -> None:
         annot=True,
         fmt=".1f",
         cmap="magma",
-        xticklabels=[pretty_label(label).split(" / ", 1)[1] for label in rice_labels],
-        yticklabels=[pretty_label(label).split(" / ", 1)[1] for label in rice_labels],
+        xticklabels=[
+            pretty_label(label).split(" / ", 1)[1] for label in rice_labels
+        ],
+        yticklabels=[
+            pretty_label(label).split(" / ", 1)[1] for label in rice_labels
+        ],
     )
     plt.xlabel("Predicted class")
     plt.ylabel("True class")
@@ -548,7 +599,9 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
     phase_starts = phase_meta.get("phase_starts", {})
     warmup_ends = phase_meta.get("warmup_ends", {})
     best_by_phase = phase_meta.get("best_by_phase", {})
-    phase_order = phase_meta.get("phase_order", ["train", "fine_tune", "refine"])
+    phase_order = phase_meta.get(
+        "phase_order", ["train", "fine_tune", "refine"]
+    )
     phase_labels = phase_meta.get("phase_labels", {})
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
@@ -568,14 +621,28 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
                 if candidate_start is not None and candidate_start > start:
                     next_start = candidate_start
                     break
-            end = (next_start - 0.5) if next_start is not None else (max(epochs) + 0.5)
+            end = (
+                (next_start - 0.5)
+                if next_start is not None
+                else (max(epochs) + 0.5)
+            )
             ax.axvspan(start - 0.5, end, color=color, alpha=0.12)
 
         for phase, start in phase_starts.items():
-            ax.axvline(start, color="#5c677d", linestyle="--", linewidth=1.0, alpha=0.6)
+            ax.axvline(
+                start,
+                color="#5c677d",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.6,
+            )
         for phase, warmup_end in warmup_ends.items():
             ax.axvline(
-                warmup_end, color="#7b2cbf", linestyle="-.", linewidth=1.0, alpha=0.6
+                warmup_end,
+                color="#7b2cbf",
+                linestyle="-.",
+                linewidth=1.0,
+                alpha=0.6,
             )
         for _, best_phase_epoch in best_by_phase.items():
             ax.axvline(
@@ -596,7 +663,11 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
         ax.axvline(final_epoch, color="#d62828", linestyle="--", linewidth=1.5)
         if raw_peak_epoch != final_epoch:
             ax.axvline(
-                raw_peak_epoch, color="#495057", linestyle=":", linewidth=1.2, alpha=0.8
+                raw_peak_epoch,
+                color="#495057",
+                linestyle=":",
+                linewidth=1.2,
+                alpha=0.8,
             )
 
     axes[0, 0].plot(epochs, train_acc, marker="o", label="Train")
@@ -610,7 +681,9 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
     axes[0, 1].set_title("Loss by Epoch")
     axes[0, 1].set_ylabel("Loss")
 
-    axes[1, 0].bar(epochs, [v - t for v, t in zip(val_acc, train_acc)], color="#6a4c93")
+    axes[1, 0].bar(
+        epochs, [v - t for v, t in zip(val_acc, train_acc)], color="#6a4c93"
+    )
     axes[1, 0].set_title("Validation Minus Training Accuracy")
     axes[1, 0].set_ylabel("Gap (percentage points)")
     axes[1, 0].set_xlabel("Epoch")
@@ -636,10 +709,20 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
             label="Phase start",
         ),
         plt.Line2D(
-            [0], [0], color="#7b2cbf", linestyle="-.", linewidth=1.0, label="Warmup end"
+            [0],
+            [0],
+            color="#7b2cbf",
+            linestyle="-.",
+            linewidth=1.0,
+            label="Warmup end",
         ),
         plt.Line2D(
-            [0], [0], color="#2a9d8f", linestyle=":", linewidth=1.0, label="Phase best"
+            [0],
+            [0],
+            color="#2a9d8f",
+            linestyle=":",
+            linewidth=1.0,
+            label="Phase best",
         ),
         plt.Line2D(
             [0],
@@ -666,7 +749,9 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
             label="Raw val peak",
         ),
     ]
-    axes[0, 1].legend(handles=legend_lines, frameon=False, fontsize=8, loc="best")
+    axes[0, 1].legend(
+        handles=legend_lines, frameon=False, fontsize=8, loc="best"
+    )
 
     label_text = []
     for phase in phase_order:
@@ -696,14 +781,20 @@ def plot_training_dynamics(history: list[dict], phase_meta: dict) -> None:
     save_plot(PLOTS_DIR / "training_dynamics.png")
 
 
-def plot_learning_curves_by_phase(history: list[dict], phase_meta: dict) -> None:
-    phase_order = phase_meta.get("phase_order", ["train", "fine_tune", "refine"])
+def plot_learning_curves_by_phase(
+    history: list[dict], phase_meta: dict
+) -> None:
+    phase_order = phase_meta.get(
+        "phase_order", ["train", "fine_tune", "refine"]
+    )
     phase_labels = phase_meta.get("phase_labels", {})
     phase_rows = phase_meta.get("phase_rows", {})
     if not history:
         return
 
-    fig, axes = plt.subplots(len(phase_order), 2, figsize=(14, 11), sharex=False)
+    fig, axes = plt.subplots(
+        len(phase_order), 2, figsize=(14, 11), sharex=False
+    )
     if len(phase_order) == 1:
         axes = np.array([axes])
 
@@ -734,7 +825,9 @@ def plot_learning_curves_by_phase(history: list[dict], phase_meta: dict) -> None
 
         if phase == "train":
             train_warmup_epochs = int(phase_meta.get("train_warmup_epochs", 0))
-            if train_warmup_epochs > 0 and train_warmup_epochs <= max(local_epoch):
+            if train_warmup_epochs > 0 and train_warmup_epochs <= max(
+                local_epoch
+            ):
                 ax_acc.axvline(
                     train_warmup_epochs,
                     color="#7b2cbf",
@@ -776,7 +869,9 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
-def fit_image_to_frame(img: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+def fit_image_to_frame(
+    img: Image.Image, target_size: tuple[int, int]
+) -> Image.Image:
     img = img.convert("RGB")
     src_w, src_h = img.size
     target_w, target_h = target_size
@@ -836,7 +931,9 @@ def make_labeled_gallery(
         )
         text_y = y0 + thumb_size[1] + 12
         draw.text((x0 + 12, text_y), title, fill=(24, 24, 27), font=title_font)
-        draw.text((x0 + 12, text_y + 42), subtitle, fill=(82, 82, 91), font=body_font)
+        draw.text(
+            (x0 + 12, text_y + 42), subtitle, fill=(82, 82, 91), font=body_font
+        )
 
     canvas.save(out_path, dpi=(600, 600))
     print(f"Saved {out_path.relative_to(ROOT)}")
@@ -871,7 +968,9 @@ def build_hard_class_gallery(report: dict, counts: dict) -> None:
     split_dir = DATASET_DIR / "val"
     items: list[tuple[Path, str, str]] = []
     for label in labels:
-        actual_dir = resolve_dataset_class(counts["val"]["per_class"], split_dir, label)
+        actual_dir = resolve_dataset_class(
+            counts["val"]["per_class"], split_dir, label
+        )
         if not actual_dir:
             continue
         image_path = pick_image_from_class(split_dir, actual_dir)
@@ -886,7 +985,10 @@ def build_hard_class_gallery(report: dict, counts: dict) -> None:
             )
         )
     make_labeled_gallery(
-        items, PLOTS_DIR / "hard_class_gallery.png", cols=4, thumb_size=(760, 560)
+        items,
+        PLOTS_DIR / "hard_class_gallery.png",
+        cols=4,
+        thumb_size=(760, 560),
     )
 
 
@@ -935,7 +1037,9 @@ def build_case_gallery(counts: dict) -> None:
         if not image_path:
             continue
         pretty = pretty_label(class_name)
-        crop, disease = pretty.split(" / ", 1) if " / " in pretty else (pretty, pretty)
+        crop, disease = (
+            pretty.split(" / ", 1) if " / " in pretty else (pretty, pretty)
+        )
         items.append((image_path, crop, disease))
 
     make_labeled_gallery(
@@ -993,15 +1097,30 @@ def plot_system_workflow() -> None:
         "#d8f3dc",
     )
     draw_box(
-        ax, (0.31, 0.72), 0.18, 0.12, "train_model.py\n two-stage training", "#bee1e6"
+        ax,
+        (0.31, 0.72),
+        0.18,
+        0.12,
+        "train_model.py\n two-stage training",
+        "#bee1e6",
     )
     draw_box(
-        ax, (0.57, 0.72), 0.18, 0.12, "models/*.keras\n class_indices.json", "#fde2e4"
+        ax,
+        (0.57, 0.72),
+        0.18,
+        0.12,
+        "models/*.keras\n class_indices.json",
+        "#fde2e4",
     )
     draw_box(ax, (0.79, 0.72), 0.16, 0.12, "predict.py\n app.py", "#fff1b6")
 
     draw_box(
-        ax, (0.31, 0.47), 0.18, 0.12, "evaluate_model.py\n evaluation report", "#bee1e6"
+        ax,
+        (0.31, 0.47),
+        0.18,
+        0.12,
+        "evaluate_model.py\n evaluation report",
+        "#bee1e6",
     )
     draw_box(
         ax,
@@ -1012,11 +1131,21 @@ def plot_system_workflow() -> None:
         "#bee1e6",
     )
     draw_box(
-        ax, (0.79, 0.47), 0.16, 0.12, "web control panel\n background jobs", "#fff1b6"
+        ax,
+        (0.79, 0.47),
+        0.16,
+        0.12,
+        "web control panel\n background jobs",
+        "#fff1b6",
     )
 
     draw_box(
-        ax, (0.43, 0.2), 0.22, 0.12, "reports/main.tex\n report + appendices", "#e9d8fd"
+        ax,
+        (0.43, 0.2),
+        0.22,
+        0.12,
+        "reports/main.tex\n report + appendices",
+        "#e9d8fd",
     )
 
     draw_arrow(ax, (0.23, 0.78), (0.31, 0.78))

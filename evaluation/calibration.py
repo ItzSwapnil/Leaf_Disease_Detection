@@ -26,7 +26,9 @@ def expected_calibration_error(
 
     y_true = _to_label_indices(labels)
     if y_true.shape[0] != probs.shape[0]:
-        raise ValueError("labels and probs must have matching first dimension.")
+        raise ValueError(
+            "labels and probs must have matching first dimension."
+        )
 
     n_bins = max(2, int(n_bins))
     confidences = np.max(probs, axis=1)
@@ -166,7 +168,9 @@ def entropy_rejection_metrics(
         "accepted_count": accepted_count,
         "total_count": int(len(y_true)),
         "mean_entropy_bits": float(np.mean(entropy)),
-        "mean_entropy_ratio": float(np.mean(entropy) / max(entropy_max_bits, 1e-8)),
+        "mean_entropy_ratio": float(
+            np.mean(entropy) / max(entropy_max_bits, 1e-8)
+        ),
     }
 
 
@@ -237,7 +241,9 @@ def bootstrap_ci(
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
     if y_true.shape[0] != y_pred.shape[0]:
-        raise ValueError("y_true and y_pred must have the same number of samples.")
+        raise ValueError(
+            "y_true and y_pred must have the same number of samples."
+        )
 
     n_samples = y_true.shape[0]
     n_boot = max(100, int(n_boot))
@@ -257,7 +263,9 @@ def bootstrap_ci(
     }
 
 
-def mcnemar_test(y_true: np.ndarray, pred_a: np.ndarray, pred_b: np.ndarray) -> dict:
+def mcnemar_test(
+    y_true: np.ndarray, pred_a: np.ndarray, pred_b: np.ndarray
+) -> dict:
     """McNemar test comparing two classifiers on paired predictions.
 
     Model A is treated as the proposed model and Model B as the baseline.

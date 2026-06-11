@@ -23,6 +23,19 @@ def preprocess_batch_for_model_tf(
     return preprocess_input(images)
 
 
-def preprocess_array_for_model(image_array: np.ndarray) -> np.ndarray:
+def preprocess_array_for_model(
+    image_array: np.ndarray, backbone_name: str | None = None
+) -> np.ndarray:
     arr = np.asarray(image_array, dtype=np.float32)
+    if backbone_name == "DINOv3":
+        arr = arr / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        return (arr - mean) / std
     return preprocess_input(arr)
+
+
+def get_preprocessing_fn(backbone_name: str | None = None):
+    from backbones import resolve_preprocess_function
+
+    return resolve_preprocess_function(backbone_name or "EfficientNetV2B0")

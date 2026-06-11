@@ -79,7 +79,9 @@ def _load_model_robust(model_path: str):
 
     custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
     try:
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
     except Exception as exc:
         message = str(exc)
         vit_compat_error = (
@@ -92,7 +94,9 @@ def _load_model_robust(model_path: str):
         if not _patch_vit_layer_init_for_compat():
             raise
         print("Applied ViT compatibility shim while loading model.")
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
 
 
 def _infer_backbone_from_model(model) -> str:
@@ -136,14 +140,18 @@ def generate_class_distribution():
 
     plt.figure(figsize=(16, 10))
     colors = plt.get_cmap("viridis")(np.linspace(0, 1, len(classes)))
-    display_names = [c.replace("___", " - ").replace("_", " ") for c in classes]
+    display_names = [
+        c.replace("___", " - ").replace("_", " ") for c in classes
+    ]
 
     bars = plt.barh(range(len(classes)), counts, color=colors)
     plt.yticks(range(len(classes)), display_names, fontsize=8)
     plt.xlabel("Number of Images", fontsize=12)
     plt.ylabel("Disease Class", fontsize=12)
     plt.title(
-        "Dataset Class Distribution (Training Set)", fontsize=14, fontweight="bold"
+        "Dataset Class Distribution (Training Set)",
+        fontsize=14,
+        fontweight="bold",
     )
 
     for bar, count in zip(bars, counts):
@@ -175,7 +183,9 @@ def generate_confusion_matrix():
     global _MODEL_PATH
     if _MODEL_PATH is None:
         path_candidates = (
-            [MODEL_PATH_OVERRIDE] if MODEL_PATH_OVERRIDE else [FINAL_MODEL_PATH]
+            [MODEL_PATH_OVERRIDE]
+            if MODEL_PATH_OVERRIDE
+            else [FINAL_MODEL_PATH]
         )
         _MODEL_PATH = resolve_keras_model_path(path_candidates)
     model = _load_model_robust(_MODEL_PATH)
@@ -192,7 +202,10 @@ def generate_confusion_matrix():
         shuffle=False,
     )
     prep_test = test_ds.map(
-        lambda x, y: (preprocess_batch_for_model_tf(x, backbone_name=backbone_name), y),
+        lambda x, y: (
+            preprocess_batch_for_model_tf(x, backbone_name=backbone_name),
+            y,
+        ),
         num_parallel_calls=tf.data.AUTOTUNE,
     ).prefetch(tf.data.AUTOTUNE)
 
@@ -216,7 +229,11 @@ def generate_confusion_matrix():
     )
     plt.xlabel("Predicted Label", fontsize=12)
     plt.ylabel("True Label", fontsize=12)
-    plt.title("Normalised Confusion Matrix (Test Set)", fontsize=14, fontweight="bold")
+    plt.title(
+        "Normalised Confusion Matrix (Test Set)",
+        fontsize=14,
+        fontweight="bold",
+    )
     plt.xticks(rotation=90, fontsize=7)
     plt.yticks(rotation=0, fontsize=7)
 
@@ -262,7 +279,9 @@ def _read_metrics_from_csv(csv_path):
         reader = csv.DictReader(in_file)
         for row in reader:
             acc_key = "accuracy" if "accuracy" in row else "acc"
-            val_acc_key = "val_accuracy" if "val_accuracy" in row else "val_acc"
+            val_acc_key = (
+                "val_accuracy" if "val_accuracy" in row else "val_acc"
+            )
 
             def _f(value):
                 try:
@@ -547,13 +566,17 @@ def _find_refine_best_safe_epoch(logs_dir, run_stamp):
     snapshot_dir = Path(logs_dir) / f"refine_snapshots_{run_stamp}"
     if not snapshot_dir.exists():
         return None
-    safe_files = list(snapshot_dir.glob("safe_epoch_*_val_accuracy_*.weights.h5"))
+    safe_files = list(
+        snapshot_dir.glob("safe_epoch_*_val_accuracy_*.weights.h5")
+    )
     if not safe_files:
         return None
 
     best_epoch = None
     best_metric = float("-inf")
-    pattern = re.compile(r"safe_epoch_(\d+)_val_accuracy_([0-9]+\.[0-9]+)\.weights\.h5")
+    pattern = re.compile(
+        r"safe_epoch_(\d+)_val_accuracy_([0-9]+\.[0-9]+)\.weights\.h5"
+    )
     for path in safe_files:
         match = pattern.match(path.name)
         if not match:
@@ -584,7 +607,9 @@ def _dedupe_legend(ax):
 def _resolve_learning_curve_logs(logs_dir):
 
     default_paths = {
-        "train_interval_log": os.path.join(logs_dir, "train_interval_history.csv"),
+        "train_interval_log": os.path.join(
+            logs_dir, "train_interval_history.csv"
+        ),
         "fine_tune_interval_log": os.path.join(
             logs_dir, "fine_tune_interval_history.csv"
         ),
@@ -650,7 +675,9 @@ def _read_restore_epochs_from_log(log_path, script_name=None):
         for line in in_file:
             normalized = line.strip()
             if normalized.startswith("Started:"):
-                in_target_run = (script_name is None) or (script_name in normalized)
+                in_target_run = (script_name is None) or (
+                    script_name in normalized
+                )
                 continue
             if not in_target_run:
                 continue
@@ -678,14 +705,21 @@ def generate_learning_curves_from_logs():
         history_metrics = (
             _read_metrics_from_csv(phase["history"])
             if phase["history"]
-            else {"accuracy": [], "val_accuracy": [], "loss": [], "val_loss": []}
+            else {
+                "accuracy": [],
+                "val_accuracy": [],
+                "loss": [],
+                "val_loss": [],
+            }
         )
         history_len = len(history_metrics["accuracy"])
         configured_epochs = int(phase.get("configured_epochs", 0))
         ended_early = configured_epochs > 0 and history_len < configured_epochs
         interval_lr_values = []
         if phase.get("interval") and os.path.exists(phase["interval"]):
-            _, interval_lr_values = _read_interval_epoch_end_metrics(phase["interval"])
+            _, interval_lr_values = _read_interval_epoch_end_metrics(
+                phase["interval"]
+            )
 
         restore_target_local = None
         if phase["key"] == "refine":
@@ -718,8 +752,8 @@ def generate_learning_curves_from_logs():
         lr_epoch_values = []
         used_epoch_end_fallback = False
         if needs_epoch_end_fallback:
-            interval_epoch_metrics, interval_lr = _read_interval_epoch_end_metrics(
-                phase["interval"]
+            interval_epoch_metrics, interval_lr = (
+                _read_interval_epoch_end_metrics(phase["interval"])
             )
             if len(interval_epoch_metrics["accuracy"]) > 0:
                 selected_metrics = interval_epoch_metrics
@@ -729,14 +763,23 @@ def generate_learning_curves_from_logs():
             lr_epoch_values = interval_lr_values
 
         selected_len = len(selected_metrics["accuracy"])
-        if restore_target_local is not None and restore_target_local > selected_len:
+        if (
+            restore_target_local is not None
+            and restore_target_local > selected_len
+        ):
             restore_target_local = None
 
-        source_name = "interval(epoch_end)" if used_epoch_end_fallback else "history"
+        source_name = (
+            "interval(epoch_end)" if used_epoch_end_fallback else "history"
+        )
         print(
             f"Using {phase['key']} {source_name}: "
             f"epochs={selected_len}"
-            + (f", configured={configured_epochs}" if configured_epochs > 0 else "")
+            + (
+                f", configured={configured_epochs}"
+                if configured_epochs > 0
+                else ""
+            )
         )
 
         phase_runs.append(
@@ -754,7 +797,9 @@ def generate_learning_curves_from_logs():
 
     total_epochs = sum(len(run["metrics"]["accuracy"]) for run in phase_runs)
     if total_epochs == 0:
-        raise FileNotFoundError("No training metrics found. Run train_model.py first.")
+        raise FileNotFoundError(
+            "No training metrics found. Run train_model.py first."
+        )
 
     phase_offsets = {}
     running_offset = 0
@@ -854,7 +899,9 @@ def generate_learning_curves_from_logs():
             )
         )
 
-    all_markers = phase_start_markers + warmup_markers + marker_lines + restore_markers
+    all_markers = (
+        phase_start_markers + warmup_markers + marker_lines + restore_markers
+    )
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -868,15 +915,27 @@ def generate_learning_curves_from_logs():
         markersize=3,
     )
     ax1.plot(
-        val_x, val_acc, "r-o", label="Validation Accuracy", linewidth=2, markersize=3
+        val_x,
+        val_acc,
+        "r-o",
+        label="Validation Accuracy",
+        linewidth=2,
+        markersize=3,
     )
     for epoch, color, style, label in all_markers:
         ax1.axvline(
-            epoch, color=color, linestyle=style, alpha=0.85, linewidth=1.4, label=label
+            epoch,
+            color=color,
+            linestyle=style,
+            alpha=0.85,
+            linewidth=1.4,
+            label=label,
         )
     ax1.set_xlabel("Epoch", fontsize=12)
     ax1.set_ylabel("Accuracy", fontsize=12)
-    ax1.set_title("Model Accuracy Over Training", fontsize=14, fontweight="bold")
+    ax1.set_title(
+        "Model Accuracy Over Training", fontsize=14, fontweight="bold"
+    )
     _dedupe_legend(ax1)
     ax1.legend(loc="lower right", fontsize=8)
     ax1.grid(True, alpha=0.3)
@@ -884,12 +943,29 @@ def generate_learning_curves_from_logs():
 
     # Loss subplot
     ax2.plot(
-        train_x, train_loss, "b-o", label="Training Loss", linewidth=1.6, markersize=3
+        train_x,
+        train_loss,
+        "b-o",
+        label="Training Loss",
+        linewidth=1.6,
+        markersize=3,
     )
-    ax2.plot(val_x, val_loss, "r-o", label="Validation Loss", linewidth=2, markersize=3)
+    ax2.plot(
+        val_x,
+        val_loss,
+        "r-o",
+        label="Validation Loss",
+        linewidth=2,
+        markersize=3,
+    )
     for epoch, color, style, label in all_markers:
         ax2.axvline(
-            epoch, color=color, linestyle=style, alpha=0.85, linewidth=1.4, label=label
+            epoch,
+            color=color,
+            linestyle=style,
+            alpha=0.85,
+            linewidth=1.4,
+            label=label,
         )
     ax2.set_xlabel("Epoch", fontsize=12)
     ax2.set_ylabel("Loss", fontsize=12)
@@ -962,7 +1038,12 @@ def generate_learning_curves_from_logs():
 
     for epoch, color, style, label in all_markers:
         ax_left.axvline(
-            epoch, color=color, linestyle=style, alpha=0.55, linewidth=1.1, label=label
+            epoch,
+            color=color,
+            linestyle=style,
+            alpha=0.55,
+            linewidth=1.1,
+            label=label,
         )
 
     if lr_x and lr_values:
@@ -995,7 +1076,9 @@ def generate_learning_curves_from_logs():
         _dedupe_legend(ax_left)
         ax_left.legend(loc="lower right", fontsize=8)
 
-    ax_left.set_title("Training Timeline Overview", fontsize=14, fontweight="bold")
+    ax_left.set_title(
+        "Training Timeline Overview", fontsize=14, fontweight="bold"
+    )
     plt.tight_layout()
     plt.savefig(
         os.path.join(FIGURE_OUTPUT_DIR, "training_timeline_overview.png"),
@@ -1017,7 +1100,9 @@ def generate_model_architecture_diagram():
 
     if _MODEL_PATH is None:
         path_candidates = (
-            [MODEL_PATH_OVERRIDE] if MODEL_PATH_OVERRIDE else [FINAL_MODEL_PATH]
+            [MODEL_PATH_OVERRIDE]
+            if MODEL_PATH_OVERRIDE
+            else [FINAL_MODEL_PATH]
         )
         _MODEL_PATH = resolve_keras_model_path(path_candidates)
 
@@ -1025,7 +1110,11 @@ def generate_model_architecture_diagram():
 
     # Check if this is a DINO model or EfficientNet model
     # DINOv3 uses "refined" model; EfficientNet uses "b0", "b1", "s" in path
-    if "refined" in model_path_lower or "dino" in model_path_lower or "vit" in model_path_lower:
+    if (
+        "refined" in model_path_lower
+        or "dino" in model_path_lower
+        or "vit" in model_path_lower
+    ):
         _generate_dinov3_architecture()
     else:
         _generate_efficientnetv2_architecture()
@@ -1137,7 +1226,9 @@ def _generate_dinov3_architecture():
         "Training: 5+10→10→30 epochs | Self-supervised ViT with progressive unfreezing",
         fontsize=12.5,
         ha="center",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.75),
+        bbox=dict(
+            boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.75
+        ),
         linespacing=1.3,
     )
 
@@ -1218,7 +1309,9 @@ def _generate_efficientnetv2_architecture():
         f"MBConv backbone + {head_activation} classifier head",
         fontsize=12,
         ha="center",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.6),
+        bbox=dict(
+            boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.6
+        ),
     )
 
     plt.tight_layout(pad=0.3)
@@ -1240,7 +1333,9 @@ def generate_sample_predictions():
     global _MODEL_PATH
     if _MODEL_PATH is None:
         path_candidates = (
-            [MODEL_PATH_OVERRIDE] if MODEL_PATH_OVERRIDE else [FINAL_MODEL_PATH]
+            [MODEL_PATH_OVERRIDE]
+            if MODEL_PATH_OVERRIDE
+            else [FINAL_MODEL_PATH]
         )
         _MODEL_PATH = resolve_keras_model_path(path_candidates)
     model = _load_model_robust(_MODEL_PATH)
@@ -1256,14 +1351,18 @@ def generate_sample_predictions():
         seed=42,
     )
 
-    idx_to_class = {idx: name for idx, name in enumerate(sample_ds.class_names)}
+    idx_to_class = {
+        idx: name for idx, name in enumerate(sample_ds.class_names)
+    }
 
     fig, axes = plt.subplots(3, 4, figsize=(16, 12))
     axes = axes.flatten()
 
     for i, (img_batch, label_batch) in enumerate(sample_ds.take(12)):
         pred = model.predict(
-            preprocess_batch_for_model_tf(img_batch, backbone_name=backbone_name),
+            preprocess_batch_for_model_tf(
+                img_batch, backbone_name=backbone_name
+            ),
             verbose=0,
         )
         pred_class = int(np.argmax(pred))
@@ -1273,7 +1372,9 @@ def generate_sample_predictions():
         display_img = img_batch.numpy()[0].astype(np.uint8)
         axes[i].imshow(display_img)
 
-        pred_name = idx_to_class[pred_class].replace("___", "\n").replace("_", " ")
+        pred_name = (
+            idx_to_class[pred_class].replace("___", "\n").replace("_", " ")
+        )
         color = "green" if pred_class == true_class else "red"
         axes[i].set_title(
             f"Pred: {pred_name}\n({confidence:.1f}%)", fontsize=8, color=color
@@ -1333,9 +1434,15 @@ def main():
             or "efficientnetv2" in model_path_lower
         ):
             # Try to determine B0 vs S variant from the path
-            if "efficientnetv2b0" in model_path_lower or "-b0" in model_path_lower:
+            if (
+                "efficientnetv2b0" in model_path_lower
+                or "-b0" in model_path_lower
+            ):
                 FIGURE_OUTPUT_DIR = backbone_plot_dir("EfficientNetV2-B0")
-            elif "efficientnetv2s" in model_path_lower or "-s" in model_path_lower:
+            elif (
+                "efficientnetv2s" in model_path_lower
+                or "-s" in model_path_lower
+            ):
                 FIGURE_OUTPUT_DIR = backbone_plot_dir("EfficientNetV2-S")
             else:
                 FIGURE_OUTPUT_DIR = backbone_plot_dir("EfficientNetV2")

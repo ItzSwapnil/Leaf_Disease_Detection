@@ -149,7 +149,11 @@ def _load_training_flow_batch(
     images_np, labels_np = next(flow)
     idx_to_class = {idx: name for name, idx in flow.class_indices.items()}
     class_names = [idx_to_class[i] for i in range(len(idx_to_class))]
-    return images_np.astype(np.float32), labels_np.astype(np.float32), class_names
+    return (
+        images_np.astype(np.float32),
+        labels_np.astype(np.float32),
+        class_names,
+    )
 
 
 def _load_augmented_training_batch(
@@ -202,7 +206,11 @@ def _load_augmented_training_batch(
         )
         images_np, labels_np = next(aug_source)
 
-    return images_np.astype(np.float32), labels_np.astype(np.float32), class_names
+    return (
+        images_np.astype(np.float32),
+        labels_np.astype(np.float32),
+        class_names,
+    )
 
 
 def _to_display_image(image: np.ndarray) -> np.ndarray:
@@ -232,7 +240,9 @@ def _disease_name(label: str) -> str:
 
 
 def _slugify(text: str) -> str:
-    return "".join(ch.lower() if ch.isalnum() else "_" for ch in text).strip("_")
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in text).strip(
+        "_"
+    )
 
 
 def _load_same_class_batch(
@@ -309,7 +319,9 @@ def _predict_eval_split(
     label_batches = []
     for batch_images, batch_labels in ds:
         batch_preds = model.predict(
-            preprocess_batch_for_model_tf(batch_images, backbone_name=backbone_name),
+            preprocess_batch_for_model_tf(
+                batch_images, backbone_name=backbone_name
+            ),
             verbose=0,
         )
         pred_batches.append(batch_preds.astype(np.float32))
@@ -359,7 +371,9 @@ def _load_model():
             raise RuntimeError(
                 "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch."
             ) from exc
-        print("Detected KerasHub ViT compatibility mismatch; retrying with shim.")
+        print(
+            "Detected KerasHub ViT compatibility mismatch; retrying with shim."
+        )
         return load_model(model_path, custom_objects=custom_objects)
 
 
@@ -453,7 +467,9 @@ def _shape_descriptor(image: np.ndarray) -> tuple[float, float, float]:
 
 def _best_partner_indices(images: np.ndarray) -> np.ndarray:
     """Find nearest partner by shape and midrib angle (no self-pairs)."""
-    desc = np.array([_shape_descriptor(img) for img in images], dtype=np.float32)
+    desc = np.array(
+        [_shape_descriptor(img) for img in images], dtype=np.float32
+    )
     n = desc.shape[0]
     partners = np.zeros(n, dtype=np.int32)
     for i in range(n):
@@ -513,7 +529,9 @@ def _cutmix_with_partners(
 
 
 def _load_aligned_train_batch(batch_size: int = 8):
-    images_np, labels_np, class_names = _load_same_class_batch(batch_size=batch_size)
+    images_np, labels_np, class_names = _load_same_class_batch(
+        batch_size=batch_size
+    )
     return images_np, labels_np, class_names
 
 
@@ -577,7 +595,9 @@ def plot_mixup_examples() -> None:
     for ax, image, target in zip(axes.flat, mix_images, mix_labels):
         ax.imshow(_to_display_image(image))
         pred_idx = int(np.argmax(target))
-        ax.set_title(f"MixUp target: {_class_name(class_names, pred_idx)}", fontsize=11)
+        ax.set_title(
+            f"MixUp target: {_class_name(class_names, pred_idx)}", fontsize=11
+        )
         ax.set_xticks([])
         ax.set_yticks([])
     _save(fig, "mixup.png")
@@ -623,7 +643,10 @@ def plot_cutout_examples() -> None:
 def plot_label_smoothing() -> None:
     flow = _train_flow_for_labels(batch_size=256)
     class_names = [
-        name for name, _ in sorted(flow.class_indices.items(), key=lambda item: item[1])
+        name
+        for name, _ in sorted(
+            flow.class_indices.items(), key=lambda item: item[1]
+        )
     ]
     class_ids = np.asarray(flow.classes, dtype=np.int32)
     num_classes = len(class_names)
@@ -662,7 +685,9 @@ def plot_label_smoothing() -> None:
         fontsize=7,
     )
     ax.set_ylabel("Mean target probability")
-    ax.set_title(f"Label smoothing on full training labels (epsilon={epsilon:.3f})")
+    ax.set_title(
+        f"Label smoothing on full training labels (epsilon={epsilon:.3f})"
+    )
     ax.legend(frameon=False)
     _save(fig, "label_smoothing.png")
 
@@ -671,7 +696,9 @@ def plot_calibration_curve() -> None:
     model = _load_model()
     predictions, labels, _ = _predict_eval_split(model, VAL_DIR, batch_size=32)
     confidences = predictions.max(axis=1)
-    correct = (predictions.argmax(axis=1) == labels.argmax(axis=1)).astype(np.float32)
+    correct = (predictions.argmax(axis=1) == labels.argmax(axis=1)).astype(
+        np.float32
+    )
 
     bins = np.linspace(0.0, 1.0, 11)
     bin_ids = np.digitize(confidences, bins, right=True)
@@ -688,11 +715,21 @@ def plot_calibration_curve() -> None:
 
     fig, ax = plt.subplots(figsize=(10, 10))
     ax.plot([0, 1], [0, 1], linestyle="--", color="#666666", linewidth=1.5)
-    ax.plot(centers, avg_acc, marker="o", label="Empirical accuracy", color="#2a9d8f")
-    ax.plot(centers, avg_conf, marker="s", label="Mean confidence", color="#e76f51")
+    ax.plot(
+        centers,
+        avg_acc,
+        marker="o",
+        label="Empirical accuracy",
+        color="#2a9d8f",
+    )
+    ax.plot(
+        centers, avg_conf, marker="s", label="Mean confidence", color="#e76f51"
+    )
     ax.set_xlabel("Confidence")
     ax.set_ylabel("Accuracy")
-    ax.set_title("Validation calibration curve: confidence vs empirical accuracy")
+    ax.set_title(
+        "Validation calibration curve: confidence vs empirical accuracy"
+    )
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1.2)
     ax.legend(frameon=False)
@@ -710,12 +747,16 @@ def plot_roc_pr_per_class() -> None:
 
     for crop in crop_names:
         class_indices = [
-            index for index, name in enumerate(class_names) if _crop_name(name) == crop
+            index
+            for index, name in enumerate(class_names)
+            if _crop_name(name) == crop
         ]
         if not class_indices:
             continue
 
-        palette = sns.color_palette("tab20", n_colors=max(3, len(class_indices)))
+        palette = sns.color_palette(
+            "tab20", n_colors=max(3, len(class_indices))
+        )
         curves = []
         for color_index, class_index in enumerate(class_indices):
             truth = y_true[:, class_index]
@@ -749,7 +790,12 @@ def plot_roc_pr_per_class() -> None:
         fig_width = 11 + max(0, len(curves) - 4) * 0.4
         fig, ax = plt.subplots(figsize=(fig_width, 8.5))
         ax.plot(
-            [0, 1], [0, 1], linestyle="--", linewidth=1.2, color="#8e8e8e", alpha=0.8
+            [0, 1],
+            [0, 1],
+            linestyle="--",
+            linewidth=1.2,
+            color="#8e8e8e",
+            alpha=0.8,
         )
 
         for curve in curves:
@@ -761,7 +807,9 @@ def plot_roc_pr_per_class() -> None:
                 label=f"{curve['label']} (AUC={curve['auc']:.4f})",
             )
 
-        ax.set_title(f"ROC curves for {crop} classes", fontsize=15, fontweight="bold")
+        ax.set_title(
+            f"ROC curves for {crop} classes", fontsize=15, fontweight="bold"
+        )
         ax.set_xlabel("False Positive Rate")
         ax.set_ylabel("True Positive Rate")
         ax.set_xlim(0, 1)
@@ -794,7 +842,10 @@ def plot_roc_pr_per_class() -> None:
     n_cols = 3
     n_rows = int(math.ceil(n_crops / n_cols))
     fig, axes = plt.subplots(
-        n_rows, n_cols, figsize=(n_cols * 9, n_rows * 7), constrained_layout=True
+        n_rows,
+        n_cols,
+        figsize=(n_cols * 9, n_rows * 7),
+        constrained_layout=True,
     )
     axes = np.asarray(axes).reshape(-1)
 
@@ -805,7 +856,12 @@ def plot_roc_pr_per_class() -> None:
         axis = axes[ax_idx]
 
         axis.plot(
-            [0, 1], [0, 1], linestyle="--", linewidth=1.0, color="#8e8e8e", alpha=0.8
+            [0, 1],
+            [0, 1],
+            linestyle="--",
+            linewidth=1.0,
+            color="#8e8e8e",
+            alpha=0.8,
         )
         for curve in curves:
             axis.plot(
@@ -859,7 +915,9 @@ def plot_training_phase_timeline() -> None:
     latest_runs = {}
     if latest_runs_path.exists():
         try:
-            latest_runs = json.loads(latest_runs_path.read_text(encoding="utf-8"))
+            latest_runs = json.loads(
+                latest_runs_path.read_text(encoding="utf-8")
+            )
         except Exception:
             latest_runs = {}
 
@@ -876,7 +934,10 @@ def plot_training_phase_timeline() -> None:
             "fine_tune",
             "Fine-tuning",
             logs_dir / "fine_tune_history.csv",
-            int((latest_runs.get("fine_tune") or {}).get("fine_tune_epochs") or 0),
+            int(
+                (latest_runs.get("fine_tune") or {}).get("fine_tune_epochs")
+                or 0
+            ),
             1,
         ),
         (
@@ -909,7 +970,9 @@ def plot_training_phase_timeline() -> None:
                                 "phase": phase_key,
                                 "phase_label": phase_label,
                                 "accuracy": float(row.get("accuracy", "nan")),
-                                "val_accuracy": float(row.get("val_accuracy", "nan")),
+                                "val_accuracy": float(
+                                    row.get("val_accuracy", "nan")
+                                ),
                                 "loss": float(row.get("loss", "nan")),
                                 "val_loss": float(row.get("val_loss", "nan")),
                             }
@@ -943,9 +1006,19 @@ def plot_training_phase_timeline() -> None:
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     ax1.plot(
-        epochs, val_acc, color="#d62828", linewidth=2.2, label="Validation Accuracy"
+        epochs,
+        val_acc,
+        color="#d62828",
+        linewidth=2.2,
+        label="Validation Accuracy",
     )
-    ax2.plot(epochs, val_loss, color="#264653", linewidth=2.2, label="Validation Loss")
+    ax2.plot(
+        epochs,
+        val_loss,
+        color="#264653",
+        linewidth=2.2,
+        label="Validation Loss",
+    )
 
     phase_start_colors = {
         "train": "#577590",
@@ -1030,7 +1103,9 @@ def plot_training_phase_timeline() -> None:
 
 def main() -> None:
     global MODEL_PATH_OVERRIDE
-    parser = argparse.ArgumentParser(description="Generate additional figures.")
+    parser = argparse.ArgumentParser(
+        description="Generate additional figures."
+    )
     parser.add_argument(
         "--model-path",
         default=None,

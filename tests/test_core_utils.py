@@ -11,11 +11,15 @@ import model_paths
 from training_progress import ProgressEmitter
 
 
-def test_resolve_keras_model_path_prefers_existing_preferred(tmp_path, monkeypatch):
+def test_resolve_keras_model_path_prefers_existing_preferred(
+    tmp_path, monkeypatch
+):
     preferred = tmp_path / "preferred.keras"
     preferred.write_text("x", encoding="utf-8")
 
-    monkeypatch.setattr(model_paths, "FINAL_MODEL_PATH", str(tmp_path / "final.keras"))
+    monkeypatch.setattr(
+        model_paths, "FINAL_MODEL_PATH", str(tmp_path / "final.keras")
+    )
     monkeypatch.setattr(
         model_paths, "CHECKPOINT_PATH", str(tmp_path / "checkpoint.keras")
     )
@@ -37,7 +41,9 @@ def test_resolve_keras_model_path_falls_back_to_discovered_sorted(
         model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras")
     )
     monkeypatch.setattr(
-        model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras")
+        model_paths,
+        "CHECKPOINT_PATH",
+        str(tmp_path / "missing_checkpoint.keras"),
     )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
 
@@ -45,7 +51,9 @@ def test_resolve_keras_model_path_falls_back_to_discovered_sorted(
     assert Path(resolved).name == "a_first.keras"
 
 
-def test_resolve_keras_model_path_raises_when_nothing_exists(tmp_path, monkeypatch):
+def test_resolve_keras_model_path_raises_when_nothing_exists(
+    tmp_path, monkeypatch
+):
     models_dir = tmp_path / "models"
     models_dir.mkdir()
 
@@ -53,7 +61,9 @@ def test_resolve_keras_model_path_raises_when_nothing_exists(tmp_path, monkeypat
         model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras")
     )
     monkeypatch.setattr(
-        model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras")
+        model_paths,
+        "CHECKPOINT_PATH",
+        str(tmp_path / "missing_checkpoint.keras"),
     )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
 
@@ -70,7 +80,9 @@ def test_resolve_keras_model_path_discover_h5(tmp_path, monkeypatch):
         model_paths, "FINAL_MODEL_PATH", str(tmp_path / "missing_final.keras")
     )
     monkeypatch.setattr(
-        model_paths, "CHECKPOINT_PATH", str(tmp_path / "missing_checkpoint.keras")
+        model_paths,
+        "CHECKPOINT_PATH",
+        str(tmp_path / "missing_checkpoint.keras"),
     )
     monkeypatch.setattr(model_paths, "MODELS_DIR", str(models_dir))
 

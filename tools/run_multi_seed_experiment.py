@@ -36,7 +36,9 @@ def main() -> int:
         default=DEFAULT_SEEDS,
         help="List of integer seeds (default: 42 123 999 2024 7).",
     )
-    parser.add_argument("--skip-train", action="store_true", help="Skip train_model.py")
+    parser.add_argument(
+        "--skip-train", action="store_true", help="Skip train_model.py"
+    )
     parser.add_argument(
         "--skip-fine-tune",
         action="store_true",
@@ -83,14 +85,19 @@ def main() -> int:
             "seed": int(seed),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "model_path": report.get("model_path"),
-            "validation_accuracy": _collect_metric(report, "validation_accuracy"),
+            "validation_accuracy": _collect_metric(
+                report, "validation_accuracy"
+            ),
             "macro_precision": _collect_metric(report, "macro_precision"),
             "macro_recall": _collect_metric(report, "macro_recall"),
             "macro_f1": _collect_metric(report, "macro_f1"),
             "test_accuracy": _collect_metric(report, "test_accuracy"),
             "temperature": float(
                 (
-                    (report.get("calibration") or {}).get("temperature_scaling") or {}
+                    (report.get("calibration") or {}).get(
+                        "temperature_scaling"
+                    )
+                    or {}
                 ).get("temperature", 1.0)
             ),
         }
@@ -101,15 +108,21 @@ def main() -> int:
         print(f"Saved {seed_path.relative_to(root)}")
 
     f1_values = [entry["macro_f1"] for entry in per_seed_metrics]
-    accuracy_values = [entry["validation_accuracy"] for entry in per_seed_metrics]
+    accuracy_values = [
+        entry["validation_accuracy"] for entry in per_seed_metrics
+    ]
 
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "seeds": [int(seed) for seed in args.seeds],
         "num_runs": int(len(per_seed_metrics)),
         "aggregate": {
-            "validation_accuracy_mean": float(statistics.mean(accuracy_values)),
-            "validation_accuracy_std": float(statistics.pstdev(accuracy_values)),
+            "validation_accuracy_mean": float(
+                statistics.mean(accuracy_values)
+            ),
+            "validation_accuracy_std": float(
+                statistics.pstdev(accuracy_values)
+            ),
             "macro_f1_mean": float(statistics.mean(f1_values)),
             "macro_f1_std": float(statistics.pstdev(f1_values)),
         },

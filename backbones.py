@@ -8,8 +8,9 @@ from tensorflow.keras.applications import (
     EfficientNetV2B1,
     EfficientNetV2B2,
     EfficientNetV2B3,
-    EfficientNetV2M,
     EfficientNetV2L,
+    EfficientNetV2M,
+    EfficientNetV2S,
 )
 from tensorflow.keras.applications.efficientnet_v2 import (
     preprocess_input as effnetv2_preprocess_input,
@@ -25,7 +26,9 @@ def _preprocess_dinov3(images: np.ndarray) -> np.ndarray:
 
 
 def _build_dinov3_backbone(
-    input_shape=(224, 224, 3), include_top: bool = False, weights: str = "imagenet"
+    input_shape=(224, 224, 3),
+    include_top: bool = False,
+    weights: str = "imagenet",
 ):
     """Best-effort DINOv3 loader via KerasHub presets (experimental)."""
     del include_top, weights  # Not used by preset-based backbones.
@@ -82,7 +85,10 @@ def _build_dinov3_backbone(
 
     if last_error is not None:
         error_text = str(last_error).lower()
-        if "repository not found" in error_text or "unauthorized" in error_text:
+        if (
+            "repository not found" in error_text
+            or "unauthorized" in error_text
+        ):
             raise RuntimeError(
                 "The selected Hugging Face preset is unavailable or requires auth. "
                 "Use a built-in preset such as LEAF_DINOV3_PRESET=vit_base_patch16_224_imagenet."
@@ -100,6 +106,7 @@ BACKBONE_REGISTRY = {
     "EfficientNetV2B1": EfficientNetV2B1,
     "EfficientNetV2B2": EfficientNetV2B2,
     "EfficientNetV2B3": EfficientNetV2B3,
+    "EfficientNetV2S": EfficientNetV2S,
     "EfficientNetV2M": EfficientNetV2M,
     "EfficientNetV2L": EfficientNetV2L,
     "DINOv3": _build_dinov3_backbone,

@@ -23,7 +23,9 @@ def test_trim_train_metrics_to_restore_epoch_trims_tail():
         val_loss=[1.1, 0.9, 0.8, 0.7],
     )
 
-    trimmed, effective_len, dropped = trim_train_metrics_to_restore_epoch(train, [3])
+    trimmed, effective_len, dropped = trim_train_metrics_to_restore_epoch(
+        train, [3]
+    )
 
     assert effective_len == 3
     assert dropped == 1
@@ -39,7 +41,9 @@ def test_trim_train_metrics_to_restore_epoch_ignores_out_of_range_restore():
         val_loss=[1.1, 1.0, 0.9],
     )
 
-    trimmed, effective_len, dropped = trim_train_metrics_to_restore_epoch(train, [99])
+    trimmed, effective_len, dropped = trim_train_metrics_to_restore_epoch(
+        train, [99]
+    )
 
     assert effective_len == 3
     assert dropped == 0

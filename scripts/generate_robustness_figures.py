@@ -34,10 +34,30 @@ def generate_gaussian_blur_degradation(output_dir: str = None):
 
     blur_kernels = np.array([0, 1, 2, 3, 5, 7, 9, 13, 15])
     accuracies = np.array(
-        [0.9909, 0.9905, 0.9901, 0.9897, 0.9889, 0.9872, 0.9851, 0.9823, 0.9780]
+        [
+            0.9909,
+            0.9905,
+            0.9901,
+            0.9897,
+            0.9889,
+            0.9872,
+            0.9851,
+            0.9823,
+            0.9780,
+        ]
     )
     f1_scores = np.array(
-        [0.9831, 0.9827, 0.9823, 0.9818, 0.9809, 0.9791, 0.9769, 0.9739, 0.9695]
+        [
+            0.9831,
+            0.9827,
+            0.9823,
+            0.9818,
+            0.9809,
+            0.9791,
+            0.9769,
+            0.9739,
+            0.9695,
+        ]
     )
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -59,10 +79,20 @@ def generate_gaussian_blur_degradation(output_dir: str = None):
         label="Macro F1",
         color="#e74c3c",
     )
-    ax.axhline(y=98.5, color="gray", linestyle="--", alpha=0.5, label="98.5% threshold")
-    ax.set_xlabel("Gaussian Blur Kernel Size (pixels)", fontsize=12, fontweight="bold")
+    ax.axhline(
+        y=98.5,
+        color="gray",
+        linestyle="--",
+        alpha=0.5,
+        label="98.5% threshold",
+    )
+    ax.set_xlabel(
+        "Gaussian Blur Kernel Size (pixels)", fontsize=12, fontweight="bold"
+    )
     ax.set_ylabel("Metric (%)", fontsize=12, fontweight="bold")
-    ax.set_title("Robustness to Gaussian Motion Blur", fontsize=14, fontweight="bold")
+    ax.set_title(
+        "Robustness to Gaussian Motion Blur", fontsize=14, fontweight="bold"
+    )
     ax.legend(fontsize=11, loc="best")
     ax.grid(True, alpha=0.3)
     ax.set_ylim([96, 100.5])
@@ -77,7 +107,9 @@ def generate_gaussian_blur_degradation(output_dir: str = None):
 
 
 def generate_brightness_contrast_sweep(output_dir: str = None):
-    print("\n[Robustness] Generating brightness/contrast sensitivity matrix...")
+    print(
+        "\n[Robustness] Generating brightness/contrast sensitivity matrix..."
+    )
     if output_dir is None:
         output_dir = PLOTS_DIR
 
@@ -107,7 +139,9 @@ def generate_brightness_contrast_sweep(output_dir: str = None):
     ax.set_xlabel("Contrast Factor", fontsize=12, fontweight="bold")
     ax.set_ylabel("Brightness Factor", fontsize=12, fontweight="bold")
     ax.set_title(
-        "Accuracy Under Variable Lighting Conditions", fontsize=14, fontweight="bold"
+        "Accuracy Under Variable Lighting Conditions",
+        fontsize=14,
+        fontweight="bold",
     )
     plt.tight_layout()
     plt.savefig(
@@ -126,10 +160,32 @@ def generate_jpeg_compression_sweep(output_dir: str = None):
 
     jpeg_qualities = np.array([100, 95, 90, 85, 75, 60, 45, 30, 20, 10])
     accuracies = np.array(
-        [0.9909, 0.9903, 0.9895, 0.9887, 0.9870, 0.9801, 0.9721, 0.9612, 0.9485, 0.9610]
+        [
+            0.9909,
+            0.9903,
+            0.9895,
+            0.9887,
+            0.9870,
+            0.9801,
+            0.9721,
+            0.9612,
+            0.9485,
+            0.9610,
+        ]
     )
     f1_scores = np.array(
-        [0.9831, 0.9825, 0.9817, 0.9809, 0.9791, 0.9721, 0.9641, 0.9532, 0.9405, 0.9530]
+        [
+            0.9831,
+            0.9825,
+            0.9817,
+            0.9809,
+            0.9791,
+            0.9721,
+            0.9641,
+            0.9532,
+            0.9405,
+            0.9530,
+        ]
     )
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -152,11 +208,17 @@ def generate_jpeg_compression_sweep(output_dir: str = None):
         color="#f39c12",
     )
     ax.axvline(
-        x=75, color="gray", linestyle="--", alpha=0.5, label="Standard mobile quality"
+        x=75,
+        color="gray",
+        linestyle="--",
+        alpha=0.5,
+        label="Standard mobile quality",
     )
     ax.set_xlabel("JPEG Quality Factor", fontsize=12, fontweight="bold")
     ax.set_ylabel("Metric (%)", fontsize=12, fontweight="bold")
-    ax.set_title("Robustness to JPEG Compression", fontsize=14, fontweight="bold")
+    ax.set_title(
+        "Robustness to JPEG Compression", fontsize=14, fontweight="bold"
+    )
     ax.legend(fontsize=11, loc="best")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -176,10 +238,30 @@ def generate_occlusion_sensitivity(output_dir: str = None):
 
     occlusion_percentages = np.array([0, 5, 10, 15, 20, 25, 30, 40, 50])
     accuracies = np.array(
-        [0.9909, 0.9885, 0.9847, 0.9801, 0.9748, 0.9682, 0.9601, 0.9382, 0.9123]
+        [
+            0.9909,
+            0.9885,
+            0.9847,
+            0.9801,
+            0.9748,
+            0.9682,
+            0.9601,
+            0.9382,
+            0.9123,
+        ]
     )
     f1_scores = np.array(
-        [0.9831, 0.9807, 0.9768, 0.9721, 0.9667, 0.9600, 0.9517, 0.9297, 0.9037]
+        [
+            0.9831,
+            0.9807,
+            0.9768,
+            0.9721,
+            0.9667,
+            0.9600,
+            0.9517,
+            0.9297,
+            0.9037,
+        ]
     )
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -209,11 +291,17 @@ def generate_occlusion_sensitivity(output_dir: str = None):
         color="#e74c3c",
     )
     ax.axvline(
-        x=20, color="gray", linestyle="--", alpha=0.5, label="20% critical threshold"
+        x=20,
+        color="gray",
+        linestyle="--",
+        alpha=0.5,
+        label="20% critical threshold",
     )
     ax.set_xlabel("Occlusion Coverage (%)", fontsize=12, fontweight="bold")
     ax.set_ylabel("Metric (%)", fontsize=12, fontweight="bold")
-    ax.set_title("Robustness to Random Image Occlusion", fontsize=14, fontweight="bold")
+    ax.set_title(
+        "Robustness to Random Image Occlusion", fontsize=14, fontweight="bold"
+    )
     ax.legend(fontsize=11, loc="best")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()

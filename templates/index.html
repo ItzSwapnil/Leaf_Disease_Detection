@@ -958,6 +958,43 @@
                 <small>Choose which trained model file to use for this prediction request.</small>
             </div>
 
+            <div class="training-options-grid" style="margin-top: 12px;">
+                <div class="training-option">
+                    <label for="leafDetectionModeSelect">
+                        <span>Leaf detection stage</span>
+                    </label>
+                    <select id="leafDetectionModeSelect" class="model-select">
+                        <option value="auto" {% if default_leaf_detection_mode == 'auto' %}selected{% endif %}>Auto (model then heuristic)</option>
+                        <option value="model" {% if default_leaf_detection_mode == 'model' %}selected{% endif %}>Model only</option>
+                        <option value="heuristic" {% if default_leaf_detection_mode == 'heuristic' %}selected{% endif %}>Heuristic only</option>
+                        <option value="off" {% if default_leaf_detection_mode == 'off' %}selected{% endif %}>Disable stage</option>
+                    </select>
+                    <small>Control Stage-1 behavior directly from UI per prediction.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="backgroundRemovalToggle">
+                        <span>Stage-2 background removal</span>
+                    </label>
+                    <label class="archive-toggle" style="margin: 0;">
+                        <input type="checkbox" id="backgroundRemovalToggle" {% if default_use_background_removal %}checked{% endif %}>
+                        <span>Enable segmentation before classification</span>
+                    </label>
+                    <small>When enabled, the app crops the leaf region before classification.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="safetyGateToggle">
+                        <span>Stage-4 safety gate</span>
+                    </label>
+                    <label class="archive-toggle" style="margin: 0;">
+                        <input type="checkbox" id="safetyGateToggle" {% if default_use_safety_gate %}checked{% endif %}>
+                        <span>Enable confidence/OOD rejection</span>
+                    </label>
+                    <small>Disable only if you want raw model output without rejection rules.</small>
+                </div>
+            </div>
+
             <!-- Preview -->
             <div class="preview-section" id="previewSection">
                 <div class="preview-container">
@@ -1274,6 +1311,24 @@
             if (modelSelect && modelSelect.value) {
                 formData.append('model_name', modelSelect.value);
             }
+            const leafDetectionModeSelect = document.getElementById('leafDetectionModeSelect');
+            const backgroundRemovalToggle = document.getElementById('backgroundRemovalToggle');
+            const safetyGateToggle = document.getElementById('safetyGateToggle');
+
+            formData.append(
+                'leaf_detection_mode',
+                leafDetectionModeSelect && leafDetectionModeSelect.value
+                    ? leafDetectionModeSelect.value
+                    : 'auto'
+            );
+            formData.append(
+                'use_background_removal',
+                backgroundRemovalToggle && backgroundRemovalToggle.checked ? 'true' : 'false'
+            );
+            formData.append(
+                'use_safety_gate',
+                safetyGateToggle && safetyGateToggle.checked ? 'true' : 'false'
+            );
 
             try {
                 const response = await fetch('/predict', {

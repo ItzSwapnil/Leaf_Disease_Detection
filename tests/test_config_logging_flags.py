@@ -22,7 +22,9 @@ def test_logging_flags_default_latest_only(monkeypatch):
     assert cfg.SAVE_RUN_MANIFESTS is False
 
 
-def test_logging_flags_enable_archive_enables_manifests_by_default(monkeypatch):
+def test_logging_flags_enable_archive_enables_manifests_by_default(
+    monkeypatch,
+):
     monkeypatch.setenv("LEAF_SAVE_LOG_ARCHIVE", "1")
     monkeypatch.delenv("LEAF_SAVE_RUN_MANIFESTS", raising=False)
 

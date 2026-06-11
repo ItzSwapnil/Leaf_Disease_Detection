@@ -71,7 +71,12 @@ EVAL_BATCH_SIZE = 32
 
 
 def _load_model(path: str):
-    custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
+    from training_utils import HierarchicalLoss
+
+    custom_objects = {
+        "WarmupCosineSchedule": WarmupCosineSchedule,
+        "HierarchicalLoss": HierarchicalLoss,
+    }
     try:
         return load_model(path, custom_objects=custom_objects)
     except TypeError as exc:
@@ -119,7 +124,9 @@ def _patch_vit_layer_init_for_compat() -> bool:
 def _infer_backbone_from_model(model) -> str:
     """Best-effort backbone name from loaded model/layer names."""
     model_name = str(getattr(model, "name", "")).lower()
-    layer_names = [str(getattr(layer, "name", "")).lower() for layer in model.layers]
+    layer_names = [
+        str(getattr(layer, "name", "")).lower() for layer in model.layers
+    ]
     haystack = " ".join([model_name, *layer_names])
 
     if "dinov3" in haystack or "vit" in haystack:
@@ -151,7 +158,10 @@ def _dataset_from_directory(path: str, backbone_name: str | None = None):
         shuffle=False,
     )
     gen = ds.map(
-        lambda x, y: (preprocess_batch_for_model_tf(x, backbone_name=backbone_name), y),
+        lambda x, y: (
+            preprocess_batch_for_model_tf(x, backbone_name=backbone_name),
+            y,
+        ),
         num_parallel_calls=tf.data.AUTOTUNE,
     ).prefetch(tf.data.AUTOTUNE)
     return ds, gen
@@ -167,7 +177,9 @@ def _load_unlabeled_dataset(path: str, backbone_name: str | None = None):
         shuffle=False,
     )
     return ds.map(
-        lambda x: preprocess_batch_for_model_tf(x, backbone_name=backbone_name),
+        lambda x: preprocess_batch_for_model_tf(
+            x, backbone_name=backbone_name
+        ),
         num_parallel_calls=tf.data.AUTOTUNE,
     ).prefetch(tf.data.AUTOTUNE)
 
@@ -180,7 +192,9 @@ def _collect_label_indices(dataset) -> np.ndarray:
 def _take_dataset(dataset, max_samples: int):
     if max_samples <= 0:
         return dataset
-    batches = max(1, int(math.ceil(float(max_samples) / float(EVAL_BATCH_SIZE))))
+    batches = max(
+        1, int(math.ceil(float(max_samples) / float(EVAL_BATCH_SIZE)))
+    )
     return dataset.take(batches)
 
 
@@ -190,7 +204,9 @@ def _slice_to_limit(arr: np.ndarray, max_samples: int) -> np.ndarray:
     return arr[:max_samples]
 
 
-def _collect_dataset_arrays(dataset, max_samples: int) -> tuple[np.ndarray, np.ndarray]:
+def _collect_dataset_arrays(
+    dataset, max_samples: int
+) -> tuple[np.ndarray, np.ndarray]:
     images_parts = []
     labels_parts = []
     collected = 0
@@ -198,11 +214,15 @@ def _collect_dataset_arrays(dataset, max_samples: int) -> tuple[np.ndarray, np.n
 
     for batch_images, batch_labels in dataset:
         images_np = np.asarray(
-            batch_images.numpy() if hasattr(batch_images, "numpy") else batch_images,
+            batch_images.numpy()
+            if hasattr(batch_images, "numpy")
+            else batch_images,
             dtype=np.float32,
         )
         labels_np = np.asarray(
-            batch_labels.numpy() if hasattr(batch_labels, "numpy") else batch_labels,
+            batch_labels.numpy()
+            if hasattr(batch_labels, "numpy")
+            else batch_labels,
             dtype=np.float32,
         )
 
@@ -237,7 +257,9 @@ def _build_logits_model(model):
     if not model.layers:
         return None
     last_layer = model.layers[-1]
-    activation_name = getattr(getattr(last_layer, "activation", None), "__name__", "")
+    activation_name = getattr(
+        getattr(last_layer, "activation", None), "__name__", ""
+    )
     if activation_name == "softmax":
         return keras.Model(inputs=model.input, outputs=last_layer.input)
     return None
@@ -255,7 +277,9 @@ def _predict_probs_and_logits(model, dataset):
     if logits_model is None:
         logits = np.log(np.clip(probs, 1e-8, 1.0))
         return probs, logits
-    logits = np.asarray(logits_model.predict(dataset, verbose=0), dtype=np.float64)
+    logits = np.asarray(
+        logits_model.predict(dataset, verbose=0), dtype=np.float64
+    )
     if logits.ndim != 2:
         logits = logits.reshape((logits.shape[0], -1))
     return probs, logits
@@ -306,7 +330,9 @@ def _top_confused_pairs(
     return pairs
 
 
-def _compute_bootstrap_intervals(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+def _compute_bootstrap_intervals(
+    y_true: np.ndarray, y_pred: np.ndarray
+) -> dict:
     return {
         "accuracy": bootstrap_ci(
             lambda yt, yp: float(accuracy_score(yt, yp)),
@@ -343,7 +369,9 @@ def _predict_features(feature_model, dataset, max_samples: int) -> np.ndarray:
     if feature_model is None:
         return np.empty((0, 0), dtype=np.float64)
     subset = _take_dataset(dataset, max_samples)
-    features = np.asarray(feature_model.predict(subset, verbose=0), dtype=np.float64)
+    features = np.asarray(
+        feature_model.predict(subset, verbose=0), dtype=np.float64
+    )
     if features.ndim != 2:
         features = features.reshape((features.shape[0], -1))
     return _slice_to_limit(features, max_samples)
@@ -387,7 +415,10 @@ def _compute_ood_report(
     try:
         ood_gen = _load_unlabeled_dataset(OOD_DIR, backbone_name=backbone_name)
     except Exception as exc:
-        return {"status": "unavailable", "reason": f"Failed to load OOD data: {exc}"}
+        return {
+            "status": "unavailable",
+            "reason": f"Failed to load OOD data: {exc}",
+        }
 
     if OOD_MAX_SAMPLES > 0:
         id_probs = _slice_to_limit(val_probs, OOD_MAX_SAMPLES)
@@ -439,7 +470,9 @@ def _compute_ood_report(
     ood_features = _predict_features(
         feature_model, ood_gen, max_samples=ood_probs.shape[0]
     )
-    means, inv_cov = _fit_mahalanobis(id_features, id_labels, reg=OOD_MAHALANOBIS_REG)
+    means, inv_cov = _fit_mahalanobis(
+        id_features, id_labels, reg=OOD_MAHALANOBIS_REG
+    )
 
     id_dist = _mahalanobis_min_distance(id_features, means, inv_cov)
     ood_dist = _mahalanobis_min_distance(ood_features, means, inv_cov)
@@ -462,7 +495,9 @@ def _compute_ood_report(
     ood_combo = 0.5 * ((ood_msp_score - msp_mu) / msp_sigma) + 0.5 * (
         (ood_dist - md_mu) / md_sigma
     )
-    combo_auroc = float(roc_auc_score(y_ood, np.concatenate([id_combo, ood_combo])))
+    combo_auroc = float(
+        roc_auc_score(y_ood, np.concatenate([id_combo, ood_combo]))
+    )
 
     return {
         "status": "ok",
@@ -488,7 +523,9 @@ def _compute_ood_report(
     }
 
 
-def _compute_mc_dropout_report(model, val_gen, y_true: np.ndarray) -> dict | None:
+def _compute_mc_dropout_report(
+    model, val_gen, y_true: np.ndarray
+) -> dict | None:
     if not MC_DROPOUT_ENABLED or MC_DROPOUT_PASSES <= 0:
         return None
 
@@ -498,7 +535,10 @@ def _compute_mc_dropout_report(model, val_gen, y_true: np.ndarray) -> dict | Non
         probs_parts = []
         for batch_images, _ in subset:
             probs_parts.append(
-                np.asarray(model(batch_images, training=True).numpy(), dtype=np.float64)
+                np.asarray(
+                    model(batch_images, training=True).numpy(),
+                    dtype=np.float64,
+                )
             )
         if not probs_parts:
             return None
@@ -521,7 +561,9 @@ def _compute_mc_dropout_report(model, val_gen, y_true: np.ndarray) -> dict | Non
         "mean_variance_correct": float(np.mean(correct_var))
         if correct_var.size
         else 0.0,
-        "mean_variance_incorrect": float(np.mean(wrong_var)) if wrong_var.size else 0.0,
+        "mean_variance_incorrect": float(np.mean(wrong_var))
+        if wrong_var.size
+        else 0.0,
         "mean_entropy_correct_bits": float(np.mean(entropy[correct]))
         if np.any(correct)
         else 0.0,
@@ -585,7 +627,9 @@ def _save_evaluation_report(report: dict):
 
     metrics = _dict_or_empty(report.get("metrics"))
     calibration = _dict_or_empty(report.get("calibration"))
-    temperature_scaling = _dict_or_empty(calibration.get("temperature_scaling"))
+    temperature_scaling = _dict_or_empty(
+        calibration.get("temperature_scaling")
+    )
     uncalibrated = _dict_or_empty(calibration.get("uncalibrated"))
     calibrated = _dict_or_empty(calibration.get("temperature_scaled"))
     rejection = _dict_or_empty(report.get("rejection"))
@@ -716,7 +760,9 @@ def main():
     else:
         print(f"Backbone-locked preprocessing: {detected_backbone}")
 
-    val_ds, val_gen = _dataset_from_directory(VAL_DIR, backbone_name=detected_backbone)
+    val_ds, val_gen = _dataset_from_directory(
+        VAL_DIR, backbone_name=detected_backbone
+    )
     y_true = _collect_label_indices(val_ds)
     class_names = list(val_ds.class_names)
 
@@ -738,7 +784,9 @@ def main():
         print("\n--- Evaluating model on test set ---")
         test_metrics = model.evaluate(test_gen, verbose=1, return_dict=True)
         test_loss = float(test_metrics.get("loss", 0.0))
-        test_acc = float(test_metrics.get("accuracy", test_metrics.get("acc", 0.0)))
+        test_acc = float(
+            test_metrics.get("accuracy", test_metrics.get("acc", 0.0))
+        )
 
     val_probs, val_logits = _predict_probs_and_logits(model, val_gen)
     y_pred = np.argmax(val_probs, axis=1)
@@ -777,13 +825,21 @@ def main():
         scaled_probs, y_true, n_bins=CALIBRATION_BINS
     )
 
-    reliability_uncal_path = os.path.join("plots", "reliability_uncalibrated.png")
-    reliability_cal_path = os.path.join("plots", "reliability_temperature_scaled.png")
-    plot_reliability_diagram(
-        uncalibrated, reliability_uncal_path, title="Reliability (Uncalibrated)"
+    reliability_uncal_path = os.path.join(
+        "plots", "reliability_uncalibrated.png"
+    )
+    reliability_cal_path = os.path.join(
+        "plots", "reliability_temperature_scaled.png"
     )
     plot_reliability_diagram(
-        calibrated, reliability_cal_path, title="Reliability (Temperature Scaled)"
+        uncalibrated,
+        reliability_uncal_path,
+        title="Reliability (Uncalibrated)",
+    )
+    plot_reliability_diagram(
+        calibrated,
+        reliability_cal_path,
+        title="Reliability (Temperature Scaled)",
     )
 
     bootstrap_intervals = _compute_bootstrap_intervals(y_true, y_pred)
@@ -828,7 +884,9 @@ def main():
                 ),
                 noise_sigmas=tuple(float(v) for v in ROBUSTNESS_NOISE_SIGMAS),
                 fog_levels=tuple(float(v) for v in ROBUSTNESS_FOG_LEVELS),
-                occlusion_fracs=tuple(float(v) for v in ROBUSTNESS_OCCLUSION_FRACS),
+                occlusion_fracs=tuple(
+                    float(v) for v in ROBUSTNESS_OCCLUSION_FRACS
+                ),
                 seed=ROBUSTNESS_SEED,
             )
 
@@ -845,7 +903,9 @@ def main():
         except Exception as exc:
             mcnemar_report = {"status": "error", "reason": str(exc)}
 
-    ensemble_report = _evaluate_ensemble(list(ENSEMBLE_MODEL_PATHS), val_gen, y_true)
+    ensemble_report = _evaluate_ensemble(
+        list(ENSEMBLE_MODEL_PATHS), val_gen, y_true
+    )
 
     per_class_metrics = {}
     for class_name in class_names:

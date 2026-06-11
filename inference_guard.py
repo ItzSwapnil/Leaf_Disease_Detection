@@ -12,7 +12,8 @@ def assess_leaf_likelihood(img_path: str, img_size: int) -> dict[str, Any]:
     try:
         with Image.open(img_path) as img:
             arr = np.asarray(
-                img.convert("RGB").resize((img_size, img_size)), dtype=np.float32
+                img.convert("RGB").resize((img_size, img_size)),
+                dtype=np.float32,
             )
 
         if arr.size == 0:
@@ -36,23 +37,36 @@ def assess_leaf_likelihood(img_path: str, img_size: int) -> dict[str, Any]:
         g_mask = maxc == g
         b_mask = maxc == b
 
-        hue[r_mask] = (60.0 * ((g[r_mask] - b[r_mask]) / delta[r_mask]) + 360.0) % 360.0
-        hue[g_mask] = (60.0 * ((b[g_mask] - r[g_mask]) / delta[g_mask]) + 120.0) % 360.0
-        hue[b_mask] = (60.0 * ((r[b_mask] - g[b_mask]) / delta[b_mask]) + 240.0) % 360.0
+        hue[r_mask] = (
+            60.0 * ((g[r_mask] - b[r_mask]) / delta[r_mask]) + 360.0
+        ) % 360.0
+        hue[g_mask] = (
+            60.0 * ((b[g_mask] - r[g_mask]) / delta[g_mask]) + 120.0
+        ) % 360.0
+        hue[b_mask] = (
+            60.0 * ((r[b_mask] - g[b_mask]) / delta[b_mask]) + 240.0
+        ) % 360.0
 
-        sat = np.where(maxc <= 0.0, 0.0, delta / maxc)
+        sat = np.divide(
+            delta,
+            maxc,
+            out=np.zeros_like(delta),
+            where=maxc > 0.0,
+        )
         val = maxc
 
-        vegetation_mask = (hue >= 20.0) & (hue <= 140.0) & (sat >= 0.15) & (val >= 0.15)
+        vegetation_mask = (
+            (hue >= 15.0) & (hue <= 150.0) & (sat >= 0.12) & (val >= 0.10)
+        )
         vegetation_ratio = float(np.mean(vegetation_mask))
         contrast = float(np.std(arr_norm))
 
         leaf_score = min(1.0, vegetation_ratio * 1.7 + contrast * 0.6)
 
         reason = ""
-        if vegetation_ratio < 0.08:
+        if vegetation_ratio < 0.05:
             reason = "Very little leaf-like color/texture was detected."
-        elif leaf_score < 0.35:
+        elif leaf_score < 0.30:
             reason = "Leaf signal is weak in this image."
 
         return {
@@ -82,7 +96,9 @@ def compute_prediction_diagnostics(
 
     total = float(np.sum(scores))
     if total <= 0.0:
-        raise ValueError("Prediction probabilities must sum to a positive value.")
+        raise ValueError(
+            "Prediction probabilities must sum to a positive value."
+        )
 
     scores = scores / total
 
@@ -116,35 +132,36 @@ def evaluate_inference_safety(
     confidence_threshold: float,
     entropy_threshold_bits: float,
     msp_threshold: float,
-    min_margin: float = 0.12,
-    non_leaf_leaf_score: float = 0.23,
-    weak_leaf_score: float = 0.35,
-    min_vegetation_ratio: float = 0.08,
+    min_margin: float = 0.08,
+    non_leaf_leaf_score: float = 0.18,
+    weak_leaf_score: float = 0.30,
+    min_vegetation_ratio: float = 0.05,
 ) -> dict[str, Any]:
     """Decide whether to reject an inference result as low-trust/OOD."""
-    top1_prob = float(diagnostics.get("top1_prob", 0.0))
-    margin = float(diagnostics.get("confidence_margin", 0.0))
-    entropy_bits = float(diagnostics.get("entropy_bits", 0.0))
-    entropy_ratio = float(diagnostics.get("entropy_ratio", 0.0))
+    top1_prob = diagnostics.get("top1_prob", 0.0)
+    margin = diagnostics.get("confidence_margin", 0.0)
+    entropy_bits = diagnostics.get("entropy_bits", 0.0)
+    entropy_ratio = diagnostics.get("entropy_ratio", 0.0)
 
-    leaf_score = float(leaf_validation.get("leaf_score", 0.0))
-    vegetation_ratio = float(leaf_validation.get("vegetation_ratio", 0.0))
+    leaf_score = leaf_validation.get("leaf_score", 0.0)
+    vegetation_ratio = leaf_validation.get("vegetation_ratio", 0.0)
 
-    appears_non_leaf = leaf_score < float(
-        non_leaf_leaf_score
-    ) and vegetation_ratio < float(min_vegetation_ratio)
-    weak_leaf_signal = leaf_score < float(weak_leaf_score)
+    appears_non_leaf = (
+        leaf_score < non_leaf_leaf_score
+        and vegetation_ratio < min_vegetation_ratio
+    )
+    weak_leaf_signal = leaf_score < weak_leaf_score
 
-    low_confidence = top1_prob < float(confidence_threshold)
-    low_msp = top1_prob < float(msp_threshold)
-    entropy_threshold_value = float(entropy_threshold_bits)
+    low_confidence = top1_prob < confidence_threshold
+    low_msp = top1_prob < msp_threshold
+    entropy_threshold_value = entropy_threshold_bits
     # Backward-compatible threshold mode:
     # <= 1.0 means normalized entropy ratio, otherwise entropy in bits.
     if entropy_threshold_value <= 1.0:
         high_entropy = entropy_ratio > entropy_threshold_value
     else:
         high_entropy = entropy_bits > entropy_threshold_value
-    low_margin = margin < float(min_margin)
+    low_margin = margin < min_margin
 
     uncertainty_flags = {
         "low_confidence": low_confidence,
@@ -152,9 +169,9 @@ def evaluate_inference_safety(
         "high_entropy": high_entropy,
         "low_margin": low_margin,
     }
-    uncertainty_score = int(sum(1 for flag in uncertainty_flags.values() if flag))
+    uncertainty_score = int(sum(uncertainty_flags.values()))
 
-    reject = bool(
+    reject = (
         appears_non_leaf
         or (weak_leaf_signal and uncertainty_score >= 1)
         or uncertainty_score >= 2

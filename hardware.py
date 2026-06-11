@@ -20,7 +20,9 @@ def configure_tensorflow():
                     gpu_details.append(name)
                 except Exception:
                     gpu_details.append(gpu.name)
-            print(f"GPU devices detected ({len(gpus)}): {', '.join(gpu_details)}")
+            print(
+                f"GPU devices detected ({len(gpus)}): {', '.join(gpu_details)}"
+            )
         else:
             print("No GPU detected; using CPU backend.")
     except Exception as exc:

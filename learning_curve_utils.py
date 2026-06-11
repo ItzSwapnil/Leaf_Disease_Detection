@@ -50,7 +50,9 @@ def combine_train_and_fine_metrics(
     if fine_len > 0:
         phase_boundary = train_len
     else:
-        phase_boundary = max(0, min(int(epochs_phase1), len(combined["accuracy"])))
+        phase_boundary = max(
+            0, min(int(epochs_phase1), len(combined["accuracy"]))
+        )
 
     return combined, phase_boundary
 
@@ -68,7 +70,11 @@ def build_best_epoch_markers(
     fine_val_acc: Sequence[float],
     phase_boundary: int,
 ) -> Tuple[
-    List[MetricMarker], Optional[str], Optional[int], Optional[int], Optional[int]
+    List[MetricMarker],
+    Optional[str],
+    Optional[int],
+    Optional[int],
+    Optional[int],
 ]:
 
     train_best_local = best_epoch_from_values(train_val_acc)

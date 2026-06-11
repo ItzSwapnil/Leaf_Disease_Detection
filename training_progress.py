@@ -12,7 +12,7 @@ class ProgressEmitter(keras.callbacks.Callback):
         stage: str,
         total_epochs: int,
         completed_epochs_before: int = 0,
-        run_start_time: float = None,
+        run_start_time: float | None = None,
         min_emit_interval: float = 4.0,
     ):
         super().__init__()
@@ -27,7 +27,9 @@ class ProgressEmitter(keras.callbacks.Callback):
         self._last_emit_time = 0.0
 
     def _emit(self, progress_pct: float, eta_seconds: float, epoch_done: int):
-        clamped_epoch_done = max(0, min(int(epoch_done), int(self.total_epochs)))
+        clamped_epoch_done = max(
+            0, min(int(epoch_done), int(self.total_epochs))
+        )
         clamped_progress = max(0.0, min(float(progress_pct), 100.0))
         payload = {
             "stage": self.stage,
@@ -52,7 +54,9 @@ class ProgressEmitter(keras.callbacks.Callback):
         self._steps_in_epoch = self.params.get("steps")
         self._initial_epoch = int(self.params.get("initial_epoch") or 0)
         self._last_emit_time = 0.0
-        initial_pct = (self.completed_epochs_before / self.total_epochs) * 100.0
+        initial_pct = (
+            self.completed_epochs_before / self.total_epochs
+        ) * 100.0
         self._emit(initial_pct, 0.0, self.completed_epochs_before)
 
     def on_epoch_begin(self, epoch, logs=None):
@@ -65,9 +69,15 @@ class ProgressEmitter(keras.callbacks.Callback):
         if now - self._last_emit_time < self.min_emit_interval:
             return
 
-        epoch_fraction = min(1.0, float(batch + 1) / float(self._steps_in_epoch))
-        relative_epoch = max(0.0, float(self._current_epoch - self._initial_epoch))
-        completed = self.completed_epochs_before + relative_epoch + epoch_fraction
+        epoch_fraction = min(
+            1.0, float(batch + 1) / float(self._steps_in_epoch)
+        )
+        relative_epoch = max(
+            0.0, float(self._current_epoch - self._initial_epoch)
+        )
+        completed = (
+            self.completed_epochs_before + relative_epoch + epoch_fraction
+        )
         completed = min(float(self.total_epochs), completed)
         progress_pct = (completed / self.total_epochs) * 100.0
         eta = self._estimate_eta(completed)
@@ -91,7 +101,7 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
         points_per_epoch: int = 12,
         stage: str = "train",
         append: bool = False,
-        run_id: str = None,
+        run_id: str | None = None,
     ):
         super().__init__()
         self.file_path = file_path
@@ -116,7 +126,8 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
         mode = "a" if self.append else "w"
         file_exists = (
-            os.path.exists(self.file_path) and os.path.getsize(self.file_path) > 0
+            os.path.exists(self.file_path)
+            and os.path.getsize(self.file_path) > 0
         )
         self._fp = open(self.file_path, mode, newline="", encoding="utf-8")
         self._writer = csv.writer(self._fp)
@@ -190,7 +201,9 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
         ):
             return
         epoch_progress = (
-            min(1.0, float(batch + 1) / float(self._steps)) if self._steps else 0.0
+            min(1.0, float(batch + 1) / float(self._steps))
+            if self._steps
+            else 0.0
         )
         self._write_row("batch", epoch_progress, logs)
 

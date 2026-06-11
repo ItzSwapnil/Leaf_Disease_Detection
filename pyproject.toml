@@ -36,20 +36,22 @@ link-mode = "copy"
 
 [dependency-groups]
 dev = [
+	"mypy>=2.1.0",
 	"pytest>=8.4.2,<9",
 	"ruff>=0.15.10",
 ]
 
 [tool.ruff]
 target-version = "py313"
-line-length = 120
+line-length = 79
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["E402"]
+"scripts/*.py" = ["E402", "F841"]
+"tests/*.py" = ["E402"]
 "scripts/*_backup.py" = ["F841"]
 "scripts/*_v2.py" = ["F841"]
 "scripts/generate_ablation_figures.py" = ["E741", "F841"]

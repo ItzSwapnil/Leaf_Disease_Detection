@@ -77,7 +77,9 @@ def _load_model_robust(model_path: str):
     """Load model with custom objects."""
     custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
     try:
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
     except Exception as exc:
         message = str(exc)
         vit_compat_error = (
@@ -92,7 +94,9 @@ def _load_model_robust(model_path: str):
             print(f"Error loading model: {exc}")
             raise
         print("Applied ViT compatibility shim while loading model.")
-        return load_model(model_path, custom_objects=custom_objects, compile=False)
+        return load_model(
+            model_path, custom_objects=custom_objects, compile=False
+        )
 
 
 def _infer_backbone(model, model_path: str | None = None) -> str:
@@ -100,7 +104,12 @@ def _infer_backbone(model, model_path: str | None = None) -> str:
     path = str(model_path or "").lower()
     if "refined" in path or "dino" in path or "vit" in path:
         return "DINOv3"
-    if "efficientnet" in path or "effnet" in path or "b0" in path or "v2" in path:
+    if (
+        "efficientnet" in path
+        or "effnet" in path
+        or "b0" in path
+        or "v2" in path
+    ):
         return "EfficientNetV2B0"
 
     name = str(getattr(model, "name", "") or "").lower()
@@ -131,7 +140,9 @@ def generate_bootstrap_ci_distributions(
     # Get predictions
     preds = model.predict(test_dataset, verbose=0)
     y_pred = np.argmax(preds, axis=1)
-    y_true = np.concatenate([labels.numpy() for _, labels in test_dataset], axis=0)
+    y_true = np.concatenate(
+        [labels.numpy() for _, labels in test_dataset], axis=0
+    )
 
     n_samples = len(y_true)
 
@@ -154,11 +165,15 @@ def generate_bootstrap_ci_distributions(
 
         # Compute metrics
         acc = np.mean(y_pred_boot == y_true_boot)
-        f1 = f1_score(y_true_boot, y_pred_boot, average="macro", zero_division=0)
+        f1 = f1_score(
+            y_true_boot, y_pred_boot, average="macro", zero_division=0
+        )
         prec = precision_score(
             y_true_boot, y_pred_boot, average="macro", zero_division=0
         )
-        rec = recall_score(y_true_boot, y_pred_boot, average="macro", zero_division=0)
+        rec = recall_score(
+            y_true_boot, y_pred_boot, average="macro", zero_division=0
+        )
 
         bootstrap_metrics["accuracy"].append(acc)
         bootstrap_metrics["macro_f1"].append(f1)
@@ -174,7 +189,9 @@ def generate_bootstrap_ci_distributions(
             "std": float(np.std(values)),
             "ci_lower": float(np.percentile(values, 2.5)),
             "ci_upper": float(np.percentile(values, 97.5)),
-            "ci_width": float(np.percentile(values, 97.5) - np.percentile(values, 2.5)),
+            "ci_width": float(
+                np.percentile(values, 97.5) - np.percentile(values, 2.5)
+            ),
         }
 
     # Plot distributions
@@ -191,7 +208,12 @@ def generate_bootstrap_ci_distributions(
 
         # Histogram with KDE
         ax.hist(
-            values, bins=50, color=color, alpha=0.7, edgecolor="black", density=True
+            values,
+            bins=50,
+            color=color,
+            alpha=0.7,
+            edgecolor="black",
+            density=True,
         )
 
         # KDE curve
@@ -219,7 +241,9 @@ def generate_bootstrap_ci_distributions(
         ax.axvline(ci["ci_upper"], color="orange", linestyle=":", linewidth=2)
 
         ax.set_xlabel(
-            metric_name.replace("_", " ").title(), fontsize=11, fontweight="bold"
+            metric_name.replace("_", " ").title(),
+            fontsize=11,
+            fontweight="bold",
         )
         ax.set_ylabel("Density", fontsize=11, fontweight="bold")
         ax.set_title(
@@ -239,7 +263,9 @@ def generate_bootstrap_ci_distributions(
     plt.close()
 
     # Save CI data
-    with open(os.path.join(output_dir, "statistical_bootstrap_ci.json"), "w") as f:
+    with open(
+        os.path.join(output_dir, "statistical_bootstrap_ci.json"), "w"
+    ) as f:
         json.dump(ci_95, f, indent=2)
 
     print("  ✓ Saved: statistical_bootstrap_ci_distributions.png")
@@ -251,7 +277,9 @@ def generate_bootstrap_ci_distributions(
     return bootstrap_metrics, ci_95
 
 
-def generate_margin_distribution_plot(model, test_dataset, output_dir: str = None):
+def generate_margin_distribution_plot(
+    model, test_dataset, output_dir: str = None
+):
     """
     Plot distribution of prediction margins (top1 - top2 probability).
 
@@ -271,7 +299,9 @@ def generate_margin_distribution_plot(model, test_dataset, output_dir: str = Non
 
     # Separate correct vs incorrect
     y_pred = np.argmax(preds, axis=1)
-    y_true = np.concatenate([labels.numpy() for _, labels in test_dataset], axis=0)
+    y_true = np.concatenate(
+        [labels.numpy() for _, labels in test_dataset], axis=0
+    )
     correct_mask = y_pred == y_true
 
     margins_correct = margins[correct_mask]
@@ -302,11 +332,15 @@ def generate_margin_distribution_plot(model, test_dataset, output_dir: str = Non
     )
 
     ax.set_xlabel(
-        "Prediction Margin (Top1 - Top2 Probability)", fontsize=11, fontweight="bold"
+        "Prediction Margin (Top1 - Top2 Probability)",
+        fontsize=11,
+        fontweight="bold",
     )
     ax.set_ylabel("Density", fontsize=11, fontweight="bold")
     ax.set_title(
-        "Margin Distribution: Confidence vs Correctness", fontsize=12, fontweight="bold"
+        "Margin Distribution: Confidence vs Correctness",
+        fontsize=12,
+        fontweight="bold",
     )
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3, linestyle="--", axis="y")
@@ -318,24 +352,30 @@ def generate_margin_distribution_plot(model, test_dataset, output_dir: str = Non
 
     ax.plot(
         margins_sorted_correct,
-        np.arange(1, len(margins_sorted_correct) + 1) / len(margins_sorted_correct),
+        np.arange(1, len(margins_sorted_correct) + 1)
+        / len(margins_sorted_correct),
         label="Correct",
         linewidth=2.5,
         color="#2ecc71",
     )
     ax.plot(
         margins_sorted_incorrect,
-        np.arange(1, len(margins_sorted_incorrect) + 1) / len(margins_sorted_incorrect),
+        np.arange(1, len(margins_sorted_incorrect) + 1)
+        / len(margins_sorted_incorrect),
         label="Incorrect",
         linewidth=2.5,
         color="#e74c3c",
     )
 
     ax.set_xlabel(
-        "Prediction Margin (Top1 - Top2 Probability)", fontsize=11, fontweight="bold"
+        "Prediction Margin (Top1 - Top2 Probability)",
+        fontsize=11,
+        fontweight="bold",
     )
     ax.set_ylabel("Cumulative Density", fontsize=11, fontweight="bold")
-    ax.set_title("Cumulative Margin Distribution", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Cumulative Margin Distribution", fontsize=12, fontweight="bold"
+    )
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3, linestyle="--")
 
@@ -348,8 +388,12 @@ def generate_margin_distribution_plot(model, test_dataset, output_dir: str = Non
     plt.close()
 
     print("  ✓ Saved: statistical_margin_distributions.png")
-    print(f"    Correct predictions - Mean margin: {margins_correct.mean():.4f}")
-    print(f"    Incorrect predictions - Mean margin: {margins_incorrect.mean():.4f}")
+    print(
+        f"    Correct predictions - Mean margin: {margins_correct.mean():.4f}"
+    )
+    print(
+        f"    Incorrect predictions - Mean margin: {margins_incorrect.mean():.4f}"
+    )
     print("    Margin overlap suggests ambiguous samples")
 
 
@@ -522,7 +566,9 @@ def generate_statistical_significance_heatmap(
     significance_matrix = -np.log10(np.maximum(p_values, 1e-10))
     np.fill_diagonal(significance_matrix, 0)
 
-    im = ax.imshow(significance_matrix, cmap="RdYlGn_r", aspect="auto", vmin=0, vmax=10)
+    im = ax.imshow(
+        significance_matrix, cmap="RdYlGn_r", aspect="auto", vmin=0, vmax=10
+    )
 
     ax.set_xticks(range(n_metrics))
     ax.set_yticks(range(n_metrics))
@@ -577,12 +623,17 @@ def main():
         "--output-dir", type=str, default=PLOTS_DIR, help="Output directory"
     )
     parser.add_argument(
-        "--bootstraps", type=int, default=2000, help="Number of bootstrap resamples"
+        "--bootstraps",
+        type=int,
+        default=2000,
+        help="Number of bootstrap resamples",
     )
     args = parser.parse_args()
 
     # Load model
-    model_path = args.model_path or resolve_keras_model_path([FINAL_MODEL_PATH])
+    model_path = args.model_path or resolve_keras_model_path(
+        [FINAL_MODEL_PATH]
+    )
     print(f"\n[Statistical Suite] Loading model from: {model_path}")
     model = _load_model_robust(model_path)
     backbone_name = _infer_backbone(model, model_path)
@@ -600,16 +651,13 @@ def main():
     )
 
     # Always preprocess before model prediction; this is critical for DINOv3.
-    test_ds = (
-        test_ds_raw.map(
-            lambda x, y: (
-                preprocess_batch_for_model_tf(x, backbone_name=backbone_name),
-                y,
-            ),
-            num_parallel_calls=tf.data.AUTOTUNE,
-        )
-        .prefetch(tf.data.AUTOTUNE)
-    )
+    test_ds = test_ds_raw.map(
+        lambda x, y: (
+            preprocess_batch_for_model_tf(x, backbone_name=backbone_name),
+            y,
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    ).prefetch(tf.data.AUTOTUNE)
 
     # Generate figures
     try:

@@ -59,7 +59,9 @@ def generate_class_imbalance_analysis(output_dir: str = None):
                     [
                         f
                         for f in os.listdir(class_path)
-                        if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                        if f.lower().endswith(
+                            (".jpg", ".jpeg", ".png", ".webp")
+                        )
                     ]
                 )
                 class_counts[split_name][class_dir] = count
@@ -87,7 +89,9 @@ def generate_class_imbalance_analysis(output_dir: str = None):
         patch.set_alpha(0.7)
 
     ax.set_ylabel("Images per Class", fontsize=11, fontweight="bold")
-    ax.set_title("Class Distribution Balance by Split", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Class Distribution Balance by Split", fontsize=12, fontweight="bold"
+    )
     ax.grid(True, alpha=0.3, axis="y")
 
     # 2. Imbalance ratio visualization
@@ -102,7 +106,9 @@ def generate_class_imbalance_analysis(output_dir: str = None):
     # Top and bottom classes
     top_n = 10
     display_classes = sorted_classes[:top_n] + sorted_classes[-top_n:]
-    display_counts = np.concatenate([sorted_counts[:top_n], sorted_counts[-top_n:]])
+    display_counts = np.concatenate(
+        [sorted_counts[:top_n], sorted_counts[-top_n:]]
+    )
 
     class_names = [
         c.replace("___", " - ").replace("_", " ")[:25] for c in display_classes
@@ -110,7 +116,13 @@ def generate_class_imbalance_analysis(output_dir: str = None):
     colors_bar = ["#e74c3c"] * top_n + ["#95a5a6"] * top_n
 
     y_pos = np.arange(len(display_classes))
-    ax.barh(y_pos, display_counts, color=colors_bar, edgecolor="black", linewidth=0.5)
+    ax.barh(
+        y_pos,
+        display_counts,
+        color=colors_bar,
+        edgecolor="black",
+        linewidth=0.5,
+    )
     ax.set_yticks(y_pos)
     ax.set_yticklabels(class_names, fontsize=8)
     ax.set_xlabel("Sample Count", fontsize=11, fontweight="bold")
@@ -137,7 +149,9 @@ def generate_class_imbalance_analysis(output_dir: str = None):
             alpha=0.7,
         )
 
-    ax.set_xlabel("Number of Classes (ranked by count)", fontsize=11, fontweight="bold")
+    ax.set_xlabel(
+        "Number of Classes (ranked by count)", fontsize=11, fontweight="bold"
+    )
     ax.set_ylabel("Cumulative % of Samples", fontsize=11, fontweight="bold")
     ax.set_title(
         "Cumulative Sample Distribution (Long-Tail Analysis)",
@@ -151,7 +165,9 @@ def generate_class_imbalance_analysis(output_dir: str = None):
     ax = axes[1, 1]
     ax.axis("off")
 
-    stats_text = "Class Distribution Statistics (Train Set)\n" + "=" * 50 + "\n"
+    stats_text = (
+        "Class Distribution Statistics (Train Set)\n" + "=" * 50 + "\n"
+    )
     for split_name in ["Train", "Val", "Test"]:
         counts = np.array(list(class_counts[split_name].values()))
         stats_text += f"\n{split_name} Set:\n"
@@ -333,7 +349,9 @@ def generate_split_distribution_comparison(output_dir: str = None):
         c.replace("___", "\n").replace("_", " ")[:20] for c in all_classes_list
     ]
     ax.set_xticks(x + width)
-    ax.set_xticklabels(class_display_names, rotation=45, ha="right", fontsize=7)
+    ax.set_xticklabels(
+        class_display_names, rotation=45, ha="right", fontsize=7
+    )
     ax.set_ylabel("Number of Samples", fontsize=12, fontweight="bold")
     ax.set_title(
         "Dataset Distribution: Train / Val / Test Comparison (Stratified)",
@@ -462,9 +480,15 @@ def generate_image_quality_analysis(output_dir: str = None):
     # Image size distribution
     ax = axes[2]
     ax.hist(
-        quality_metrics["size"], bins=30, color="#f39c12", alpha=0.7, edgecolor="black"
+        quality_metrics["size"],
+        bins=30,
+        color="#f39c12",
+        alpha=0.7,
+        edgecolor="black",
     )
-    ax.set_xlabel("Image Size (pixels, max dimension)", fontsize=11, fontweight="bold")
+    ax.set_xlabel(
+        "Image Size (pixels, max dimension)", fontsize=11, fontweight="bold"
+    )
     ax.set_ylabel("Frequency", fontsize=11, fontweight="bold")
     ax.set_title(
         f"Image Size Distribution\n(n={len(quality_metrics['size'])})",
