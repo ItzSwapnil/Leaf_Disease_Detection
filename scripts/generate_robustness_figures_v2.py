@@ -22,8 +22,7 @@ import seaborn as sns
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from config import PLOTS_DIR
+from src.utils.config import PLOTS_DIR
 
 os.makedirs(PLOTS_DIR, exist_ok=True)
 

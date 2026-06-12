@@ -11,8 +11,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure model_paths is imported so custom layer registration triggers
-import model_paths  # noqa: F401
-from training_utils import FamilyDeviationClassifier, parse_class_structure
+from src.utils import model_paths  # noqa: F401
+from src.training.training_utils import FamilyDeviationClassifier, parse_class_structure
 
 
 def test_parse_class_structure():

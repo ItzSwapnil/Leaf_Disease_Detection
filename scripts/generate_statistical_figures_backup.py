@@ -28,17 +28,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sklearn.metrics import f1_score, precision_score, recall_score
-
-from config import (
+from src.utils.config import (
     BATCH_SIZE,
     FINAL_MODEL_PATH,
     IMG_SIZE,
     PLOTS_DIR,
     TEST_DIR,
 )
-from model_paths import resolve_keras_model_path
-from preprocessing import preprocess_batch_for_model_tf
-from training_utils import WarmupCosineSchedule
+from src.utils.model_paths import resolve_keras_model_path
+from src.core.preprocessing import preprocess_batch_for_model_tf
+from src.training.training_utils import WarmupCosineSchedule
 
 os.makedirs(PLOTS_DIR, exist_ok=True)
 

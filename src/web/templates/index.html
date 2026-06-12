@@ -1,0 +1,2313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🌿 Leaf Disease Detection AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #10b981;
+            --primary-dark: #059669;
+            --primary-light: #34d399;
+            --secondary: #3b82f6;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #22c55e;
+            --dark: #1f2937;
+            --darker: #111827;
+            --light: #f3f4f6;
+            --white: #ffffff;
+            --gradient: linear-gradient(135deg, #10b981 0%, #3b82f6 100%);
+            --shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.15);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+            min-height: 100vh;
+            color: var(--white);
+            overflow-x: hidden;
+        }
+
+        /* Animated Background */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            overflow: hidden;
+        }
+
+        .bg-animation::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.1) 0%, transparent 50%);
+            animation: rotate 30s linear infinite;
+        }
+
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 40px 20px;
+            position: relative;
+        }
+
+        .logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .logo-icon {
+            width: 60px;
+            height: 60px;
+            background: var(--gradient);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            box-shadow: var(--shadow);
+        }
+
+        .logo h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: var(--gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            color: #94a3b8;
+            font-size: 1.1rem;
+            font-weight: 400;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 8px 16px;
+            border-radius: 50px;
+            margin-top: 20px;
+            font-size: 0.9rem;
+            color: var(--primary-light);
+        }
+
+        /* Main Container */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px 60px;
+        }
+
+        /* Upload Section */
+        .upload-section {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            padding: 40px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: var(--shadow-lg);
+            margin-bottom: 30px;
+        }
+
+        .drop-zone {
+            border: 2px dashed rgba(16, 185, 129, 0.5);
+            border-radius: 20px;
+            padding: 60px 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: rgba(16, 185, 129, 0.05);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .drop-zone:hover {
+            border-color: var(--primary);
+            background: rgba(16, 185, 129, 0.1);
+            transform: translateY(-2px);
+        }
+
+        .drop-zone.dragover {
+            border-color: var(--primary);
+            background: rgba(16, 185, 129, 0.15);
+            transform: scale(1.02);
+        }
+
+        .drop-zone-icon {
+            width: 80px;
+            height: 80px;
+            background: var(--gradient);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 36px;
+        }
+
+        .drop-zone h3 {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .drop-zone p {
+            color: #94a3b8;
+            margin-bottom: 20px;
+        }
+
+        .browse-btn {
+            background: var(--gradient);
+            color: white;
+            border: none;
+            padding: 14px 32px;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .browse-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(16, 185, 129, 0.4);
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        /* Preview Section */
+        .preview-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .preview-container {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .preview-image {
+            width: 120px;
+            height: 120px;
+            border-radius: 12px;
+            object-fit: cover;
+            border: 3px solid var(--primary);
+        }
+
+        .preview-info {
+            flex: 1;
+        }
+
+        .preview-info h4 {
+            font-size: 1.1rem;
+            margin-bottom: 5px;
+        }
+
+        .preview-info p {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+
+        .analyze-btn {
+            background: var(--gradient);
+            color: white;
+            border: none;
+            padding: 16px 40px;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .analyze-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(16, 185, 129, 0.4);
+        }
+
+        .analyze-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Loading State */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 60px;
+        }
+
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(16, 185, 129, 0.2);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading p {
+            color: #94a3b8;
+            font-size: 1.1rem;
+        }
+
+        /* Results Section */
+        .results-section {
+            display: none;
+        }
+
+        .result-card {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .result-header {
+            padding: 30px;
+            display: flex;
+            gap: 30px;
+            align-items: flex-start;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .result-image {
+            width: 200px;
+            height: 200px;
+            border-radius: 16px;
+            object-fit: cover;
+            border: 4px solid var(--primary);
+            flex-shrink: 0;
+        }
+
+        .result-main {
+            flex: 1;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            margin-bottom: 15px;
+        }
+
+        .status-badge.healthy {
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .status-badge.diseased {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .status-badge.invalid {
+            background: rgba(251, 146, 60, 0.2);
+            color: #fdba74;
+            border: 1px solid rgba(251, 146, 60, 0.3);
+        }
+
+        .plant-name {
+            font-size: 1.2rem;
+            color: #94a3b8;
+            margin-bottom: 5px;
+        }
+
+        .disease-name {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 15px;
+            background: var(--gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .confidence-bar {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            height: 12px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            background: var(--gradient);
+            border-radius: 10px;
+            transition: width 1s ease;
+        }
+
+        .confidence-text {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9rem;
+            color: #94a3b8;
+        }
+
+        /* Info Cards */
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            padding: 30px;
+        }
+
+        .info-card {
+            background: rgba(15, 23, 42, 0.6);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .info-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .info-card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 15px;
+        }
+
+        .info-card-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .info-card-icon.description { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+        .info-card-icon.symptoms { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+        .info-card-icon.treatment { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+        .info-card-icon.prevention { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
+
+        .info-card h4 {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .info-card p {
+            color: #94a3b8;
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+
+        /* Try Again Button */
+        .try-again {
+            text-align: center;
+            padding: 30px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .try-again-btn {
+            background: transparent;
+            color: var(--primary);
+            border: 2px solid var(--primary);
+            padding: 14px 32px;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .try-again-btn:hover {
+            background: var(--primary);
+            color: white;
+            transform: translateY(-2px);
+        }
+
+        /* Features Section */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 40px;
+        }
+
+        .feature-card {
+            background: rgba(30, 41, 59, 0.6);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .feature-icon {
+            width: 56px;
+            height: 56px;
+            background: var(--gradient);
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            font-size: 24px;
+        }
+
+        .feature-card h4 {
+            font-size: 1.1rem;
+            margin-bottom: 8px;
+        }
+
+        .feature-card p {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: #64748b;
+            font-size: 0.9rem;
+        }
+
+        .footer a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .logo h1 {
+                font-size: 1.8rem;
+            }
+
+            .result-header {
+                flex-direction: column;
+                align-items: center;
+                text-align: center;
+            }
+
+            .result-image {
+                width: 150px;
+                height: 150px;
+            }
+
+            .disease-name {
+                font-size: 1.5rem;
+            }
+
+            .preview-container {
+                flex-direction: column;
+                text-align: center;
+            }
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.5s ease forwards;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        /* Control Panel */
+        .control-panel {
+            margin-top: 30px;
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .control-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .control-title h3 {
+            font-size: 1.4rem;
+            margin-bottom: 6px;
+        }
+
+        .control-title p {
+            color: #94a3b8;
+            font-size: 0.95rem;
+        }
+
+        .compute-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            color: #cbd5e1;
+            background: rgba(148, 163, 184, 0.12);
+        }
+
+        .compute-indicator.gpu {
+            border-color: rgba(34, 197, 94, 0.35);
+            background: rgba(34, 197, 94, 0.16);
+            color: #86efac;
+        }
+
+        .compute-indicator.cpu {
+            border-color: rgba(245, 158, 11, 0.35);
+            background: rgba(245, 158, 11, 0.16);
+            color: #fcd34d;
+        }
+
+
+        .refresh-btn {
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: var(--white);
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            font-weight: 600;
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-bottom: 20px;
+        }
+
+        .archive-toggle {
+            margin-bottom: 16px;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            color: #cbd5e1;
+            font-size: 0.86rem;
+            background: rgba(15, 23, 42, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            padding: 10px 12px;
+        }
+
+        .archive-toggle input {
+            accent-color: #10b981;
+        }
+
+        .control-action {
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(15, 23, 42, 0.55);
+            color: var(--white);
+            border-radius: 14px;
+            padding: 14px;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            text-align: left;
+        }
+
+        .control-action:hover {
+            transform: translateY(-2px);
+            border-color: rgba(16, 185, 129, 0.45);
+        }
+
+        .control-action h4 {
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .control-action p {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            line-height: 1.35;
+        }
+
+        .jobs-list {
+            display: grid;
+            gap: 12px;
+        }
+
+        .job-card {
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.55);
+            border-radius: 14px;
+            padding: 14px;
+        }
+
+        .job-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+
+        .job-meta {
+            color: #94a3b8;
+            font-size: 0.82rem;
+        }
+
+        .job-progress-wrap {
+            margin: 10px 0 8px;
+        }
+
+        .job-progress-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.78rem;
+            color: #cbd5e1;
+            margin-bottom: 6px;
+            gap: 8px;
+        }
+
+        .job-progress-track {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.18);
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .job-progress-fill {
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #10b981, #3b82f6);
+            transition: width 0.45s ease;
+            width: 0%;
+        }
+
+        .job-status {
+            border-radius: 999px;
+            font-size: 0.78rem;
+            padding: 5px 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .job-status.running, .job-status.starting {
+            background: rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .job-status.completed {
+            background: rgba(34, 197, 94, 0.2);
+            color: #86efac;
+            border: 1px solid rgba(34, 197, 94, 0.35);
+        }
+
+        .job-status.failed {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.35);
+        }
+
+        .job-status.stopped {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fcd34d;
+            border: 1px solid rgba(245, 158, 11, 0.35);
+        }
+
+        .job-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .stop-btn {
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            color: #fca5a5;
+            background: rgba(239, 68, 68, 0.12);
+            border-radius: 10px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .job-log {
+            margin-top: 10px;
+            max-height: 160px;
+            overflow: auto;
+            background: rgba(2, 6, 23, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.78rem;
+            color: #cbd5e1;
+            white-space: pre-wrap;
+            line-height: 1.35;
+        }
+
+        .jobs-empty {
+            color: #94a3b8;
+            border: 1px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            padding: 14px;
+            text-align: center;
+            font-size: 0.9rem;
+        }
+
+        .model-selector {
+            margin-top: 14px;
+            display: grid;
+            gap: 6px;
+            max-width: 420px;
+        }
+
+        .model-selector label {
+            font-size: 0.85rem;
+            color: #cbd5e1;
+            font-weight: 600;
+        }
+
+        .model-select {
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(15, 23, 42, 0.78);
+            color: #e2e8f0;
+            padding: 9px 12px;
+            font-size: 0.9rem;
+            outline: none;
+        }
+
+        .model-selector small {
+            color: #94a3b8;
+            font-size: 0.78rem;
+        }
+
+        .training-options-grid {
+            margin-top: 14px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+
+        .training-option {
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 10px;
+            padding: 10px 12px;
+            display: grid;
+            gap: 6px;
+        }
+
+        .training-option label {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .training-option small {
+            color: #94a3b8;
+            font-size: 0.74rem;
+            line-height: 1.35;
+        }
+
+        .train-range-value {
+            color: #86efac;
+            font-weight: 700;
+            min-width: 44px;
+            text-align: right;
+        }
+
+        .train-range {
+            width: 100%;
+            accent-color: #22c55e;
+        }
+
+        .training-note {
+            margin-top: 8px;
+            font-size: 0.78rem;
+            color: #9ca3af;
+        }
+
+        /* Tab Navigation */
+        .tab-navigation {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            background: rgba(15, 23, 42, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 16px;
+            padding: 6px;
+            backdrop-filter: blur(10px);
+        }
+
+        .tab-btn {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            padding: 12px 20px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tab-btn:hover {
+            color: var(--white);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .tab-btn.active {
+            color: #ffffff;
+            background: linear-gradient(135deg, #10b981, #3b82f6);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+        }
+
+        /* Review Phase Layout */
+        .review-panel {
+            display: none;
+            grid-template-columns: 280px 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .review-sidebar {
+            background: rgba(15, 23, 42, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 18px;
+            padding: 16px;
+            max-height: 700px;
+            overflow-y: auto;
+            backdrop-filter: blur(10px);
+        }
+
+        .review-sidebar h3 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            color: var(--white);
+        }
+
+        .class-list {
+            display: grid;
+            gap: 8px;
+        }
+
+        .class-item {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 0.85rem;
+            color: #cbd5e1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            text-align: left;
+        }
+
+        .class-item:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .class-item.active {
+            background: rgba(16, 185, 129, 0.15);
+            border-color: #10b981;
+            color: var(--white);
+            font-weight: 600;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #64748b;
+        }
+
+        .status-dot.annotated {
+            background: #10b981;
+            box-shadow: 0 0 8px #10b981;
+        }
+
+        .review-workspace {
+            background: rgba(15, 23, 42, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 18px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .workspace-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 12px;
+        }
+
+        .workspace-header h3 {
+            margin: 0;
+            color: var(--white);
+            font-size: 1.25rem;
+        }
+
+        .workspace-body {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .canvas-container {
+            position: relative;
+            background: #020617;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            overflow: hidden;
+            width: 448px;
+            height: 448px;
+        }
+
+        .canvas-bg-img {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 448px;
+            height: 448px;
+            object-fit: contain;
+            pointer-events: none;
+        }
+
+        .drawing-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 448px;
+            height: 448px;
+            cursor: crosshair;
+        }
+
+        .canvas-controls {
+            flex: 1;
+            min-width: 260px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .control-group {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .control-group h4 {
+            margin: 0 0 4px;
+            font-size: 0.9rem;
+            color: #cbd5e1;
+        }
+
+        .mode-toggles {
+            display: flex;
+            gap: 10px;
+        }
+
+        .mode-btn {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #cbd5e1;
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: center;
+        }
+
+        .mode-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .mode-btn.leaf.active {
+            background: rgba(34, 197, 94, 0.2);
+            border-color: #22c55e;
+            color: #86efac;
+        }
+
+        .mode-btn.focus.active {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: #ef4444;
+            color: #fca5a5;
+        }
+
+        .action-btns {
+            display: flex;
+            gap: 10px;
+            margin-top: auto;
+        }
+
+        .work-btn {
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 0.88rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .work-btn.primary {
+            flex: 2;
+            background: #10b981;
+            border: none;
+            color: var(--white);
+        }
+
+        .work-btn.primary:hover {
+            background: #059669;
+            box-shadow: 0 0 12px rgba(16, 185, 129, 0.35);
+        }
+
+        .work-btn.secondary {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: #cbd5e1;
+        }
+
+        .work-btn.secondary:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-animation"></div>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">🌿</div>
+            <h1>Leaf Disease AI</h1>
+        </div>
+        <p class="subtitle">Leaf diagnosis with calibrated confidence, model selection, and workflow controls</p>
+        <div class="badge">
+            <i class="fas fa-brain"></i>
+            <span>99.09% Test Accuracy • 46 Classes • EfficientNetV2 + DINOv3</span>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="container">
+        <!-- Tab Bar -->
+        <div class="tab-navigation">
+            <button class="tab-btn active" id="diagnoseTabBtn" onclick="switchTab('diagnose')">
+                <i class="fas fa-microscope"></i> Diagnose & Control
+            </button>
+            <button class="tab-btn" id="reviewTabBtn" onclick="switchTab('review')">
+                <i class="fas fa-edit"></i> Review Phase (Annotator)
+            </button>
+        </div>
+        <!-- Upload Section -->
+        <section class="upload-section" id="uploadSection">
+            <div class="drop-zone" id="dropZone">
+                <div class="drop-zone-icon">
+                    <i class="fas fa-cloud-upload-alt"></i>
+                </div>
+                <h3>Upload Leaf Image</h3>
+                <p>Drag and drop your image here, or click to browse</p>
+                <button class="browse-btn" onclick="document.getElementById('fileInput').click()">
+                    <i class="fas fa-folder-open"></i>
+                    Browse Files
+                </button>
+                <input type="file" id="fileInput" accept="image/*">
+            </div>
+
+            <div class="model-selector">
+                <label for="modelSelect">Inference model</label>
+                <select id="modelSelect" class="model-select">
+                    {% for model_name in available_models %}
+                    <option value="{{ model_name }}" {% if active_model_name == model_name %}selected{% endif %}>{{ model_name }}</option>
+                    {% endfor %}
+                </select>
+                <small>Choose which trained model file to use for this prediction request.</small>
+            </div>
+
+            <div class="training-options-grid" style="margin-top: 12px;">
+                <div class="training-option">
+                    <label for="leafDetectionModeSelect">
+                        <span>Leaf detection stage</span>
+                    </label>
+                    <select id="leafDetectionModeSelect" class="model-select">
+                        <option value="auto" {% if default_leaf_detection_mode == 'auto' %}selected{% endif %}>Auto (model then heuristic)</option>
+                        <option value="model" {% if default_leaf_detection_mode == 'model' %}selected{% endif %}>Model only</option>
+                        <option value="heuristic" {% if default_leaf_detection_mode == 'heuristic' %}selected{% endif %}>Heuristic only</option>
+                        <option value="off" {% if default_leaf_detection_mode == 'off' %}selected{% endif %}>Disable stage</option>
+                    </select>
+                    <small>Control Stage-1 behavior directly from UI per prediction.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="backgroundRemovalToggle">
+                        <span>Stage-2 background removal</span>
+                    </label>
+                    <label class="archive-toggle" style="margin: 0;">
+                        <input type="checkbox" id="backgroundRemovalToggle" {% if default_use_background_removal %}checked{% endif %}>
+                        <span>Enable segmentation before classification</span>
+                    </label>
+                    <small>When enabled, the app crops the leaf region before classification.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="safetyGateToggle">
+                        <span>Stage-4 safety gate</span>
+                    </label>
+                    <label class="archive-toggle" style="margin: 0;">
+                        <input type="checkbox" id="safetyGateToggle" {% if default_use_safety_gate %}checked{% endif %}>
+                        <span>Enable confidence/OOD rejection</span>
+                    </label>
+                    <small>Disable only if you want raw model output without rejection rules.</small>
+                </div>
+            </div>
+
+            <!-- Preview -->
+            <div class="preview-section" id="previewSection">
+                <div class="preview-container">
+                    <img src="" alt="Preview" class="preview-image" id="previewImage">
+                    <div class="preview-info">
+                        <h4 id="fileName">image.jpg</h4>
+                        <p id="fileSize">1.2 MB</p>
+                    </div>
+                    <button class="analyze-btn" id="analyzeBtn" onclick="analyzeImage()">
+                        <i class="fas fa-microscope"></i>
+                        Analyze Disease
+                    </button>
+                </div>
+            </div>
+
+            <!-- Loading -->
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>🔬 Analyzing leaf image with AI...</p>
+            </div>
+        </section>
+
+        <!-- Results Section -->
+        <section class="results-section" id="resultsSection">
+            <div class="result-card fade-in">
+                <div class="result-header">
+                    <img src="" alt="Analyzed Image" class="result-image" id="resultImage">
+                    <div class="result-main">
+                        <div class="status-badge" id="statusBadge">
+                            <i class="fas fa-check-circle"></i>
+                            <span id="statusText">Healthy</span>
+                        </div>
+                        <p class="plant-name" id="plantName">Tomato Plant</p>
+                        <h2 class="disease-name" id="diseaseName">Healthy Leaf</h2>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" id="confidenceFill" style="width: 0%"></div>
+                        </div>
+                        <div class="confidence-text">
+                            <span id="confidenceLabel">Confidence</span>
+                            <span id="confidenceValue">94.5%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="info-grid">
+                    <div class="info-card">
+                        <div class="info-card-header">
+                            <div class="info-card-icon description">
+                                <i class="fas fa-info-circle"></i>
+                            </div>
+                            <h4>Description</h4>
+                        </div>
+                        <p id="description">Loading...</p>
+                    </div>
+
+                    <div class="info-card">
+                        <div class="info-card-header">
+                            <div class="info-card-icon symptoms">
+                                <i class="fas fa-exclamation-triangle"></i>
+                            </div>
+                            <h4>Symptoms</h4>
+                        </div>
+                        <p id="symptoms">Loading...</p>
+                    </div>
+
+                    <div class="info-card">
+                        <div class="info-card-header">
+                            <div class="info-card-icon treatment">
+                                <i class="fas fa-prescription-bottle-alt"></i>
+                            </div>
+                            <h4>Treatment</h4>
+                        </div>
+                        <p id="treatment">Loading...</p>
+                    </div>
+
+                    <div class="info-card">
+                        <div class="info-card-header">
+                            <div class="info-card-icon prevention">
+                                <i class="fas fa-shield-alt"></i>
+                            </div>
+                            <h4>Prevention</h4>
+                        </div>
+                        <p id="prevention">Loading...</p>
+                    </div>
+                </div>
+
+                <div class="try-again">
+                    <button class="try-again-btn" onclick="resetUpload()">
+                        <i class="fas fa-redo"></i>
+                        Analyze Another Image
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Features -->
+        <section class="features" id="features">
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-bolt"></i>
+                </div>
+                <h4>Instant Detection</h4>
+                <p>Get results in seconds with our optimized AI model</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-seedling"></i>
+                </div>
+                <h4>46 Classes</h4>
+                <p>Detect healthy and diseased leaves across 16 crop types</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-book-medical"></i>
+                </div>
+                <h4>Expert Advice</h4>
+                <p>Get treatment and prevention recommendations</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <h4>Privacy First</h4>
+                <p>Your images are processed securely and not stored</p>
+            </div>
+        </section>
+
+        <section class="control-panel" id="controlPanel">
+            <div class="control-header">
+                <div class="control-title">
+                    <h3><i class="fas fa-sliders-h"></i> Workflow Control Panel</h3>
+                    <p>Run training, fine-tuning, refinement, evaluation, and figure generation directly from the UI.</p>
+                </div>
+                <div class="compute-indicator {% if compute_info.backend == 'GPU' %}gpu{% else %}cpu{% endif %}" id="computeIndicator" title="Runtime backend for TensorFlow jobs">
+                    <i class="fas fa-microchip"></i>
+                    <span id="computeIndicatorText">
+                        {% if compute_info.backend == 'GPU' %}
+                        GPU Active{% if compute_info.gpu_count %} ({{ compute_info.gpu_count }}){% endif %}
+                        {% else %}
+                        CPU Only
+                        {% endif %}
+                    </span>
+                </div>
+                <button class="refresh-btn" onclick="refreshControlPanel()">
+                    <i class="fas fa-sync-alt"></i>
+                    Refresh Status
+                </button>
+            </div>
+
+            <div class="control-grid">
+                {% for action_key, meta in control_actions.items() %}
+                <button class="control-action" onclick="runControlAction('{{ action_key }}')">
+                    <h4>{{ meta.label }}</h4>
+                    <p>{{ meta.description }}</p>
+                </button>
+                {% endfor %}
+            </div>
+
+            <label class="archive-toggle" title="When enabled, each run also writes timestamped archive logs and manifests.">
+                <input type="checkbox" id="archiveLogsToggle">
+                <span>Archive this run (default is latest logs only)</span>
+            </label>
+
+            <div class="model-selector" style="margin-top: 1rem;">
+                <label for="trainBackboneSelect">Training backbone</label>
+                <select id="trainBackboneSelect" class="model-select">
+                    {% for backbone_name in training_backbones %}
+                    <option value="{{ backbone_name }}" {% if backbone_name == 'EfficientNetV2B0' %}selected{% endif %}>{{ backbone_name }}</option>
+                    {% endfor %}
+                </select>
+                <small>Used by the Train Model action (sent as --base-model).</small>
+            </div>
+
+            <div class="training-options-grid">
+                <div class="training-option">
+                    <label for="trainDataPercentRange">
+                        <span>Train data per class</span>
+                        <span class="train-range-value" id="trainDataPercentValue">{{ '%.1f'|format(default_train_fraction_pct) }}%</span>
+                    </label>
+                    <input type="range" id="trainDataPercentRange" class="train-range" min="0.1" max="100" step="0.1" value="{{ '%.1f'|format(default_train_fraction_pct) }}">
+                    <small>Randomly samples this percentage from every class directory for each training run.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="trainOptimizerSelect">
+                        <span>Optimizer</span>
+                    </label>
+                    <select id="trainOptimizerSelect" class="model-select">
+                        {% for optimizer_name in training_optimizer_options %}
+                        <option value="{{ optimizer_name }}" {% if optimizer_name == default_training_optimizer %}selected{% endif %}>{{ optimizer_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <small>Applied to both training phases during Train Model runs.</small>
+                </div>
+
+                <div class="training-option">
+                    <label for="trainSaveModeSelect">
+                        <span>Model save mode</span>
+                    </label>
+                    <select id="trainSaveModeSelect" class="model-select">
+                        {% for save_mode in training_save_modes %}
+                        <option value="{{ save_mode.value }}" {% if save_mode.value == default_training_save_mode %}selected{% endif %}>{{ save_mode.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <small>Control whether checkpoints include optimizer state, inference-only weights, or both.</small>
+                </div>
+            </div>
+
+            <label class="archive-toggle" title="When enabled, class weighting compensates for class-imbalance so each class contributes more equally.">
+                <input type="checkbox" id="classEqualizerToggle" {% if default_class_equalizer %}checked{% endif %}>
+                <span>Enable class equalizer (balance class influence)</span>
+            </label>
+
+            <p class="training-note">Training options above apply to the Train Model action only.</p>
+
+            <div id="jobsList" class="jobs-list">
+                <div class="jobs-empty">No workflow jobs yet.</div>
+            </div>
+        </section>
+
+        <!-- Review Panel (Annotator) -->
+        <section class="review-panel" id="reviewPanel">
+            <div class="review-sidebar">
+                <h3>Select Crop Class</h3>
+                <div class="class-list" id="reviewClassList">
+                    <!-- Loaded dynamically -->
+                </div>
+            </div>
+
+            <div class="review-workspace">
+                <div class="workspace-header">
+                    <h3 id="currentClassName">Select a class on the left</h3>
+                    <div id="saveStatus" style="font-size: 0.85rem; color: #94a3b8;"></div>
+                </div>
+
+                <div class="workspace-body" id="workspaceBody" style="display: none;">
+                    <div class="canvas-container">
+                        <img src="" id="canvasBgImg" class="canvas-bg-img">
+                        <canvas id="drawingCanvas" class="drawing-canvas" width="448" height="448"></canvas>
+                    </div>
+
+                    <div class="canvas-controls">
+                        <div class="control-group">
+                            <h4>Active Drawing Layer</h4>
+                            <div class="mode-toggles">
+                                <button class="mode-btn leaf active" id="drawModeLeaf" onclick="setDrawMode('leaf')">
+                                    🌿 Leaf Mask (Paint Green)
+                                </button>
+                                <button class="mode-btn focus" id="drawModeFocus" onclick="setDrawMode('focus')">
+                                    🔴 Focus/Disease (Paint Red)
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="brushSize" style="font-size: 0.85rem; font-weight: 600; color: #cbd5e1; display: flex; justify-content: space-between;">
+                                <span>Brush Size</span>
+                                <span id="brushSizeVal">20px</span>
+                            </label>
+                            <input type="range" id="brushSize" min="5" max="60" value="20" style="accent-color: #3b82f6;">
+                        </div>
+
+                        <div class="control-group">
+                            <h4>Drawing Tools</h4>
+                            <div class="mode-toggles">
+                                <button class="mode-btn" id="toolDraw" onclick="setTool('draw')">
+                                    <i class="fas fa-paint-brush"></i> Draw
+                                </button>
+                                <button class="mode-btn" id="toolErase" onclick="setTool('erase')">
+                                    <i class="fas fa-eraser"></i> Erase
+                                </button>
+                            </div>
+                        </div>
+
+                        <div style="font-size: 0.76rem; color: #94a3b8; line-height: 1.4; margin-top: 10px;">
+                            <p><strong>Instructions:</strong></p>
+                            <p>1. Paint the <strong>Leaf Mask</strong> (Green) over the entire leaf area.</p>
+                            <p>2. Paint the <strong>Focus/Disease Mask</strong> (Red) over the diseased regions (or the main focus area if healthy).</p>
+                            <p>3. Click <strong>Save Annotations</strong> to save. The model will learn from this in Phase 2 fine-tuning!</p>
+                        </div>
+
+                        <div class="action-btns">
+                            <button class="work-btn secondary" onclick="clearActiveCanvas()">
+                                <i class="fas fa-trash-alt"></i> Clear Canvas
+                            </button>
+                            <button class="work-btn primary" onclick="saveAnnotations()">
+                                <i class="fas fa-save"></i> Save Annotations
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="jobs-empty" id="workspacePlaceholder" style="padding: 100px 0;">
+                    <i class="fas fa-mouse-pointer" style="font-size: 2.5rem; margin-bottom: 12px; color: #475569;"></i>
+                    <p>Select a crop class from the sidebar to start annotating.</p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>🌿 Leaf Disease Detection AI • Powered by EfficientNetV2 + DINOv3 • 
+            <a href="https://github.com/ItzSwapnil/Leaf_Disease_Detection" target="_blank">
+                <i class="fab fa-github"></i> GitHub
+            </a>
+        </p>
+    </footer>
+
+    <script>
+        let selectedFile = null;
+        let jobsPollHandle = null;
+
+        // Drag and Drop
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => {
+                dropZone.classList.add('dragover');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => {
+                dropZone.classList.remove('dragover');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const files = e.dataTransfer.files;
+            if (files.length) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            if (!file.type.startsWith('image/')) {
+                alert('Please upload an image file');
+                return;
+            }
+
+            selectedFile = file;
+
+            // Show preview
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                document.getElementById('previewImage').src = e.target.result;
+                document.getElementById('fileName').textContent = file.name;
+                document.getElementById('fileSize').textContent = formatFileSize(file.size);
+                document.getElementById('previewSection').style.display = 'block';
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        async function analyzeImage() {
+            if (!selectedFile) return;
+
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            const loading = document.getElementById('loading');
+            const previewSection = document.getElementById('previewSection');
+
+            // Show loading
+            analyzeBtn.disabled = true;
+            previewSection.style.display = 'none';
+            loading.style.display = 'block';
+
+            // Create form data
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            const modelSelect = document.getElementById('modelSelect');
+            if (modelSelect && modelSelect.value) {
+                formData.append('model_name', modelSelect.value);
+            }
+            const leafDetectionModeSelect = document.getElementById('leafDetectionModeSelect');
+            const backgroundRemovalToggle = document.getElementById('backgroundRemovalToggle');
+            const safetyGateToggle = document.getElementById('safetyGateToggle');
+
+            formData.append(
+                'leaf_detection_mode',
+                leafDetectionModeSelect && leafDetectionModeSelect.value
+                    ? leafDetectionModeSelect.value
+                    : 'auto'
+            );
+            formData.append(
+                'use_background_removal',
+                backgroundRemovalToggle && backgroundRemovalToggle.checked ? 'true' : 'false'
+            );
+            formData.append(
+                'use_safety_gate',
+                safetyGateToggle && safetyGateToggle.checked ? 'true' : 'false'
+            );
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (result.error) {
+                    throw new Error(result.error);
+                }
+
+                // Display results
+                displayResults(result);
+
+            } catch (error) {
+                alert('Error: ' + error.message);
+                resetUpload();
+            }
+        }
+
+        function displayResults(result) {
+            // Hide upload section, show results
+            document.getElementById('uploadSection').style.display = 'none';
+            document.getElementById('features').style.display = 'none';
+            document.getElementById('resultsSection').style.display = 'block';
+
+            // Update result image
+            document.getElementById('resultImage').src = result.image;
+
+            // Update status badge
+            const statusBadge = document.getElementById('statusBadge');
+            const statusText = document.getElementById('statusText');
+            const confidenceLabel = document.getElementById('confidenceLabel');
+            if (result.is_valid_leaf === false) {
+                statusBadge.className = 'status-badge invalid';
+                statusText.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Unsupported Image';
+                confidenceLabel.textContent = 'Model best guess confidence';
+            } else if (result.is_healthy) {
+                statusBadge.className = 'status-badge healthy';
+                statusText.innerHTML = '<i class="fas fa-check-circle"></i> Healthy';
+                confidenceLabel.textContent = 'Prediction confidence';
+            } else {
+                statusBadge.className = 'status-badge diseased';
+                statusText.innerHTML = '<i class="fas fa-virus"></i> Disease Detected';
+                confidenceLabel.textContent = 'Prediction confidence';
+            }
+
+            // Update text content
+            document.getElementById('plantName').textContent =
+                result.is_valid_leaf === false ? 'Leaf Validation' : (result.plant + ' Plant');
+            document.getElementById('diseaseName').textContent = result.disease;
+            document.getElementById('confidenceValue').textContent = result.confidence + '%';
+            
+            // Animate confidence bar
+            setTimeout(() => {
+                document.getElementById('confidenceFill').style.width = result.confidence + '%';
+            }, 100);
+
+            // Update info cards
+            document.getElementById('description').textContent = result.description;
+            document.getElementById('symptoms').textContent = result.symptoms;
+            document.getElementById('treatment').textContent = result.treatment;
+            document.getElementById('prevention').textContent = result.prevention;
+        }
+
+        function resetUpload() {
+            selectedFile = null;
+            document.getElementById('fileInput').value = '';
+            document.getElementById('previewSection').style.display = 'none';
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('resultsSection').style.display = 'none';
+            document.getElementById('uploadSection').style.display = 'block';
+            document.getElementById('features').style.display = 'grid';
+            document.getElementById('analyzeBtn').disabled = false;
+            document.getElementById('confidenceFill').style.width = '0%';
+        }
+
+        async function runControlAction(actionKey) {
+            try {
+                const archiveToggle = document.getElementById('archiveLogsToggle');
+                const archiveLogs = !!(archiveToggle && archiveToggle.checked);
+                const backboneSelect = document.getElementById('trainBackboneSelect');
+                const baseModel = backboneSelect ? backboneSelect.value : '';
+                const requestBody = { archive_logs: archiveLogs };
+                if (actionKey === 'train') {
+                    if (baseModel) {
+                        requestBody.base_model = baseModel;
+                    }
+
+                    const trainDataPercentRange = document.getElementById('trainDataPercentRange');
+                    const trainOptimizerSelect = document.getElementById('trainOptimizerSelect');
+                    const trainSaveModeSelect = document.getElementById('trainSaveModeSelect');
+                    const classEqualizerToggle = document.getElementById('classEqualizerToggle');
+
+                    const trainFractionPercent = Number(trainDataPercentRange ? trainDataPercentRange.value : 100);
+                    requestBody.train_fraction_percent = Number.isFinite(trainFractionPercent)
+                        ? Math.max(0.1, Math.min(100, trainFractionPercent))
+                        : 100;
+                    requestBody.optimizer = trainOptimizerSelect ? trainOptimizerSelect.value : 'AdamW';
+                    requestBody.save_mode = trainSaveModeSelect ? trainSaveModeSelect.value : 'with_optimizer';
+                    requestBody.class_equalizer = !!(classEqualizerToggle && classEqualizerToggle.checked);
+                }
+                const response = await fetch(`/control/run/${actionKey}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                const responsePayload = await response.json();
+                if (!response.ok) {
+                    throw new Error(responsePayload.error || 'Could not start action');
+                }
+                await loadJobs();
+            } catch (error) {
+                alert('Control panel error: ' + error.message);
+            }
+        }
+
+        async function stopJob(jobId) {
+            try {
+                const response = await fetch(`/control/stop/${jobId}`, {
+                    method: 'POST'
+                });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Could not stop job');
+                }
+                await loadJobs();
+            } catch (error) {
+                alert('Stop error: ' + error.message);
+            }
+        }
+
+        function formatRuntime(seconds) {
+            if (seconds == null) return 'n/a';
+            if (seconds < 60) return `${seconds.toFixed(1)}s`;
+            const mins = Math.floor(seconds / 60);
+            const sec = Math.round(seconds % 60);
+            return `${mins}m ${sec}s`;
+        }
+
+        function formatEta(seconds) {
+            if (seconds == null || Number.isNaN(Number(seconds))) return 'calculating...';
+            const whole = Math.max(0, Math.round(Number(seconds)));
+            if (whole < 60) return `${whole}s`;
+            const mins = Math.floor(whole / 60);
+            const sec = whole % 60;
+            if (mins < 60) return `${mins}m ${sec}s`;
+            const hours = Math.floor(mins / 60);
+            const remMins = mins % 60;
+            return `${hours}h ${remMins}m`;
+        }
+
+        function formatSaveMode(saveMode) {
+            const normalized = String(saveMode || '').toLowerCase();
+            if (normalized === 'without_optimizer') return 'without optimizer';
+            if (normalized === 'all') return 'with + without optimizer';
+            return 'with optimizer';
+        }
+
+        function formatTrainPercent(value) {
+            const num = Number(value);
+            if (!Number.isFinite(num)) return 'n/a';
+            const clamped = Math.max(0.1, Math.min(100, num));
+            if (clamped < 1) return `${clamped.toFixed(1)}%`;
+            return `${Number(clamped.toFixed(1)).toString()}%`;
+        }
+
+        function updateTrainDataPercentLabel() {
+            const range = document.getElementById('trainDataPercentRange');
+            const value = document.getElementById('trainDataPercentValue');
+            if (!range || !value) return;
+
+            const pct = Math.max(0.1, Math.min(100, Number(range.value || 100)));
+            value.textContent = formatTrainPercent(pct);
+        }
+
+        function captureLogScrollState() {
+            const state = {};
+            document.querySelectorAll('.job-card').forEach((card) => {
+                const jobId = card.getAttribute('data-job-id');
+                const logEl = card.querySelector('.job-log');
+                if (!jobId || !logEl) return;
+
+                const maxScrollTop = Math.max(0, logEl.scrollHeight - logEl.clientHeight);
+                const distanceFromBottom = maxScrollTop - logEl.scrollTop;
+
+                state[jobId] = {
+                    scrollTop: logEl.scrollTop,
+                    followTail: distanceFromBottom <= 24,
+                };
+            });
+            return state;
+        }
+
+        function restoreLogScrollState(container, state) {
+            requestAnimationFrame(() => {
+                container.querySelectorAll('.job-card').forEach((card) => {
+                    const jobId = card.getAttribute('data-job-id');
+                    const logEl = card.querySelector('.job-log');
+                    if (!jobId || !logEl) return;
+
+                    const prev = state[jobId];
+                    const maxScrollTop = Math.max(0, logEl.scrollHeight - logEl.clientHeight);
+                    if (!prev || prev.followTail) {
+                        logEl.scrollTop = maxScrollTop;
+                    } else {
+                        logEl.scrollTop = Math.min(prev.scrollTop, maxScrollTop);
+                    }
+                });
+            });
+        }
+
+        function renderJobs(jobs) {
+            const container = document.getElementById('jobsList');
+            const scrollState = captureLogScrollState();
+            if (!jobs.length) {
+                container.innerHTML = '<div class="jobs-empty">No workflow jobs yet.</div>';
+                return;
+            }
+
+            container.innerHTML = jobs.map((job) => {
+                const latestLogs = (job.logs || []).join('\n');
+                const canStop = job.status === 'running' || job.status === 'starting';
+                const progress = Math.max(0, Math.min(100, Number(job.progress_pct || 0)));
+                const eta = (job.status === 'completed' || job.status === 'failed' || job.status === 'stopped')
+                    ? 'n/a'
+                    : formatEta(job.eta_seconds);
+                const stage = (job.progress_stage || 'pending').replace(/_/g, ' ');
+                const backboneMeta = job.base_model ? ` • Backbone: ${job.base_model}` : '';
+                const trainMetaParts = [];
+                if (job.train_fraction_pct != null) {
+                    trainMetaParts.push(`Data/class: ${formatTrainPercent(job.train_fraction_pct)}`);
+                }
+                if (job.optimizer) {
+                    trainMetaParts.push(`Opt: ${job.optimizer}`);
+                }
+                if (job.save_mode) {
+                    trainMetaParts.push(`Save: ${formatSaveMode(job.save_mode)}`);
+                }
+                if (job.class_equalizer !== null && job.class_equalizer !== undefined) {
+                    trainMetaParts.push(`Equalizer: ${job.class_equalizer ? 'on' : 'off'}`);
+                }
+                const trainMeta = trainMetaParts.length ? ` • ${trainMetaParts.join(' • ')}` : '';
+                return `
+                    <div class="job-card" data-job-id="${job.id}">
+                        <div class="job-top">
+                            <div>
+                                <strong>${job.label}</strong>
+                                <div class="job-meta">${job.script}${backboneMeta}${trainMeta} • Logs: ${job.archive_logs ? 'archive+latest' : 'latest-only'} • Runtime: ${formatRuntime(job.runtime_seconds)} • Exit: ${job.return_code ?? 'n/a'}</div>
+                            </div>
+                            <span class="job-status ${job.status}">${job.status}</span>
+                        </div>
+                        <div class="job-progress-wrap">
+                            <div class="job-progress-head">
+                                <span>Progress: ${progress.toFixed(1)}% • Stage: ${stage}</span>
+                                <span>Total ETA: ${eta}</span>
+                            </div>
+                            <div class="job-progress-track">
+                                <div class="job-progress-fill" style="width: ${progress}%"></div>
+                            </div>
+                        </div>
+                        <div class="job-log">${latestLogs || 'No logs yet.'}</div>
+                        ${canStop ? `<div class="job-actions"><button class="stop-btn" onclick="stopJob('${job.id}')"><i class='fas fa-stop-circle'></i> Stop</button></div>` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            restoreLogScrollState(container, scrollState);
+        }
+
+        async function loadJobs() {
+            try {
+                const response = await fetch('/control/jobs');
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Could not load jobs');
+                }
+                renderJobs(payload.jobs || []);
+            } catch (error) {
+                document.getElementById('jobsList').innerHTML = `<div class="jobs-empty">${error.message}</div>`;
+            }
+        }
+
+        function updateComputeIndicator(compute) {
+            const badge = document.getElementById('computeIndicator');
+            const textNode = document.getElementById('computeIndicatorText');
+            if (!badge || !textNode || !compute) return;
+
+            badge.classList.remove('gpu', 'cpu');
+            const backend = (compute.backend || 'CPU').toUpperCase();
+            if (backend === 'GPU') {
+                badge.classList.add('gpu');
+                const gpuCount = Number(compute.gpu_count || 0);
+                textNode.textContent = `GPU Active${gpuCount > 0 ? ` (${gpuCount})` : ''}`;
+            } else {
+                badge.classList.add('cpu');
+                textNode.textContent = 'CPU Only';
+            }
+        }
+
+        async function loadComputeInfo() {
+            try {
+                const response = await fetch('/control/system');
+                const payload = await response.json();
+                if (response.ok && payload.compute) {
+                    updateComputeIndicator(payload.compute);
+                }
+            } catch (error) {
+                // Keep last known state on transient failures.
+            }
+        }
+
+        function refreshControlPanel() {
+            loadJobs();
+            loadComputeInfo();
+        }
+
+        // Tab switching logic
+        function switchTab(tab) {
+            const diagnoseBtn = document.getElementById('diagnoseTabBtn');
+            const reviewBtn = document.getElementById('reviewTabBtn');
+            const uploadSection = document.getElementById('uploadSection');
+            const resultsSection = document.getElementById('resultsSection');
+            const featuresSection = document.getElementById('features');
+            const controlPanel = document.getElementById('controlPanel');
+            const reviewPanel = document.getElementById('reviewPanel');
+
+            if (tab === 'diagnose') {
+                diagnoseBtn.classList.add('active');
+                reviewBtn.classList.remove('active');
+                uploadSection.style.display = 'block';
+                if (selectedFile === null) {
+                    featuresSection.style.display = 'grid';
+                } else {
+                    if (document.getElementById('resultsSection').style.display !== 'none') {
+                        resultsSection.style.display = 'block';
+                    }
+                }
+                controlPanel.style.display = 'block';
+                reviewPanel.style.display = 'none';
+            } else if (tab === 'review') {
+                diagnoseBtn.classList.remove('active');
+                reviewBtn.classList.add('active');
+                uploadSection.style.display = 'none';
+                resultsSection.style.display = 'none';
+                featuresSection.style.display = 'none';
+                controlPanel.style.display = 'none';
+                reviewPanel.style.display = 'grid';
+                
+                loadReviewClasses();
+            }
+        }
+
+        // Review phase variables
+        let activeClass = null;
+        let reviewDrawMode = 'leaf';
+        let reviewDrawTool = 'draw';
+        let reviewIsDrawing = false;
+        let revLastX = 0;
+        let revLastY = 0;
+
+        // Hidden canvases for masks
+        const leafOffscreen = document.createElement('canvas');
+        leafOffscreen.width = 448;
+        leafOffscreen.height = 448;
+        const leafCtx = leafOffscreen.getContext('2d');
+
+        const focusOffscreen = document.createElement('canvas');
+        focusOffscreen.width = 448;
+        focusOffscreen.height = 448;
+        const focusCtx = focusOffscreen.getContext('2d');
+
+        let dCanvas = null;
+        let dCtx = null;
+
+        async function loadReviewClasses() {
+            try {
+                const response = await fetch('/review/classes');
+                const data = await response.json();
+                if (data.error) throw new Error(data.error);
+                
+                const listContainer = document.getElementById('reviewClassList');
+                listContainer.innerHTML = data.classes.map(cls => `
+                    <div class="class-item ${activeClass === cls.class_name ? 'active' : ''}" onclick="selectReviewClass('${cls.class_name}')">
+                        <span>${cls.class_name.replace(/___/g, ' - ')}</span>
+                        <div class="status-dot ${cls.annotated ? 'annotated' : ''}" title="${cls.annotated ? 'Annotated' : 'Not annotated'}"></div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                alert('Failed to load review classes: ' + e.message);
+            }
+        }
+
+        async function selectReviewClass(className) {
+            activeClass = className;
+            
+            const items = document.querySelectorAll('.class-item');
+            items.forEach(item => item.classList.remove('active'));
+            
+            document.getElementById('currentClassName').textContent = className.replace(/___/g, ' - ');
+            document.getElementById('saveStatus').textContent = '';
+            document.getElementById('workspacePlaceholder').style.display = 'none';
+            document.getElementById('workspaceBody').style.display = 'flex';
+
+            const bgImg = document.getElementById('canvasBgImg');
+            bgImg.src = `/review/sample/${className}`;
+
+            leafCtx.clearRect(0, 0, 448, 448);
+            focusCtx.clearRect(0, 0, 448, 448);
+
+            bgImg.onload = async () => {
+                initCanvasEngine();
+                
+                try {
+                    await loadExistingMask(className, 'leaf', leafCtx);
+                } catch(err) {}
+                try {
+                    await loadExistingMask(className, 'focus', focusCtx);
+                } catch(err) {}
+                
+                redrawDisplay();
+            };
+        }
+
+        async function loadExistingMask(className, type, ctx) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.onload = () => {
+                    ctx.drawImage(img, 0, 0, 448, 448);
+                    resolve();
+                };
+                img.onerror = () => reject();
+                img.src = `/review/mask/${className}/${type}?t=${Date.now()}`;
+            });
+        }
+
+        function initCanvasEngine() {
+            dCanvas = document.getElementById('drawingCanvas');
+            dCtx = dCanvas.getContext('2d');
+            
+            const clone = dCanvas.cloneNode(true);
+            dCanvas.parentNode.replaceChild(clone, dCanvas);
+            dCanvas = clone;
+            dCtx = dCanvas.getContext('2d');
+
+            dCanvas.addEventListener('mousedown', startDrawing);
+            dCanvas.addEventListener('mousemove', draw);
+            dCanvas.addEventListener('mouseup', stopDrawing);
+            dCanvas.addEventListener('mouseout', stopDrawing);
+
+            dCanvas.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                const touch = e.touches[0];
+                const rect = dCanvas.getBoundingClientRect();
+                startDrawing({
+                    clientX: touch.clientX,
+                    clientY: touch.clientY
+                });
+            });
+            dCanvas.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                const touch = e.touches[0];
+                draw({
+                    clientX: touch.clientX,
+                    clientY: touch.clientY
+                });
+            });
+            dCanvas.addEventListener('touchend', stopDrawing);
+            
+            const brushSlider = document.getElementById('brushSize');
+            const brushVal = document.getElementById('brushSizeVal');
+            brushSlider.oninput = function() {
+                brushVal.textContent = this.value + 'px';
+            };
+            brushVal.textContent = brushSlider.value + 'px';
+        }
+
+        function setDrawMode(mode) {
+            reviewDrawMode = mode;
+            document.getElementById('drawModeLeaf').classList.toggle('active', mode === 'leaf');
+            document.getElementById('drawModeFocus').classList.toggle('active', mode === 'focus');
+        }
+
+        function setTool(tool) {
+            reviewDrawTool = tool;
+            document.getElementById('toolDraw').classList.toggle('active', tool === 'draw');
+            document.getElementById('toolErase').classList.toggle('active', tool === 'erase');
+            
+            document.getElementById('toolDraw').style.background = tool === 'draw' ? 'rgba(59, 130, 246, 0.15)' : '';
+            document.getElementById('toolDraw').style.borderColor = tool === 'draw' ? 'rgba(59, 130, 246, 0.4)' : '';
+            document.getElementById('toolDraw').style.color = tool === 'draw' ? '#93c5fd' : '';
+
+            document.getElementById('toolErase').style.background = tool === 'erase' ? 'rgba(59, 130, 246, 0.15)' : '';
+            document.getElementById('toolErase').style.borderColor = tool === 'erase' ? 'rgba(59, 130, 246, 0.4)' : '';
+            document.getElementById('toolErase').style.color = tool === 'erase' ? '#93c5fd' : '';
+        }
+
+        function startDrawing(e) {
+            reviewIsDrawing = true;
+            const rect = dCanvas.getBoundingClientRect();
+            revLastX = e.clientX - rect.left;
+            revLastY = e.clientY - rect.top;
+        }
+
+        function draw(e) {
+            if (!reviewIsDrawing) return;
+            const rect = dCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            const activeCtx = reviewDrawMode === 'leaf' ? leafCtx : focusCtx;
+            const brushSize = parseInt(document.getElementById('brushSize').value);
+
+            activeCtx.beginPath();
+            activeCtx.moveTo(revLastX, revLastY);
+            activeCtx.lineTo(x, y);
+            activeCtx.lineWidth = brushSize;
+            activeCtx.lineCap = 'round';
+            activeCtx.lineJoin = 'round';
+
+            if (reviewDrawTool === 'draw') {
+                activeCtx.globalCompositeOperation = 'source-over';
+                activeCtx.strokeStyle = reviewDrawMode === 'leaf' ? 'rgba(34, 197, 94, 1)' : 'rgba(239, 68, 68, 1)';
+            } else {
+                activeCtx.globalCompositeOperation = 'destination-out';
+                activeCtx.strokeStyle = 'rgba(0,0,0,1)';
+            }
+            
+            activeCtx.stroke();
+            activeCtx.closePath();
+
+            revLastX = x;
+            revLastY = y;
+
+            redrawDisplay();
+        }
+
+        function stopDrawing() {
+            reviewIsDrawing = false;
+        }
+
+        function redrawDisplay() {
+            if (!dCtx) return;
+            dCtx.clearRect(0, 0, 448, 448);
+            
+            dCtx.globalAlpha = 0.45;
+            dCtx.drawImage(leafOffscreen, 0, 0);
+
+            dCtx.globalAlpha = 0.5;
+            dCtx.drawImage(focusOffscreen, 0, 0);
+            
+            dCtx.globalAlpha = 1.0;
+        }
+
+        function clearActiveCanvas() {
+            const activeCtx = reviewDrawMode === 'leaf' ? leafCtx : focusCtx;
+            activeCtx.clearRect(0, 0, 448, 448);
+            redrawDisplay();
+        }
+
+        async function saveAnnotations() {
+            if (!activeClass) return;
+
+            const saveBtn = document.querySelector('.work-btn.primary');
+            saveBtn.disabled = true;
+            document.getElementById('saveStatus').textContent = 'Saving annotations...';
+
+            const leafB64 = leafOffscreen.toDataURL('image/png');
+            const focusB64 = focusOffscreen.toDataURL('image/png');
+
+            try {
+                const response = await fetch('/review/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        class_name: activeClass,
+                        leaf_mask: leafB64,
+                        focus_mask: focusB64
+                    })
+                });
+
+                const res = await response.json();
+                if (res.error) throw new Error(res.error);
+
+                document.getElementById('saveStatus').textContent = 'Saved successfully! ✅';
+                setTimeout(() => {
+                    document.getElementById('saveStatus').textContent = '';
+                }, 3000);
+                
+                loadReviewClasses();
+            } catch(e) {
+                alert('Save failed: ' + e.message);
+                document.getElementById('saveStatus').textContent = 'Failed to save ❌';
+            } finally {
+                saveBtn.disabled = false;
+            }
+        }
+
+        function refreshControlPanel() {
+            loadJobs();
+            loadComputeInfo();
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const trainDataPercentRange = document.getElementById('trainDataPercentRange');
+            if (trainDataPercentRange) {
+                trainDataPercentRange.addEventListener('input', updateTrainDataPercentLabel);
+                updateTrainDataPercentLabel();
+            }
+
+            refreshControlPanel();
+            jobsPollHandle = setInterval(() => {
+                refreshControlPanel();
+            }, 1000);
+        });
+    </script>
+</body>
+</html>

@@ -8,7 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pytest
 
-from backbones import (
+from src.core.backbones import (
     list_backbone_names,
     resolve_backbone_name,
     resolve_preprocess_function,

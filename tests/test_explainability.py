@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure model_paths is imported so custom layer registration triggers
-import model_paths  # noqa: F401
+from src.utils import model_paths  # noqa: F401
 from scripts.gradcam_check import (
     _compute_deletion_drop,
     _extract_leaf_mask,
@@ -78,7 +78,7 @@ def test_compute_deletion_drop():
 def test_randomize_background_batch_tf():
     import tensorflow as tf
 
-    from training_utils import _randomize_background_batch_tf
+    from src.training.training_utils import _randomize_background_batch_tf
 
     # Create batch of 2 images of size 32x32x3
     # Left half: green leaf (50, 200, 50)
@@ -100,7 +100,7 @@ def test_randomize_background_batch_tf():
 
 def test_saliency_aligned_model():
 
-    from saliency_alignment import SaliencyAlignedModel
+    from src.core.saliency_alignment import SaliencyAlignedModel
 
     # Build a simple mock model using functional API
     inputs = keras.layers.Input(shape=(224, 224, 3), dtype="float32")
@@ -161,7 +161,7 @@ def test_saliency_aligned_model():
 def test_saliency_aligned_model_multiblock_config():
     """Verify that multi-block configuration is accepted and stored."""
 
-    from saliency_alignment import SaliencyAlignedModel
+    from src.core.saliency_alignment import SaliencyAlignedModel
 
     inputs = keras.layers.Input(shape=(224, 224, 3), dtype="float32")
     x = keras.layers.Conv2D(4, (3, 3), activation="relu", name="test_conv_mb")(
@@ -192,7 +192,7 @@ def test_saliency_aligned_model_multiblock_config():
         vit_block_idx=5,
     )
     # Should use config default ATTENTION_VIT_BLOCK_INDICES
-    # (which is [8, 10, 11] from config)
+    # (which is [8, 10, 11] from src.utils.config)
     assert len(aligned_single.vit_block_indices) >= 1
 
     aligned.compile(

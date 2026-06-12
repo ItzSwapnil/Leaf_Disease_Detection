@@ -20,8 +20,7 @@ import seaborn as sns
 import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.models import load_model
-
-from config import (
+from src.utils.config import (
     BATCH_SIZE,
     CLASS_INDICES_PATH,
     FINAL_MODEL_PATH,
@@ -30,17 +29,17 @@ from config import (
     TRAIN_DIR,
     WARMUP_EPOCHS,
 )
-from learning_curve_utils import (
+from src.training.learning_curve_utils import (
     best_epoch_from_values,
 )
-from model_paths import resolve_keras_model_path
-from preprocessing import preprocess_batch_for_model_tf
+from src.utils.model_paths import resolve_keras_model_path
+from src.core.preprocessing import preprocess_batch_for_model_tf
 from scripts.figure_paths import (
     OTHERS_PLOTS_DIR,
     backbone_plot_dir,
     prepare_plot_directories,
 )
-from training_utils import WarmupCosineSchedule
+from src.training.training_utils import WarmupCosineSchedule
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 

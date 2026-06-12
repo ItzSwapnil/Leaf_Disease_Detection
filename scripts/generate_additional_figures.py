@@ -29,8 +29,7 @@ from PIL import Image
 from sklearn.metrics import auc, roc_curve
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 from tensorflow.keras.models import load_model
-
-from config import (
+from src.utils.config import (
     CUTMIX_ALPHA,
     FINAL_MODEL_PATH,
     IMG_SIZE,
@@ -41,9 +40,9 @@ from config import (
     USE_MIXUP,
     VAL_DIR,
 )
-from model_paths import resolve_keras_model_path
-from preprocessing import preprocess_batch_for_model_tf
-from training_utils import (
+from src.utils.model_paths import resolve_keras_model_path
+from src.core.preprocessing import preprocess_batch_for_model_tf
+from src.training.training_utils import (
     WarmupCosineSchedule,
     cutmix_numpy_batch,
     mixup_cutmix_generator,

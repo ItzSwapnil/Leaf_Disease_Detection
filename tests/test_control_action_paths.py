@@ -7,7 +7,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-APP_FILE = PROJECT_ROOT / "app.py"
+APP_FILE = PROJECT_ROOT / "src" / "web" / "app.py"
 
 
 def _string_assignments(module: ast.Module) -> dict[str, str]:

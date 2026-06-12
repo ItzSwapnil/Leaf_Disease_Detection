@@ -22,12 +22,12 @@ dependencies = [
 ]
 
 [project.scripts]
-leaf-disease = "main:main"
-leaf-disease-train = "train_model:main"
-leaf-disease-fine-tune = "fine_tune_model:main"
-leaf-disease-refine = "refine_model:main"
-leaf-disease-evaluate = "evaluate_model:main"
-leaf-disease-predict = "predict:main"
+leaf-disease = "src.main:main"
+leaf-disease-train = "src.training.train_model:main"
+leaf-disease-fine-tune = "src.training.fine_tune_model:main"
+leaf-disease-refine = "src.training.refine_model:main"
+leaf-disease-evaluate = "src.evaluation.evaluate_model:main"
+leaf-disease-predict = "src.pipeline.predict:main"
 leaf-disease-figures = "scripts.generate_figures:main"
 leaf-disease-multi-seed = "tools.run_multi_seed_experiment:main"
 

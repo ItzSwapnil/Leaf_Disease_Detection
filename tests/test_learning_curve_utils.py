@@ -1,4 +1,4 @@
-from learning_curve_utils import (
+from src.training.learning_curve_utils import (
     best_epoch_from_values,
     build_best_epoch_markers,
     combine_train_and_fine_metrics,
