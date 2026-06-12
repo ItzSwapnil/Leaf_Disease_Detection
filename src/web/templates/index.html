@@ -810,6 +810,28 @@
             padding: 8px 12px;
             cursor: pointer;
             font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .stop-btn:hover {
+            background: rgba(239, 68, 68, 0.25);
+            border-color: rgba(239, 68, 68, 0.6);
+        }
+
+        .resume-btn {
+            border: 1px solid rgba(16, 185, 129, 0.4);
+            color: #a7f3d0;
+            background: rgba(16, 185, 129, 0.12);
+            border-radius: 10px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .resume-btn:hover {
+            background: rgba(16, 185, 129, 0.25);
+            border-color: rgba(16, 185, 129, 0.6);
         }
 
         .job-log {
@@ -1486,6 +1508,11 @@
                 <span>Enable class equalizer (balance class influence)</span>
             </label>
 
+            <label class="archive-toggle" title="When enabled, training will pause after each epoch to let you review and adjust the attention maps before resuming.">
+                <input type="checkbox" id="mustReviewToggle">
+                <span>Must review after every epoch (pause and wait)</span>
+            </label>
+
             <p class="training-note">Training options above apply to the Train Model action only.</p>
 
             <div id="jobsList" class="jobs-list">
@@ -1556,10 +1583,13 @@
 
                         <div class="action-btns">
                             <button class="work-btn secondary" onclick="clearActiveCanvas()">
-                                <i class="fas fa-trash-alt"></i> Clear Canvas
+                                <i class="fas fa-eraser"></i> Clear Mask
                             </button>
                             <button class="work-btn primary" onclick="saveAnnotations()">
                                 <i class="fas fa-save"></i> Save Annotations
+                            </button>
+                            <button id="resumeFromReviewBtn" class="work-btn" style="display:none; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; font-weight: 700; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); margin-left: auto;" onclick="resumeTrainingFromReview()">
+                                <i class="fas fa-play"></i> Submit & Resume Training
                             </button>
                         </div>
                     </div>
@@ -1781,6 +1811,7 @@
                     const trainOptimizerSelect = document.getElementById('trainOptimizerSelect');
                     const trainSaveModeSelect = document.getElementById('trainSaveModeSelect');
                     const classEqualizerToggle = document.getElementById('classEqualizerToggle');
+                    const mustReviewToggle = document.getElementById('mustReviewToggle');
 
                     const trainFractionPercent = Number(trainDataPercentRange ? trainDataPercentRange.value : 100);
                     requestBody.train_fraction_percent = Number.isFinite(trainFractionPercent)
@@ -1789,6 +1820,7 @@
                     requestBody.optimizer = trainOptimizerSelect ? trainOptimizerSelect.value : 'AdamW';
                     requestBody.save_mode = trainSaveModeSelect ? trainSaveModeSelect.value : 'with_optimizer';
                     requestBody.class_equalizer = !!(classEqualizerToggle && classEqualizerToggle.checked);
+                    requestBody.must_review = !!(mustReviewToggle && mustReviewToggle.checked);
                 }
                 const response = await fetch(`/control/run/${actionKey}`, {
                     method: 'POST',
@@ -1819,6 +1851,44 @@
                 await loadJobs();
             } catch (error) {
                 alert('Stop error: ' + error.message);
+            }
+        }
+
+        async function resumeJob(jobId) {
+            try {
+                const response = await fetch('/control/resume', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: jobId })
+                });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Could not resume job');
+                }
+                await loadJobs();
+            } catch (error) {
+                alert('Resume error: ' + error.message);
+            }
+        }
+
+        async function resumeTrainingFromReview() {
+            try {
+                const response = await fetch('/control/jobs');
+                const payload = await response.json();
+                const jobs = payload.jobs || [];
+                const pausedJob = jobs.find(j => j.status === 'running' && j.progress_stage === 'paused_for_review');
+                if (pausedJob) {
+                    await resumeJob(pausedJob.id);
+                } else {
+                    const res = await fetch('/control/resume', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({})
+                    });
+                    await loadJobs();
+                }
+            } catch (error) {
+                alert('Failed to resume training: ' + error.message);
             }
         }
 
@@ -1952,7 +2022,12 @@
                             </div>
                         </div>
                         <div class="job-log">${latestLogs || 'No logs yet.'}</div>
-                        ${canStop ? `<div class="job-actions"><button class="stop-btn" onclick="stopJob('${job.id}')"><i class='fas fa-stop-circle'></i> Stop</button></div>` : ''}
+                        ${canStop ? `
+                            <div class="job-actions">
+                                ${job.progress_stage === 'paused_for_review' ? `<button class="resume-btn" onclick="resumeJob('${job.id}')"><i class='fas fa-play-circle'></i> Resume</button>` : ''}
+                                <button class="stop-btn" onclick="stopJob('${job.id}')"><i class='fas fa-stop-circle'></i> Stop</button>
+                            </div>
+                        ` : ''}
                     </div>
                 `;
             }).join('');
@@ -1967,7 +2042,15 @@
                 if (!response.ok) {
                     throw new Error(payload.error || 'Could not load jobs');
                 }
-                renderJobs(payload.jobs || []);
+                const jobs = payload.jobs || [];
+                renderJobs(jobs);
+
+                // Update Submit & Resume button visibility in review workspace
+                const isPaused = jobs.some(j => j.status === 'running' && j.progress_stage === 'paused_for_review');
+                const resumeReviewBtn = document.getElementById('resumeFromReviewBtn');
+                if (resumeReviewBtn) {
+                    resumeReviewBtn.style.display = isPaused ? 'inline-flex' : 'none';
+                }
             } catch (error) {
                 document.getElementById('jobsList').innerHTML = `<div class="jobs-empty">${error.message}</div>`;
             }

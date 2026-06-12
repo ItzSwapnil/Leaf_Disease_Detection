@@ -215,3 +215,82 @@ class IntervalMetricsLogger(keras.callbacks.Callback):
             self._fp.flush()
             self._fp.close()
             self._fp = None
+
+
+class EpochReviewCallback(keras.callbacks.Callback):
+    """Callback to pause training at the end of each epoch and wait
+    for user review.
+    """
+
+    def __init__(self, enabled=None, total_epochs=0, stage="train"):
+        super().__init__()
+        if enabled is None:
+            self.enabled = os.getenv("LEAF_MUST_REVIEW") == "1"
+        else:
+            self.enabled = bool(enabled)
+        self.total_epochs = total_epochs
+        self.stage = stage
+
+    def on_epoch_end(self, epoch, logs=None):
+        if not self.enabled:
+            return
+
+        paused_file = os.path.join("logs", "paused_epoch.json")
+        os.makedirs(os.path.dirname(paused_file), exist_ok=True)
+
+        info = {
+            "epoch": epoch + 1,
+            "total_epochs": self.total_epochs,
+            "stage": self.stage,
+            "paused": True
+        }
+        with open(paused_file, "w", encoding="utf-8") as f:
+            json.dump(info, f, indent=2)
+
+        # Print TRAINING_PROGRESS line for Flask subprocess reader to capture
+        progress_pct = ((epoch + 1) / self.total_epochs) * 100.0
+        payload = {
+            "stage": "paused_for_review",
+            "progress_pct": round(progress_pct, 2),
+            "eta_seconds": 0.0,
+            "epoch_done": epoch + 1,
+            "total_epochs": self.total_epochs,
+            "timestamp": round(time.time(), 2),
+        }
+        print(f"TRAINING_PROGRESS {json.dumps(payload)}", flush=True)
+
+        print(
+            f"\n[EpochReviewCallback] Training paused for review "
+            f"after epoch {epoch + 1}.",
+            flush=True,
+        )
+        print(
+            "Please review and submit annotations on the Web UI to resume...",
+            flush=True,
+        )
+
+        resume_flag = os.path.join("logs", "resume_epoch.flag")
+
+        # Block and poll until the resume flag is created by the web app
+        while not os.path.exists(resume_flag):
+            time.sleep(0.5)
+
+        # Clean up both flag and paused status files
+        try:
+            if os.path.exists(resume_flag):
+                os.remove(resume_flag)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(paused_file):
+                os.remove(paused_file)
+        except Exception:
+            pass
+
+        print(
+            "[EpochReviewCallback] Review completed. Resuming training...",
+            flush=True,
+        )
+
+
+

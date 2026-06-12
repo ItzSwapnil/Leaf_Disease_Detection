@@ -50,7 +50,7 @@ from src.utils.config import (
 )
 from src.utils.hardware import configure_tensorflow, get_training_strategy
 from src.core.preprocessing import preprocess_batch_for_model_tf
-from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter
+from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter, EpochReviewCallback
 from src.training.training_utils import (
     BestModelSaver,
     GradCamEpochCollageCallback,
@@ -678,6 +678,7 @@ def main():
                 tensorboard,
                 progress,
                 collage_callback,
+                EpochReviewCallback(total_epochs=total_epochs, stage="fine_tuning"),
             ]
             if cb is not None
         ],

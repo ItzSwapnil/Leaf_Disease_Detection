@@ -41,7 +41,7 @@ from src.training.fine_tune_model import (
 )
 from src.utils.hardware import configure_tensorflow, get_training_strategy
 from src.core.preprocessing import preprocess_batch_for_model_tf
-from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter
+from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter, EpochReviewCallback
 from src.training.training_utils import (
     GradCamEpochCollageCallback,
     RollingPreOverfitRestorer,
@@ -578,6 +578,7 @@ def main():
         *interval_loggers,
         progress,
         collage_callback,
+        EpochReviewCallback(total_epochs=total_epochs, stage="refinement"),
         RollingPreOverfitRestorer(
             min_gap=float(args.overfit_gap),
             patience=int(args.overfit_patience),

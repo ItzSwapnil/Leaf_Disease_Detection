@@ -527,6 +527,7 @@ def _create_job(
     optimizer = train_options.get("optimizer")
     save_mode = train_options.get("save_mode")
     class_equalizer = train_options.get("class_equalizer")
+    must_review = train_options.get("must_review")
 
     if action_key == "train" and base_model:
         script_args = ["--base-model", str(base_model)]
@@ -541,6 +542,10 @@ def _create_job(
     if action_key == "train" and class_equalizer is not None:
         script_args.extend(
             ["--class-equalizer", "on" if bool(class_equalizer) else "off"]
+        )
+    if action_key == "train" and must_review is not None:
+        script_args.extend(
+            ["--must-review", "on" if bool(must_review) else "off"]
         )
 
     command = [sys.executable, script, *script_args]
@@ -560,6 +565,8 @@ def _create_job(
         env_overrides["LEAF_SAVE_MODE"] = str(save_mode)
     if action_key == "train" and class_equalizer is not None:
         env_overrides["LEAF_CLASS_EQUALIZER"] = "1" if class_equalizer else "0"
+    if action_key == "train" and must_review is not None:
+        env_overrides["LEAF_MUST_REVIEW"] = "1" if must_review else "0"
 
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -578,6 +585,7 @@ def _create_job(
         "optimizer": optimizer,
         "save_mode": save_mode,
         "class_equalizer": class_equalizer,
+        "must_review": must_review,
         "env_overrides": env_overrides,
         "status": "starting",
         "start_time": now,
@@ -726,6 +734,7 @@ def _job_response(job):
         "optimizer": job.get("optimizer"),
         "save_mode": job.get("save_mode"),
         "class_equalizer": job.get("class_equalizer"),
+        "must_review": job.get("must_review"),
         "command": job["command"],
         "archive_logs": bool(job.get("archive_logs", False)),
         "status": job["status"],
@@ -1428,13 +1437,171 @@ def get_review_sample(class_name):
     return send_from_directory(samples_dir, filename)
 
 
+def generate_default_leaf_mask(image_path):
+    import cv2
+    import numpy as np
+
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+
+    # Convert to HSV
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+
+    # Thresholds: saturation <= 0.15 * 255 (~38), value <= 0.08 * 255 (~20), value >= 0.94 * 255 (~240)
+    bg_mask = (s <= 38) | (v <= 20) | (v >= 240)
+    leaf_mask = ~bg_mask
+
+    h, w = img.shape[:2]
+    # Create 4-channel transparent PNG
+    mask_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    # Paint leaf green: BGR = (94, 197, 34), alpha = 255
+    mask_rgba[leaf_mask, 0] = 94
+    mask_rgba[leaf_mask, 1] = 197
+    mask_rgba[leaf_mask, 2] = 34
+    mask_rgba[leaf_mask, 3] = 255
+
+    # Resize to 448x448 to match front-end canvas
+    mask_rgba = cv2.resize(mask_rgba, (448, 448), interpolation=cv2.INTER_NEAREST)
+    return mask_rgba
+
+
+def generate_default_focus_mask(class_name, image_path):
+    import cv2
+    import numpy as np
+    global model, class_indices, ACTIVE_BACKBONE
+
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+
+    # Attempt to use model Grad-CAM if available
+    try:
+        if model is None or class_indices is None:
+            load_model_and_classes()
+
+        if model is not None and class_indices is not None:
+            from tensorflow.keras.preprocessing import image as keras_image
+            from src.core.preprocessing import preprocess_array_for_model
+            from scripts.gradcam_check import _make_gradcam_heatmap, _find_target_layer
+
+            # Load and preprocess image
+            img_loaded = keras_image.load_img(image_path, target_size=(224, 224))
+            img_array = keras_image.img_to_array(img_loaded)
+            img_array_exp = np.expand_dims(img_array, axis=0)
+
+            if not _model_has_internal_preprocessing(model):
+                img_array_exp = preprocess_array_for_model(
+                    img_array_exp, backbone_name=ACTIVE_BACKBONE
+                )
+
+            # Find target class index
+            pred_index = None
+            for idx, name in class_indices.items():
+                if name == class_name:
+                    pred_index = idx
+                    break
+
+            # Resolve healthy partner for deviation calculation
+            healthy_partner_idx = None
+            from src.training.training_utils import parse_class_structure
+
+            class_names_list = [
+                class_indices[i] for i in sorted(class_indices.keys())
+            ]
+            partners = parse_class_structure(class_names_list)
+            if pred_index is not None and pred_index < len(partners):
+                healthy_partner_idx = partners[pred_index]
+
+            target_layer_name = None
+            if ACTIVE_BACKBONE != "DINOv3":
+                target_layer_name = _find_target_layer(model)
+
+            # Generate Grad-CAM heatmaps
+            _, disease_heatmap = _make_gradcam_heatmap(
+                model=model,
+                img_array=img_array_exp,
+                target_layer_name=target_layer_name,
+                pred_index=pred_index,
+                backbone_name=ACTIVE_BACKBONE or "DINOv3",
+                vit_block_idx=6,
+                healthy_partner_idx=healthy_partner_idx,
+            )
+
+            if disease_heatmap is not None and np.max(disease_heatmap) > 0:
+                h_orig, w_orig = img.shape[:2]
+                disease_heatmap_resized = cv2.resize(
+                    disease_heatmap, (w_orig, h_orig)
+                )
+
+                # Threshold Grad-CAM heatmap at > 0.3 as candidate focus
+                focus_mask = disease_heatmap_resized > 0.3
+
+                mask_rgba = np.zeros((h_orig, w_orig, 4), dtype=np.uint8)
+                # Paint focus red: BGR = (68, 68, 239), alpha = 255
+                mask_rgba[focus_mask, 0] = 68
+                mask_rgba[focus_mask, 1] = 68
+                mask_rgba[focus_mask, 2] = 239
+                mask_rgba[focus_mask, 3] = 255
+
+                mask_rgba = cv2.resize(
+                    mask_rgba, (448, 448), interpolation=cv2.INTER_NEAREST
+                )
+                return mask_rgba
+    except Exception as e:
+        print(f"Error generating model focus mask: {e}")
+
+    # Fallback: segment center region of leaf mask
+    try:
+        leaf_mask_rgba = generate_default_leaf_mask(image_path)
+        if leaf_mask_rgba is not None:
+            mask_rgba = np.zeros((448, 448, 4), dtype=np.uint8)
+            h_c, w_c = 224, 224
+            for r in range(448):
+                for c in range(448):
+                    if leaf_mask_rgba[r, c, 3] == 255:
+                        dist = np.sqrt((r - h_c) ** 2 + (c - w_c) ** 2)
+                        if dist < 100:  # center circle of radius 100
+                            mask_rgba[r, c, 0] = 68
+                            mask_rgba[r, c, 1] = 68
+                            mask_rgba[r, c, 2] = 239
+                            mask_rgba[r, c, 3] = 255
+            return mask_rgba
+    except Exception:
+        pass
+
+    # Ultimate fallback: center circle on blank background
+    mask_rgba = np.zeros((448, 448, 4), dtype=np.uint8)
+    cv2.circle(mask_rgba, (224, 224), 80, (68, 68, 239, 255), -1)
+    return mask_rgba
+
+
 @app.route("/review/mask/<class_name>/<mask_type>")
 def get_review_mask(class_name, mask_type):
     from flask import send_from_directory
     masks_dir = os.path.abspath(os.path.join("annotations", "masks"))
+    os.makedirs(masks_dir, exist_ok=True)
     filename = f"{class_name}_{mask_type}.png"
-    if not os.path.exists(os.path.join(masks_dir, filename)):
+    filepath = os.path.join(masks_dir, filename)
+
+    if not os.path.exists(filepath):
+        samples_dir = os.path.abspath(os.path.join("annotations", "samples"))
+        sample_img_path = os.path.join(samples_dir, f"{class_name}.jpg")
+        if os.path.exists(sample_img_path):
+            import cv2
+            if mask_type == "leaf":
+                mask_data = generate_default_leaf_mask(sample_img_path)
+            else:
+                mask_data = generate_default_focus_mask(class_name, sample_img_path)
+
+            if mask_data is not None:
+                cv2.imwrite(filepath, mask_data)
+
+    if not os.path.exists(filepath):
         return jsonify({"error": "Mask not found"}), 404
+
     return send_from_directory(masks_dir, filename)
 
 
@@ -1659,6 +1826,7 @@ def control_run(action_key):
     optimizer = (payload.get("optimizer") or "").strip() if payload else ""
     save_mode = (payload.get("save_mode") or "").strip() if payload else ""
     class_equalizer = payload.get("class_equalizer") if payload else None
+    must_review = payload.get("must_review") if payload else None
 
     if not payload and request.form:
         archive_logs = _to_bool(request.form.get("archive_logs"))
@@ -1667,6 +1835,7 @@ def control_run(action_key):
         optimizer = (request.form.get("optimizer") or "").strip()
         save_mode = (request.form.get("save_mode") or "").strip()
         class_equalizer = request.form.get("class_equalizer")
+        must_review = request.form.get("must_review")
 
     if base_model and action_key not in {"train"}:
         return jsonify(
@@ -1730,6 +1899,7 @@ def control_run(action_key):
             train_options["class_equalizer"] = True
         else:
             train_options["class_equalizer"] = _to_bool(class_equalizer)
+        train_options["must_review"] = _to_bool(must_review)
 
     job = _create_job(
         action_key,
@@ -1752,6 +1922,26 @@ def control_jobs():
         jobs = [_job_response(job) for job in JOBS.values()]
     jobs.sort(key=lambda x: x["start_time"] or 0, reverse=True)
     return jsonify({"jobs": jobs})
+
+
+@app.route("/control/resume", methods=["POST"])
+def control_resume():
+    """Resume a paused training job."""
+    try:
+        os.makedirs("logs", exist_ok=True)
+        flag_path = os.path.join("logs", "resume_epoch.flag")
+        with open(flag_path, "w", encoding="utf-8") as f:
+            f.write("resume")
+
+        # Set job stage to resuming in memory for immediate UI feedback
+        with JOBS_LOCK:
+            for job in JOBS.values():
+                if job["status"] == "running" and job.get("progress_stage") == "paused_for_review":
+                    job["progress_stage"] = "resuming"
+
+        return jsonify({"message": "Resume signal sent."})
+    except Exception as e:
+        return jsonify({"error": f"Failed to send resume signal: {e}"}), 500
 
 
 @app.route("/control/system", methods=["GET"])

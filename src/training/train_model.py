@@ -71,7 +71,7 @@ from src.utils.config import (
 )
 from src.utils.hardware import configure_tensorflow, get_training_strategy
 from src.core.preprocessing import preprocess_batch_for_model_tf
-from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter
+from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter, EpochReviewCallback
 from src.training.training_utils import (
     BestModelSaver,
     FamilyDeviationClassifier,
@@ -354,7 +354,18 @@ def main():
         default=None,
         help="Enable or disable strict per-class equalizer weighting.",
     )
+    parser.add_argument(
+        "--must-review",
+        choices=["on", "off"],
+        default=None,
+        help="Wait for user review at the end of each epoch.",
+    )
     args = parser.parse_args()
+
+    must_review_env = os.getenv("LEAF_MUST_REVIEW") == "1"
+    must_review_arg = args.must_review == "on" if args.must_review is not None else None
+    must_review_enabled = must_review_arg if must_review_arg is not None else must_review_env
+
 
     backbone_name = resolve_backbone_name(
         args.base_model or os.getenv("LEAF_BASE_MODEL"),
@@ -962,6 +973,11 @@ def main():
             *interval_loggers_phase1,
             progress_phase1,
             collage_callback,
+            EpochReviewCallback(
+                enabled=must_review_enabled,
+                total_epochs=total_epochs,
+                stage="phase1_warmup",
+            ),
         ]
         if OVERFITTING_STOP_ENABLED:
             phase1_callbacks.append(
@@ -1084,6 +1100,11 @@ def main():
             *interval_loggers_phase2,
             progress_phase2,
             collage_callback,
+            EpochReviewCallback(
+                enabled=must_review_enabled,
+                total_epochs=total_epochs,
+                stage="phase2_finetune",
+            ),
         ]
         if OVERFITTING_STOP_ENABLED:
             phase2_callbacks.append(
