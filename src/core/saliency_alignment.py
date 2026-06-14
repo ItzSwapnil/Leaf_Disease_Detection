@@ -34,28 +34,36 @@ class SaliencyAlignedModel(keras.Model):
         super().__init__()
         self.class_names = class_names
         self.has_human_ann = False
-        
+
         if class_names:
             ann_data = self._load_human_annotations(class_names)
             if ann_data is not None:
                 from src.core.backbones import resolve_preprocess_function
+
                 preprocess_fn = resolve_preprocess_function(backbone_name)
                 proc_imgs = preprocess_fn(ann_data["images"])
-                
+
                 self.ann_images = tf.constant(proc_imgs, dtype=tf.float32)
-                self.ann_leaf_masks = tf.constant(ann_data["leaf_masks"], dtype=tf.float32)
-                self.ann_focus_masks = tf.constant(ann_data["focus_masks"], dtype=tf.float32)
-                self.ann_labels = tf.constant(ann_data["labels"], dtype=tf.int32)
+                self.ann_leaf_masks = tf.constant(
+                    ann_data["leaf_masks"], dtype=tf.float32
+                )
+                self.ann_focus_masks = tf.constant(
+                    ann_data["focus_masks"], dtype=tf.float32
+                )
+                self.ann_labels = tf.constant(
+                    ann_data["labels"], dtype=tf.int32
+                )
                 self.has_human_ann = True
-                print(f"Loaded {len(proc_imgs)} human annotations for saliency alignment!")
+                print(
+                    f"Loaded {len(proc_imgs)} human annotations for saliency alignment!"
+                )
         self.functional_model = functional_model
         self.backbone_name = backbone_name
         self.bg_weight = bg_weight
         self.sparsity_weight = sparsity_weight
         self.disease_reward_weight = disease_reward_weight
         self.disease_class_indices = disease_class_indices
-        # When False (Phase 1, frozen backbone), all spatial
-        # penalties are zeroed out so the head can train safely.
+        # Penalties are disabled in Phase 1 (frozen backbone).
         self.enable_penalties = enable_penalties
 
         # Resolve multi-block indices with backward compat
@@ -74,10 +82,18 @@ class SaliencyAlignedModel(keras.Model):
             name="sparsity_penalty"
         )
         self.disease_reward_tracker = keras.metrics.Mean(name="disease_reward")
-        self.crop_bg_penalty_tracker = keras.metrics.Mean(name="crop_bg_penalty")
-        self.crop_coverage_reward_tracker = keras.metrics.Mean(name="crop_coverage_reward")
-        self.human_bg_penalty_tracker = keras.metrics.Mean(name="human_bg_penalty")
-        self.human_disease_reward_tracker = keras.metrics.Mean(name="human_disease_reward")
+        self.crop_bg_penalty_tracker = keras.metrics.Mean(
+            name="crop_bg_penalty"
+        )
+        self.crop_coverage_reward_tracker = keras.metrics.Mean(
+            name="crop_coverage_reward"
+        )
+        self.human_bg_penalty_tracker = keras.metrics.Mean(
+            name="human_bg_penalty"
+        )
+        self.human_disease_reward_tracker = keras.metrics.Mean(
+            name="human_disease_reward"
+        )
 
         self.grad_model = None
         if self.backbone_name != "DINOv3":
@@ -93,33 +109,40 @@ class SaliencyAlignedModel(keras.Model):
                 )
 
     def _load_human_annotations(self, class_names):
+        import os
+
         import cv2
         import numpy as np
-        import os
-        
+
         annotated_images = []
         annotated_leaf_masks = []
         annotated_focus_masks = []
         annotated_labels = []
-        
+
         samples_dir = os.path.join("annotations", "samples")
         masks_dir = os.path.join("annotations", "masks")
-        
+
         if not os.path.exists(masks_dir):
             return None
-            
+
         for idx, class_name in enumerate(class_names):
             img_path = os.path.join(samples_dir, f"{class_name}.jpg")
             leaf_mask_path = os.path.join(masks_dir, f"{class_name}_leaf.png")
-            focus_mask_path = os.path.join(masks_dir, f"{class_name}_focus.png")
-            
-            if os.path.exists(img_path) and os.path.exists(leaf_mask_path) and os.path.exists(focus_mask_path):
+            focus_mask_path = os.path.join(
+                masks_dir, f"{class_name}_focus.png"
+            )
+
+            if (
+                os.path.exists(img_path)
+                and os.path.exists(leaf_mask_path)
+                and os.path.exists(focus_mask_path)
+            ):
                 img = cv2.imread(img_path)
                 if img is None:
                     continue
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = cv2.resize(img, (224, 224))
-                
+
                 # Load masks with alpha if possible, or fall back to gray
                 leaf_mask = cv2.imread(leaf_mask_path, cv2.IMREAD_UNCHANGED)
                 if leaf_mask is None:
@@ -129,9 +152,11 @@ class SaliencyAlignedModel(keras.Model):
                 else:
                     leaf_mask = cv2.cvtColor(leaf_mask, cv2.COLOR_BGR2GRAY)
                 leaf_mask = cv2.resize(leaf_mask, (224, 224))
-                _, leaf_mask = cv2.threshold(leaf_mask, 127, 255, cv2.THRESH_BINARY)
+                _, leaf_mask = cv2.threshold(
+                    leaf_mask, 127, 255, cv2.THRESH_BINARY
+                )
                 leaf_mask = (leaf_mask / 255.0).astype(np.float32)
-                
+
                 focus_mask = cv2.imread(focus_mask_path, cv2.IMREAD_UNCHANGED)
                 if focus_mask is None:
                     continue
@@ -140,22 +165,24 @@ class SaliencyAlignedModel(keras.Model):
                 else:
                     focus_mask = cv2.cvtColor(focus_mask, cv2.COLOR_BGR2GRAY)
                 focus_mask = cv2.resize(focus_mask, (224, 224))
-                _, focus_mask = cv2.threshold(focus_mask, 127, 255, cv2.THRESH_BINARY)
+                _, focus_mask = cv2.threshold(
+                    focus_mask, 127, 255, cv2.THRESH_BINARY
+                )
                 focus_mask = (focus_mask / 255.0).astype(np.float32)
-                
+
                 annotated_images.append(img.astype(np.float32))
                 annotated_leaf_masks.append(np.expand_dims(leaf_mask, -1))
                 annotated_focus_masks.append(np.expand_dims(focus_mask, -1))
                 annotated_labels.append(idx)
-                
+
         if not annotated_images:
             return None
-            
+
         return {
             "images": np.array(annotated_images),
             "leaf_masks": np.array(annotated_leaf_masks),
             "focus_masks": np.array(annotated_focus_masks),
-            "labels": np.array(annotated_labels)
+            "labels": np.array(annotated_labels),
         }
 
     def _find_conv_layer(self, model):
@@ -218,12 +245,18 @@ class SaliencyAlignedModel(keras.Model):
         crop_bg_penalty = gc_bg / gc_tot
 
         eps = 1e-5
-        gc_tot_keepdims = tf.reduce_sum(heatmap_grid, axis=[1, 2, 3], keepdims=True) + 1e-5
+        gc_tot_keepdims = (
+            tf.reduce_sum(heatmap_grid, axis=[1, 2, 3], keepdims=True) + 1e-5
+        )
         hm_prob = heatmap_grid / gc_tot_keepdims
-        entropy = -tf.reduce_sum(hm_prob * tf.math.log(hm_prob + eps), axis=[1, 2, 3])
+        entropy = -tf.reduce_sum(
+            hm_prob * tf.math.log(hm_prob + eps), axis=[1, 2, 3]
+        )
         crop_coverage_reward = entropy
-        
-        return tf.reduce_mean(crop_bg_penalty), tf.reduce_mean(crop_coverage_reward)
+
+        return tf.reduce_mean(crop_bg_penalty), tf.reduce_mean(
+            crop_coverage_reward
+        )
 
     def _compute_disease_heatmap_penalties(
         self,
@@ -237,50 +270,50 @@ class SaliencyAlignedModel(keras.Model):
 
         Returns (bg_penalty, sparsity_penalty, disease_reward) as scalars.
         """
-        # We calculate penalties per sample first, then average over the batch
-        # because sparsity and reward are conditioned on whether the sample is diseased.
+        # Calculate per-sample penalties conditioned on disease status.
 
         bg_mask_resized = tf.cast(bg_mask_resized, dtype=heatmap_grid.dtype)
-        anomaly_mask_resized = tf.cast(anomaly_mask_resized, dtype=heatmap_grid.dtype)
+        anomaly_mask_resized = tf.cast(
+            anomaly_mask_resized, dtype=heatmap_grid.dtype
+        )
 
-        # 1. Background Penalty (Energy fraction outside leaf)
+        # 1. Background Penalty (energy outside leaf)
         gc_bg = tf.reduce_sum(heatmap_grid * bg_mask_resized, axis=[1, 2, 3])
         gc_tot = tf.reduce_sum(heatmap_grid, axis=[1, 2, 3]) + 1e-5
         gradcam_bg_penalty = gc_bg / gc_tot
 
-        # 2. Sparsity Penalty
-        # Use spatial entropy of the normalized heatmap as a true sparsity metric.
-        # Minimizing entropy forces the attention distribution to be highly peaked (focused)
-        # rather than diffuse (attention everywhere).
+        # 2. Sparsity Penalty (spatial entropy of normalized heatmap)
         eps = 1e-5
-        # Normalize heatmap to a probability distribution (sum to 1) per image
-        gc_tot_keepdims = tf.reduce_sum(heatmap_grid, axis=[1, 2, 3], keepdims=True) + 1e-5
+        # Normalize heatmap per image.
+        gc_tot_keepdims = (
+            tf.reduce_sum(heatmap_grid, axis=[1, 2, 3], keepdims=True) + 1e-5
+        )
         hm_prob = heatmap_grid / gc_tot_keepdims
         # Compute entropy per image
-        entropy = -tf.reduce_sum(hm_prob * tf.math.log(hm_prob + eps), axis=[1, 2, 3])
-        
-        # Only apply sparsity if the sample is diseased
-        # Healthy samples shouldn't be forced to focus on a single spot.
+        entropy = -tf.reduce_sum(
+            hm_prob * tf.math.log(hm_prob + eps), axis=[1, 2, 3]
+        )
+
+        # Sparsity for diseased samples only.
         gradcam_sparsity = entropy * tf.cast(
             tf.squeeze(is_diseased, axis=[-1, -2, -3]), heatmap_grid.dtype
         )
 
-        # 3. Disease Reward (Energy fraction inside anomaly mask)
-        # Only reward if the sample is diseased
+        # 3. Disease Reward (energy inside anomaly mask)
         gc_anomaly = tf.reduce_sum(
             heatmap_grid * anomaly_mask_resized, axis=[1, 2, 3]
         )
-        gradcam_disease_reward = (gc_anomaly / gc_tot) * tf.cast(tf.squeeze(
-            is_diseased, axis=[-1, -2, -3]
-        ), heatmap_grid.dtype)
+        gradcam_disease_reward = (gc_anomaly / gc_tot) * tf.cast(
+            tf.squeeze(is_diseased, axis=[-1, -2, -3]), heatmap_grid.dtype
+        )
 
-        # Mix with direct ViT Self-Attention if available
+        # Mix with ViT self-attention if available.
         if attn_scores is not None:
-            # CLS token attention to patch tokens
+            # CLS token attention.
             cls_attn = attn_scores[:, :, 0, 1:]
             mean_cls_attn = tf.reduce_mean(cls_attn, axis=1)
             attn_grid = tf.reshape(mean_cls_attn, (-1, 14, 14, 1))
-            # Normalize self-attention map
+            # Normalize attention map.
             attn_f32 = tf.cast(attn_grid, tf.float32)
             max_attn = (
                 tf.reduce_max(
@@ -304,14 +337,16 @@ class SaliencyAlignedModel(keras.Model):
 
             attn_sparsity = tf.reduce_mean(
                 attn_grid, axis=[1, 2, 3]
-            ) * tf.cast(tf.squeeze(is_diseased, axis=[-1, -2, -3]), attn_grid.dtype)
+            ) * tf.cast(
+                tf.squeeze(is_diseased, axis=[-1, -2, -3]), attn_grid.dtype
+            )
 
             attn_anomaly = tf.reduce_sum(
                 attn_grid * anomaly_mask_resized, axis=[1, 2, 3]
             )
-            vit_disease_reward = (attn_anomaly / attn_tot) * tf.cast(tf.squeeze(
-                is_diseased, axis=[-1, -2, -3]
-            ), attn_grid.dtype)
+            vit_disease_reward = (attn_anomaly / attn_tot) * tf.cast(
+                tf.squeeze(is_diseased, axis=[-1, -2, -3]), attn_grid.dtype
+            )
 
             bg_penalty = tf.reduce_mean(
                 0.5 * gradcam_bg_penalty + 0.5 * vit_bg_penalty
@@ -333,10 +368,10 @@ class SaliencyAlignedModel(keras.Model):
     def train_step(self, data):
         x, y = data
         if isinstance(y, dict):
-            y_crop = y["crop_output"]
+            _y_crop = y["crop_output"]
             y_disease = y["disease_output"]
         else:
-            y_crop = y
+            _y_crop = y
             y_disease = y
 
         # 1. Reconstruct original images for bg mask (in [0, 255])
@@ -417,35 +452,57 @@ class SaliencyAlignedModel(keras.Model):
                 if self.has_human_ann and self.enable_penalties:
                     ann_size = tf.shape(self.ann_images)[0]
                     num_samples = tf.minimum(4, ann_size)
-                    indices = tf.random.uniform([num_samples], minval=0, maxval=ann_size, dtype=tf.int32)
-                    
+                    indices = tf.random.uniform(
+                        [num_samples],
+                        minval=0,
+                        maxval=ann_size,
+                        dtype=tf.int32,
+                    )
+
                     batch_ann_images = tf.gather(self.ann_images, indices)
-                    batch_ann_leaf_masks = tf.gather(self.ann_leaf_masks, indices)
-                    batch_ann_focus_masks = tf.gather(self.ann_focus_masks, indices)
+                    batch_ann_leaf_masks = tf.gather(
+                        self.ann_leaf_masks, indices
+                    )
+                    batch_ann_focus_masks = tf.gather(
+                        self.ann_focus_masks, indices
+                    )
                     batch_ann_labels = tf.gather(self.ann_labels, indices)
-                    
+
                     # Determine is_diseased for annotations
                     if self.disease_class_indices:
-                        disease_tensor = tf.constant(self.disease_class_indices, dtype=tf.int32)
+                        disease_tensor = tf.constant(
+                            self.disease_class_indices, dtype=tf.int32
+                        )
                         ann_is_diseased_1d = tf.map_fn(
-                            lambda l: tf.cast(tf.reduce_any(tf.equal(disease_tensor, l)), tf.float32),
+                            lambda lbl: tf.cast(
+                                tf.reduce_any(tf.equal(disease_tensor, lbl)),
+                                tf.float32,
+                            ),
                             batch_ann_labels,
-                            fn_output_signature=tf.float32
+                            fn_output_signature=tf.float32,
                         )
                     else:
-                        ann_is_diseased_1d = tf.ones((num_samples,), dtype=tf.float32)
-                    ann_is_diseased = tf.reshape(ann_is_diseased_1d, (-1, 1, 1, 1))
-                    
+                        ann_is_diseased_1d = tf.ones(
+                            (num_samples,), dtype=tf.float32
+                        )
+                    ann_is_diseased = tf.reshape(
+                        ann_is_diseased_1d, (-1, 1, 1, 1)
+                    )
+
                     # Forward pass
                     if self.backbone_name == "DINOv3":
                         (
                             ann_logits,
                             ann_activations,
                             ann_attn_list,
-                        ) = self._forward_vit_multiblock(batch_ann_images, inner)
+                        ) = self._forward_vit_multiblock(
+                            batch_ann_images, inner
+                        )
                     else:
                         if self.grad_model is not None:
-                            ann_act, ann_log = self.grad_model(batch_ann_images, training=True)
+                            ann_act, ann_log = self.grad_model(
+                                batch_ann_images, training=True
+                            )
                             inner.watch(ann_act)
                             ann_activations = [ann_act]
                             ann_attn_list = [None]
@@ -453,17 +510,17 @@ class SaliencyAlignedModel(keras.Model):
                         else:
                             ann_activations = []
                             ann_attn_list = []
-                            ann_logits = self.functional_model(batch_ann_images, training=True)
-                            
+                            ann_logits = self.functional_model(
+                                batch_ann_images, training=True
+                            )
+
                     if isinstance(ann_logits, dict):
                         ann_disease_logits = ann_logits["disease_output"]
                     else:
                         ann_disease_logits = ann_logits
                     # Gather the scores for the ground-truth labels
                     ann_scores = tf.gather(
-                        ann_disease_logits, 
-                        batch_ann_labels, 
-                        batch_dims=1
+                        ann_disease_logits, batch_ann_labels, batch_dims=1
                     )
 
                 # Predicted class score for Grad-CAM
@@ -473,16 +530,18 @@ class SaliencyAlignedModel(keras.Model):
                 else:
                     crop_logits = logits
                     disease_logits = logits
-                
+
                 crop_idx = tf.argmax(crop_logits, axis=-1)
                 crop_scores = tf.reduce_sum(
-                    crop_logits * tf.one_hot(crop_idx, tf.shape(crop_logits)[-1]),
+                    crop_logits
+                    * tf.one_hot(crop_idx, tf.shape(crop_logits)[-1]),
                     axis=-1,
                 )
-                
+
                 disease_idx = tf.argmax(disease_logits, axis=-1)
                 disease_scores = tf.reduce_sum(
-                    disease_logits * tf.one_hot(disease_idx, tf.shape(disease_logits)[-1]),
+                    disease_logits
+                    * tf.one_hot(disease_idx, tf.shape(disease_logits)[-1]),
                     axis=-1,
                 )
 
@@ -505,7 +564,7 @@ class SaliencyAlignedModel(keras.Model):
                 if self.backbone_name == "DINOv3":
                     _, disease_hm_grid = self._gradcam_vit(disease_grads, act)
                     _, crop_hm_grid = self._gradcam_vit(crop_grads, act)
-                    
+
                     bg_resized = tf.image.resize(
                         bg_mask,
                         (14, 14),
@@ -550,12 +609,16 @@ class SaliencyAlignedModel(keras.Model):
                     attn = None  # CNN has no attn scores
 
                 bp, sp, dr = self._compute_disease_heatmap_penalties(
-                    disease_hm_grid, bg_resized, anomaly_resized, is_diseased, attn
+                    disease_hm_grid,
+                    bg_resized,
+                    anomaly_resized,
+                    is_diseased,
+                    attn,
                 )
                 cbp, ccr = self._compute_crop_heatmap_penalties(
                     crop_hm_grid, bg_resized
                 )
-                
+
                 bg_penalties.append(bp)
                 sparsity_penalties.append(sp)
                 disease_rewards.append(dr)
@@ -565,34 +628,38 @@ class SaliencyAlignedModel(keras.Model):
             # Compute human annotation alignment penalties
             human_bg_penalty = tf.constant(0.0, dtype=tf.float32)
             human_disease_reward = tf.constant(0.0, dtype=tf.float32)
-            
+
             if self.has_human_ann and self.enable_penalties:
                 ann_bg_penalties = []
                 ann_sparsity_penalties = []
                 ann_disease_rewards = []
-                
+
                 for blk_i in range(len(ann_activations)):
                     act = ann_activations[blk_i]
                     attn = ann_attn_list[blk_i]
-                    
+
                     ann_disease_grads = inner.gradient(ann_scores, act)
                     if ann_disease_grads is None:
                         continue
-                        
+
                     if self.backbone_name == "DINOv3":
-                        _, ann_hm_grid = self._gradcam_vit(ann_disease_grads, act)
+                        _, ann_hm_grid = self._gradcam_vit(
+                            ann_disease_grads, act
+                        )
                         ann_bg_resized = tf.image.resize(
                             1.0 - batch_ann_leaf_masks,
                             (14, 14),
-                            method="nearest"
+                            method="nearest",
                         )
-                        ann_bg_resized = tf.cast(ann_bg_resized, dtype=ann_hm_grid.dtype)
+                        ann_bg_resized = tf.cast(
+                            ann_bg_resized, dtype=ann_hm_grid.dtype
+                        )
                         ann_anomaly_resized = tf.image.resize(
-                            batch_ann_focus_masks,
-                            (14, 14),
-                            method="nearest"
+                            batch_ann_focus_masks, (14, 14), method="nearest"
                         )
-                        ann_anomaly_resized = tf.cast(ann_anomaly_resized, dtype=ann_hm_grid.dtype)
+                        ann_anomaly_resized = tf.cast(
+                            ann_anomaly_resized, dtype=ann_hm_grid.dtype
+                        )
                     else:
                         ann_hm_grid = self._gradcam_cnn(ann_disease_grads, act)
                         act_shape = tf.shape(act)
@@ -600,27 +667,37 @@ class SaliencyAlignedModel(keras.Model):
                         ann_bg_resized = tf.image.resize(
                             1.0 - batch_ann_leaf_masks,
                             (h_a, w_a),
-                            method="nearest"
+                            method="nearest",
                         )
-                        ann_bg_resized = tf.cast(ann_bg_resized, dtype=ann_hm_grid.dtype)
+                        ann_bg_resized = tf.cast(
+                            ann_bg_resized, dtype=ann_hm_grid.dtype
+                        )
                         ann_anomaly_resized = tf.image.resize(
-                            batch_ann_focus_masks,
-                            (h_a, w_a),
-                            method="nearest"
+                            batch_ann_focus_masks, (h_a, w_a), method="nearest"
                         )
-                        ann_anomaly_resized = tf.cast(ann_anomaly_resized, dtype=ann_hm_grid.dtype)
+                        ann_anomaly_resized = tf.cast(
+                            ann_anomaly_resized, dtype=ann_hm_grid.dtype
+                        )
                         attn = None
-                        
+
                     bp, sp, dr = self._compute_disease_heatmap_penalties(
-                        ann_hm_grid, ann_bg_resized, ann_anomaly_resized, ann_is_diseased, attn
+                        ann_hm_grid,
+                        ann_bg_resized,
+                        ann_anomaly_resized,
+                        ann_is_diseased,
+                        attn,
                     )
                     ann_bg_penalties.append(bp)
                     ann_sparsity_penalties.append(sp)
                     ann_disease_rewards.append(dr)
-                    
+
                 if ann_bg_penalties:
-                    human_bg_penalty = tf.add_n(ann_bg_penalties) / len(ann_bg_penalties)
-                    human_disease_reward = tf.add_n(ann_disease_rewards) / len(ann_disease_rewards)
+                    human_bg_penalty = tf.add_n(ann_bg_penalties) / len(
+                        ann_bg_penalties
+                    )
+                    human_disease_reward = tf.add_n(ann_disease_rewards) / len(
+                        ann_disease_rewards
+                    )
 
             del inner  # Release persistent tape
 
@@ -633,8 +710,12 @@ class SaliencyAlignedModel(keras.Model):
                 disease_reward = tf.add_n(disease_rewards) / len(
                     disease_rewards
                 )
-                crop_bg_penalty = tf.add_n(crop_bg_penalties) / len(crop_bg_penalties)
-                crop_coverage_reward = tf.add_n(crop_coverage_rewards) / len(crop_coverage_rewards)
+                crop_bg_penalty = tf.add_n(crop_bg_penalties) / len(
+                    crop_bg_penalties
+                )
+                crop_coverage_reward = tf.add_n(crop_coverage_rewards) / len(
+                    crop_coverage_rewards
+                )
             else:
                 bg_penalty = tf.constant(0.0, dtype=tf.float32)
                 sparsity_penalty = tf.constant(0.0, dtype=tf.float32)
@@ -647,17 +728,21 @@ class SaliencyAlignedModel(keras.Model):
                 cls_loss
                 + self.bg_weight * tf.cast(bg_penalty, tf.float32)
                 + self.sparsity_weight * tf.cast(sparsity_penalty, tf.float32)
-                - self.disease_reward_weight * tf.cast(disease_reward, tf.float32)
+                - self.disease_reward_weight
+                * tf.cast(disease_reward, tf.float32)
                 + 0.5 * self.bg_weight * tf.cast(crop_bg_penalty, tf.float32)
-                - 0.1 * self.sparsity_weight * tf.cast(crop_coverage_reward, tf.float32)
+                - 0.1
+                * self.sparsity_weight
+                * tf.cast(crop_coverage_reward, tf.float32)
             )
-            
+
             if self.has_human_ann and self.enable_penalties:
                 # Add human alignment loss with a strong weight
                 human_weight = 5.0
                 total_loss = total_loss + human_weight * (
                     self.bg_weight * tf.cast(human_bg_penalty, tf.float32)
-                    - self.disease_reward_weight * tf.cast(human_disease_reward, tf.float32)
+                    - self.disease_reward_weight
+                    * tf.cast(human_disease_reward, tf.float32)
                 )
 
         # Outer gradients
@@ -735,7 +820,9 @@ class SaliencyAlignedModel(keras.Model):
                 elif hasattr(blk, "attention"):
                     # For some other architectures
                     val_x = blk(val_x, training=True)
-                    attn_scores = None # We cannot easily extract without custom forward
+                    attn_scores = (
+                        None  # We cannot easily extract without custom forward
+                    )
                 else:
                     # Fallback standard call
                     val_x = blk(val_x, training=True)
@@ -757,15 +844,28 @@ class SaliencyAlignedModel(keras.Model):
             x_head = self.functional_model.get_layer("head_dropout_1")(x_head)
             x_head = self.functional_model.get_layer("head_dense_2")(x_head)
             x_head = self.functional_model.get_layer("head_dropout_2")(x_head)
-            
-            crop_logits = self.functional_model.get_layer("crop_logits")(x_head)
-            crop_output = self.functional_model.get_layer("crop_output")(crop_logits)
-            
-            disease_logits = self.functional_model.get_layer("disease_logits")(x_head)
-            disease_output = self.functional_model.get_layer("disease_output")(disease_logits)
-            logits = {"crop_output": crop_output, "disease_output": disease_output}
+
+            crop_logits = self.functional_model.get_layer("crop_logits")(
+                x_head
+            )
+            crop_output = self.functional_model.get_layer("crop_output")(
+                crop_logits
+            )
+
+            disease_logits = self.functional_model.get_layer("disease_logits")(
+                x_head
+            )
+            disease_output = self.functional_model.get_layer("disease_output")(
+                disease_logits
+            )
+            logits = {
+                "crop_output": crop_output,
+                "disease_output": disease_output,
+            }
         except ValueError:
-            raise ValueError("SaliencyAlignedModel requires standard head names (head_bn, etc.)")
+            raise ValueError(
+                "SaliencyAlignedModel requires standard head names (head_bn, etc.)"
+            )
 
         return logits, activations, attn_list
 

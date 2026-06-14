@@ -9,6 +9,13 @@ from PIL import Image
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 
+from src.core.inference_guard import (
+    assess_leaf_likelihood,
+    compute_prediction_diagnostics,
+    evaluate_inference_safety,
+)
+from src.core.preprocessing import preprocess_array_for_model
+from src.training.training_utils import WarmupCosineSchedule
 from src.utils.config import (
     CLASS_INDICES_PATH,
     CONFIDENCE_REJECT_THRESHOLD,
@@ -17,14 +24,7 @@ from src.utils.config import (
     OOD_MSP_THRESHOLD,
 )
 from src.utils.hardware import configure_tensorflow
-from src.core.inference_guard import (
-    assess_leaf_likelihood,
-    compute_prediction_diagnostics,
-    evaluate_inference_safety,
-)
 from src.utils.model_paths import resolve_keras_model_path
-from src.core.preprocessing import preprocess_array_for_model
-from src.training.training_utils import WarmupCosineSchedule
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 configure_tensorflow()

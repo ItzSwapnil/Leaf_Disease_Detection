@@ -24,13 +24,13 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from scripts.figure_paths import OTHERS_PLOTS_DIR, prepare_plot_directories
 from src.utils.config import (
     IMG_SIZE,
     TEST_DIR,
     TRAIN_DIR,
     VAL_DIR,
 )
-from scripts.figure_paths import OTHERS_PLOTS_DIR, prepare_plot_directories
 
 PLOTS_DIR = OTHERS_PLOTS_DIR
 prepare_plot_directories()

@@ -20,9 +20,8 @@ import tensorflow as tf
 # Add repo to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.pipeline.predict import LeafDiseasePredictor
 from src.core.preprocessing import preprocess_array_for_model
-
+from src.pipeline.predict import LeafDiseasePredictor
 
 
 def test_backbone_detection():
@@ -125,7 +124,6 @@ def test_inference_on_dataset():
     except FileNotFoundError as e:
         pytest.skip(reason=f"No model found: {e}")
 
-
     # Get first class and sample
     classes = os.listdir(test_dir)
     if not classes:
@@ -205,7 +203,6 @@ def test_out_of_distribution():
         predictor = LeafDiseasePredictor()
     except FileNotFoundError as e:
         pytest.skip(reason=f"No model found: {e}")
-
 
     for test_name, test_image in test_cases:
         # Save image

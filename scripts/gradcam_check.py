@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tensorflow as tf
 import tensorflow.keras as keras
 
+from src.core.preprocessing import preprocess_array_for_model
 from src.utils.config import (
     CLASS_INDICES_PATH,
     FINAL_MODEL_PATH,
@@ -36,7 +37,6 @@ from src.utils.config import (
     VAL_DIR,
 )
 from src.utils.model_paths import resolve_keras_model_path
-from src.core.preprocessing import preprocess_array_for_model
 
 # background_remover import bypassed
 
@@ -58,6 +58,56 @@ def _patch_vit_layer_init_for_compat() -> bool:
     def _patched_init(self, *args, **kwargs):
         kwargs.pop("num_patches", None)
         kwargs.pop("num_positions", None)
+
+        import inspect
+
+        expects_tuple = False
+        try:
+            source = inspect.getsource(original_init)
+            if "zip(" in source or "grid_size" in source:
+                expects_tuple = True
+        except Exception:
+            try:
+                import keras_hub
+
+                ver = getattr(keras_hub, "__version__", "0.0.0")
+                parts = [int(p) for p in ver.split(".") if p.isdigit()]
+                if parts and (parts[0] > 0 or parts[1] >= 20):
+                    expects_tuple = True
+            except Exception:
+                pass
+
+        if expects_tuple:
+            if "image_size" in kwargs and isinstance(
+                kwargs["image_size"], int
+            ):
+                kwargs["image_size"] = (
+                    kwargs["image_size"],
+                    kwargs["image_size"],
+                )
+            if "patch_size" in kwargs and isinstance(
+                kwargs["patch_size"], int
+            ):
+                kwargs["patch_size"] = (
+                    kwargs["patch_size"],
+                    kwargs["patch_size"],
+                )
+        else:
+            if "image_size" in kwargs and not isinstance(
+                kwargs["image_size"], int
+            ):
+                try:
+                    kwargs["image_size"] = kwargs["image_size"][0]
+                except Exception:
+                    pass
+            if "patch_size" in kwargs and not isinstance(
+                kwargs["patch_size"], int
+            ):
+                try:
+                    kwargs["patch_size"] = kwargs["patch_size"][0]
+                except Exception:
+                    pass
+
         return original_init(self, *args, **kwargs)
 
     layer_cls.__init__ = _patched_init
@@ -184,7 +234,10 @@ def _make_gradcam_heatmap(
             tape.watch(pe_out)
 
             # Step 2: ViT Encoder Blocks
-            if hasattr(vit_encoder, "dropout") and vit_encoder.dropout is not None:
+            if (
+                hasattr(vit_encoder, "dropout")
+                and vit_encoder.dropout is not None
+            ):
                 x = vit_encoder.dropout(pe_out)
             else:
                 x = pe_out
@@ -197,11 +250,16 @@ def _make_gradcam_heatmap(
             encoder_blocks = []
             if hasattr(vit_encoder, "layers"):
                 for blk in vit_encoder.layers:
-                    if isinstance(blk, keras.layers.Layer) and "encoder_block" in blk.name:
+                    if (
+                        isinstance(blk, keras.layers.Layer)
+                        and "encoder_block" in blk.name
+                    ):
                         encoder_blocks.append(blk)
             if not encoder_blocks and hasattr(vit_encoder, "encoder_layers"):
                 encoder_blocks = vit_encoder.encoder_layers
-            elif not encoder_blocks and hasattr(vit_encoder, "transformer_layers"):
+            elif not encoder_blocks and hasattr(
+                vit_encoder, "transformer_layers"
+            ):
                 encoder_blocks = vit_encoder.transformer_layers
 
             for i, blk in enumerate(encoder_blocks):
@@ -210,29 +268,34 @@ def _make_gradcam_heatmap(
                     target_activation = x
                     tape.watch(target_activation)
 
-            if hasattr(vit_encoder, "layer_norm") and vit_encoder.layer_norm is not None:
+            if (
+                hasattr(vit_encoder, "layer_norm")
+                and vit_encoder.layer_norm is not None
+            ):
                 final_vit_out = vit_encoder.layer_norm(x)
             else:
                 final_vit_out = x
-            
+
             if target_layer_name == "vit_encoder_final":
                 target_activation = final_vit_out
                 tape.watch(target_activation)
 
             # Step 3: Classification Head
             x_head = pool(final_vit_out)
-            
+
             try:
                 x_head = model.get_layer("head_bn")(x_head)
                 x_head = model.get_layer("head_dense_1")(x_head)
                 x_head = model.get_layer("head_dropout_1")(x_head)
                 x_head = model.get_layer("head_dense_2")(x_head)
                 x_head = model.get_layer("head_dropout_2")(x_head)
-                
+
                 crop_logits = model.get_layer("crop_logits")(x_head)
                 disease_logits = model.get_layer("disease_logits")(x_head)
             except ValueError:
-                raise ValueError("Named layers missing. Ensure train_model.py sets explicit head layer names.")
+                raise ValueError(
+                    "Named layers missing. Ensure train_model.py sets explicit head layer names."
+                )
 
             if pred_index is None:
                 disease_pred_index = tf.argmax(disease_logits[0])
@@ -241,16 +304,19 @@ def _make_gradcam_heatmap(
             crop_pred_index = tf.argmax(crop_logits[0])
 
             if healthy_partner_idx is not None and healthy_partner_idx != -1:
-                disease_score = disease_logits[:, disease_pred_index] - disease_logits[:, healthy_partner_idx]
+                disease_score = (
+                    disease_logits[:, disease_pred_index]
+                    - disease_logits[:, healthy_partner_idx]
+                )
             else:
                 disease_score = disease_logits[:, disease_pred_index]
-                
+
             crop_score = crop_logits[:, crop_pred_index]
 
         disease_grads = tape.gradient(disease_score, target_activation)
         crop_grads = tape.gradient(crop_score, target_activation)
         del tape
-        
+
         if disease_grads is None or crop_grads is None:
             zeros = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.float32)
             return zeros, zeros
@@ -263,7 +329,7 @@ def _make_gradcam_heatmap(
                 hm = hm[1:]
             gs = int(np.sqrt(hm.shape[0]))
             return tf.reshape(hm, (gs, gs))
-            
+
         disease_heatmap = process_heatmap(disease_grads)
         crop_heatmap = process_heatmap(crop_grads)
 
@@ -311,17 +377,21 @@ def _make_gradcam_heatmap(
         outputs = outputs[0]
         heatmap = outputs @ pooled_grads[..., tf.newaxis]
         heatmap = tf.squeeze(heatmap)
-        
+
         disease_heatmap = heatmap
         crop_heatmap = heatmap
 
-    disease_heatmap = tf.maximum(disease_heatmap, 0) / (tf.math.reduce_max(disease_heatmap) + 1e-5)
+    disease_heatmap = tf.maximum(disease_heatmap, 0) / (
+        tf.math.reduce_max(disease_heatmap) + 1e-5
+    )
     disease_heatmap = disease_heatmap.numpy()
     disease_heatmap = tf.image.resize(
         disease_heatmap[..., np.newaxis], (IMG_SIZE, IMG_SIZE)
     ).numpy()[:, :, 0]
 
-    crop_heatmap = tf.maximum(crop_heatmap, 0) / (tf.math.reduce_max(crop_heatmap) + 1e-5)
+    crop_heatmap = tf.maximum(crop_heatmap, 0) / (
+        tf.math.reduce_max(crop_heatmap) + 1e-5
+    )
     crop_heatmap = crop_heatmap.numpy()
     crop_heatmap = tf.image.resize(
         crop_heatmap[..., np.newaxis], (IMG_SIZE, IMG_SIZE)
@@ -334,18 +404,18 @@ def _overlay_heatmap(
     original_img: np.ndarray,
     heatmap: np.ndarray,
     alpha: float = 0.4,
-    colormap: str = "jet"
+    colormap: str = "jet",
 ) -> np.ndarray:
     """Overlay a heatmap on the original image."""
     if colormap == "jet":
         r = np.clip(1.5 - np.abs(4 * heatmap - 3), 0, 1)
         g = np.clip(1.5 - np.abs(4 * heatmap - 2), 0, 1)
         b = np.clip(1.5 - np.abs(4 * heatmap - 1), 0, 1)
-    else: # "viridis" approx (blue-green-yellow)
+    else:  # "viridis" approx (blue-green-yellow)
         r = heatmap
         g = heatmap * 0.8
         b = 1.0 - heatmap
-        
+
     colored_heatmap = np.stack([r, g, b], axis=-1) * 255
 
     # Overlay
@@ -402,7 +472,11 @@ def _compute_deletion_drop(
     """Calculate relative confidence drop when blurring the top 'fraction' of attended pixels."""
     # 1. Predict original probability
     original_preds = model.predict(img_array, verbose=0)
-    orig_prob = float(original_preds[0][pred_idx])
+    if isinstance(original_preds, dict):
+        disease_preds = original_preds["disease_output"]
+    else:
+        disease_preds = original_preds
+    orig_prob = float(disease_preds[0][pred_idx])
     if orig_prob < 1e-8:
         return 0.0
 
@@ -434,7 +508,11 @@ def _compute_deletion_drop(
 
     perturbed_batch = perturbed_img_prep[np.newaxis, ...]
     perturbed_preds = model.predict(perturbed_batch, verbose=0)
-    perturbed_prob = float(perturbed_preds[0][pred_idx])
+    if isinstance(perturbed_preds, dict):
+        pert_disease_preds = perturbed_preds["disease_output"]
+    else:
+        pert_disease_preds = perturbed_preds
+    perturbed_prob = float(pert_disease_preds[0][pred_idx])
 
     # 7. Compute relative drop
     return float(max(0.0, (orig_prob - perturbed_prob) / orig_prob))
@@ -548,7 +626,7 @@ def main():
     healthy_partners = parse_class_structure(class_names)
 
     # Set up targeting for Grad-CAM
-    vit_block_idx = 6
+    vit_block_idx = 10
     target_layer_name = args.conv_layer
 
     if backbone_name == "DINOv3":
@@ -612,12 +690,21 @@ def main():
 
         # Get prediction
         preds = model.predict(preprocessed, verbose=0)
-        pred_idx = int(np.argmax(preds[0]))
-        pred_conf = float(preds[0][pred_idx])
+        if isinstance(preds, dict):
+            disease_preds = preds["disease_output"]
+        else:
+            disease_preds = preds
+        pred_idx = int(np.argmax(disease_preds[0]))
+        pred_conf = float(disease_preds[0][pred_idx])
         pred_label = idx_to_label.get(pred_idx, f"class_{pred_idx}")
 
         # Generate Grad-CAM
         try:
+            healthy_partner_idx = (
+                healthy_partners[pred_idx]
+                if pred_idx < len(healthy_partners)
+                else -1
+            )
             crop_heatmap, disease_heatmap = _make_gradcam_heatmap(
                 model,
                 preprocessed,
@@ -625,6 +712,7 @@ def main():
                 pred_index=pred_idx,
                 backbone_name=backbone_name,
                 vit_block_idx=vit_block_idx,
+                healthy_partner_idx=healthy_partner_idx,
             )
             # The metrics focus on the disease head for anomaly detection
             heatmap = disease_heatmap
@@ -665,7 +753,7 @@ def main():
         if not is_healthy_class and healthy_partner_idx != -1:
             try:
                 # Generate deviation heatmap
-                deviation_heatmap = _make_gradcam_heatmap(
+                _, deviation_heatmap = _make_gradcam_heatmap(
                     model,
                     preprocessed,
                     target_layer_name=target_layer_name,

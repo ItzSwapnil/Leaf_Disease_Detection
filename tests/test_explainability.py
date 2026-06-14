@@ -11,12 +11,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure model_paths is imported so custom layer registration triggers
-from src.utils import model_paths  # noqa: F401
 from scripts.gradcam_check import (
     _compute_deletion_drop,
     _extract_leaf_mask,
     _simple_blur,
 )
+from src.utils import model_paths  # noqa: F401
 
 
 def test_extract_leaf_mask():

@@ -20,6 +20,17 @@ import seaborn as sns
 import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.models import load_model
+
+from scripts.figure_paths import (
+    OTHERS_PLOTS_DIR,
+    backbone_plot_dir,
+    prepare_plot_directories,
+)
+from src.core.preprocessing import preprocess_batch_for_model_tf
+from src.training.learning_curve_utils import (
+    best_epoch_from_values,
+)
+from src.training.training_utils import WarmupCosineSchedule
 from src.utils.config import (
     BATCH_SIZE,
     CLASS_INDICES_PATH,
@@ -29,17 +40,7 @@ from src.utils.config import (
     TRAIN_DIR,
     WARMUP_EPOCHS,
 )
-from src.training.learning_curve_utils import (
-    best_epoch_from_values,
-)
 from src.utils.model_paths import resolve_keras_model_path
-from src.core.preprocessing import preprocess_batch_for_model_tf
-from scripts.figure_paths import (
-    OTHERS_PLOTS_DIR,
-    backbone_plot_dir,
-    prepare_plot_directories,
-)
-from src.training.training_utils import WarmupCosineSchedule
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
@@ -210,7 +211,13 @@ def generate_confusion_matrix():
 
     print("  Computing predictions on test set...")
     predictions = model.predict(prep_test, verbose=1)
-    y_pred = np.argmax(predictions, axis=1)
+    if isinstance(predictions, (list, tuple)):
+        disease_preds = predictions[1]
+    elif isinstance(predictions, dict):
+        disease_preds = predictions["disease_output"]
+    else:
+        disease_preds = predictions
+    y_pred = np.argmax(disease_preds, axis=1)
     y_true = np.concatenate([labels.numpy() for _, labels in test_ds], axis=0)
 
     class_names = [name.split("___")[-1][:15] for name in test_ds.class_names]
@@ -1364,8 +1371,14 @@ def generate_sample_predictions():
             ),
             verbose=0,
         )
-        pred_class = int(np.argmax(pred))
-        confidence = float(np.max(pred)) * 100
+        if isinstance(pred, (list, tuple)):
+            disease_pred = pred[1]
+        elif isinstance(pred, dict):
+            disease_pred = pred["disease_output"]
+        else:
+            disease_pred = pred
+        pred_class = int(np.argmax(disease_pred[0]))
+        confidence = float(np.max(disease_pred[0])) * 100
         true_class = int(label_batch.numpy()[0])
 
         display_img = img_batch.numpy()[0].astype(np.uint8)

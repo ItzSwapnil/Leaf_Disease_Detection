@@ -30,6 +30,28 @@ from src.core.backbones import (
     resolve_backbone_factory,
     resolve_backbone_name,
 )
+from src.core.preprocessing import preprocess_batch_for_model_tf
+from src.training.training_progress import (
+    EpochReviewCallback,
+    IntervalMetricsLogger,
+    ProgressEmitter,
+)
+from src.training.training_utils import (
+    BestModelSaver,
+    FamilyDeviationClassifier,
+    GradCamEpochCollageCallback,
+    PreOverfitRestorer,
+    WarmupCosineSchedule,
+    _build_heavy_augmentation_layer,
+    build_loss,
+    build_optimizer,
+    cutmix_batch_tf,
+    mixup_batch_tf,
+    parse_class_structure,
+    resolve_augmentation_probabilities,
+    resolve_step_count,
+    tensorboard_available,
+)
 from src.utils.config import (
     BASE_MODEL,
     BATCH_SIZE,
@@ -70,24 +92,6 @@ from src.utils.config import (
     WARMUP_EPOCHS,
 )
 from src.utils.hardware import configure_tensorflow, get_training_strategy
-from src.core.preprocessing import preprocess_batch_for_model_tf
-from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter, EpochReviewCallback
-from src.training.training_utils import (
-    BestModelSaver,
-    FamilyDeviationClassifier,
-    GradCamEpochCollageCallback,
-    PreOverfitRestorer,
-    WarmupCosineSchedule,
-    _build_heavy_augmentation_layer,
-    build_loss,
-    build_optimizer,
-    cutmix_batch_tf,
-    mixup_batch_tf,
-    parse_class_structure,
-    resolve_augmentation_probabilities,
-    resolve_step_count,
-    tensorboard_available,
-)
 
 # Import optional sota augmentation flags with safe fallbacks
 try:
@@ -256,7 +260,9 @@ def _collect_validation_files(val_dir, val_to_train_map, class_indices):
     return filepaths, labels, counts_by_val_class
 
 
-def _build_labeled_image_dataset(filepaths, labels, batch_size, shuffle, seed, crop_mapping=None):
+def _build_labeled_image_dataset(
+    filepaths, labels, batch_size, shuffle, seed, crop_mapping=None
+):
     ds = tf.data.Dataset.from_tensor_slices((filepaths, labels))
     if shuffle:
         ds = ds.shuffle(
@@ -275,18 +281,23 @@ def _build_labeled_image_dataset(filepaths, labels, batch_size, shuffle, seed, c
         image_tensor = tf.io.decode_jpeg(image_bytes, channels=3)
         image_tensor = tf.image.resize(image_tensor, (IMG_SIZE, IMG_SIZE))
         image_tensor = tf.cast(image_tensor, tf.float32)
-        
-        disease_one_hot = tf.one_hot(tf.cast(label, tf.int32), depth=NUM_CLASSES)
+
+        disease_one_hot = tf.one_hot(
+            tf.cast(label, tf.int32), depth=NUM_CLASSES
+        )
         disease_one_hot = tf.cast(disease_one_hot, tf.float32)
-        
+
         if crop_mapping_tensor is not None:
             crop_label = crop_mapping_tensor[label]
             crop_one_hot = tf.one_hot(crop_label, depth=NUM_CROPS)
             crop_one_hot = tf.cast(crop_one_hot, tf.float32)
-            targets = {"crop_output": crop_one_hot, "disease_output": disease_one_hot}
+            targets = {
+                "crop_output": crop_one_hot,
+                "disease_output": disease_one_hot,
+            }
         else:
             targets = disease_one_hot
-            
+
         return image_tensor, targets
 
     ds = ds.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
@@ -363,9 +374,12 @@ def main():
     args = parser.parse_args()
 
     must_review_env = os.getenv("LEAF_MUST_REVIEW") == "1"
-    must_review_arg = args.must_review == "on" if args.must_review is not None else None
-    must_review_enabled = must_review_arg if must_review_arg is not None else must_review_env
-
+    must_review_arg = (
+        args.must_review == "on" if args.must_review is not None else None
+    )
+    must_review_enabled = (
+        must_review_arg if must_review_arg is not None else must_review_env
+    )
 
     backbone_name = resolve_backbone_name(
         args.base_model or os.getenv("LEAF_BASE_MODEL"),
@@ -460,11 +474,17 @@ def main():
         )
 
     class_indices = {name: idx for idx, name in enumerate(train_class_names)}
-    
-    crop_names = sorted(list(set(name.split('___')[0] for name in train_class_names)))
+
+    crop_names = sorted(
+        list(set(name.split("___")[0] for name in train_class_names))
+    )
     if len(crop_names) != NUM_CROPS:
-        print(f"Warning: Extracted {len(crop_names)} crops, but NUM_CROPS={NUM_CROPS}")
-    crop_mapping = [crop_names.index(name.split('___')[0]) for name in train_class_names]
+        print(
+            f"Warning: Extracted {len(crop_names)} crops, but NUM_CROPS={NUM_CROPS}"
+        )
+    crop_mapping = [
+        crop_names.index(name.split("___")[0]) for name in train_class_names
+    ]
 
     sampled_paths, sampled_labels, full_counts, sampled_counts = (
         _collect_sampled_training_files(
@@ -630,8 +650,11 @@ def main():
         )(disease_logits)
 
         model = Model(
-            inputs=base_model.input, 
-            outputs={"crop_output": crop_outputs, "disease_output": disease_outputs}
+            inputs=base_model.input,
+            outputs={
+                "crop_output": crop_outputs,
+                "disease_output": disease_outputs,
+            },
         )
 
     print(f"\nBackbone: {backbone_name}")
@@ -876,30 +899,46 @@ def main():
     )
     # Everlearning: Load existing weights if they exist
     from src.utils.config import FINAL_MODEL_PATH
+
     if os.path.exists(CHECKPOINT_PATH):
         try:
-            print(f"\n[Everlearning] Resuming training from existing checkpoint: {CHECKPOINT_PATH}")
+            print(
+                f"\n[Everlearning] Resuming training from existing checkpoint: {CHECKPOINT_PATH}"
+            )
             if str(CHECKPOINT_PATH).endswith(".keras"):
-                import zipfile
                 import tempfile
-                with zipfile.ZipFile(CHECKPOINT_PATH, 'r') as zip_ref:
+                import zipfile
+
+                with zipfile.ZipFile(CHECKPOINT_PATH, "r") as zip_ref:
                     with tempfile.TemporaryDirectory() as td:
                         zip_ref.extract("model.weights.h5", path=td)
-                        model.load_weights(os.path.join(td, "model.weights.h5"), by_name=True, skip_mismatch=True)
+                        model.load_weights(
+                            os.path.join(td, "model.weights.h5"),
+                            by_name=True,
+                            skip_mismatch=True,
+                        )
             else:
-                model.load_weights(CHECKPOINT_PATH, by_name=True, skip_mismatch=True)
+                model.load_weights(
+                    CHECKPOINT_PATH, by_name=True, skip_mismatch=True
+                )
             print("[Everlearning] Successfully loaded matching weights.")
         except Exception as e:
             print(f"Failed to load weights: {e}")
     elif os.path.exists(FINAL_MODEL_PATH):
-        print(f"\n[Everlearning] Resuming training from final model: {FINAL_MODEL_PATH}")
+        print(
+            f"\n[Everlearning] Resuming training from final model: {FINAL_MODEL_PATH}"
+        )
         try:
-            model.load_weights(FINAL_MODEL_PATH, skip_mismatch=True, by_name=True)
+            model.load_weights(
+                FINAL_MODEL_PATH, skip_mismatch=True, by_name=True
+            )
             print("Weights loaded successfully.")
         except Exception as e:
             print(f"Failed to load weights: {e}")
     else:
-        print("\\n[Everlearning] No existing weights found. Starting from scratch (pretrained backbone).")
+        print(
+            "\\n[Everlearning] No existing weights found. Starting from scratch (pretrained backbone)."
+        )
 
     # ── phase 1: train classification head only ───────────────────────────
     if phase1_epochs > 0:
@@ -939,7 +978,7 @@ def main():
                 label_smoothing=LABEL_SMOOTHING, name="crop_loss"
             )
             selected_loss_disease = selected_loss
-            
+
             training_model.compile(
                 optimizer=build_optimizer(
                     phase1_lr, optimizer_name=optimizer_name
@@ -1063,7 +1102,7 @@ def main():
                 label_smoothing=LABEL_SMOOTHING, name="crop_loss"
             )
             selected_loss_disease = selected_loss
-            
+
             training_model.compile(
                 optimizer=build_optimizer(
                     phase2_lr, optimizer_name=optimizer_name

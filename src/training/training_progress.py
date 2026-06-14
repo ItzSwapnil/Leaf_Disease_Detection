@@ -242,7 +242,7 @@ class EpochReviewCallback(keras.callbacks.Callback):
             "epoch": epoch + 1,
             "total_epochs": self.total_epochs,
             "stage": self.stage,
-            "paused": True
+            "paused": True,
         }
         with open(paused_file, "w", encoding="utf-8") as f:
             json.dump(info, f, indent=2)
@@ -291,6 +291,3 @@ class EpochReviewCallback(keras.callbacks.Callback):
             "[EpochReviewCallback] Review completed. Resuming training...",
             flush=True,
         )
-
-
-

@@ -1,4 +1,5 @@
 import os
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import tensorflow as tf
 from train_model import resolve_backbone_factory
@@ -17,7 +18,7 @@ x = tf.random.normal((1, 224, 224, 3))
 
 with tf.GradientTape() as tape:
     pe_out = patch_embed(x)
-    
+
     if hasattr(vit_encoder, "dropout") and vit_encoder.dropout is not None:
         val_x = vit_encoder.dropout(pe_out)
     else:

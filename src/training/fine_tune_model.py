@@ -11,6 +11,25 @@ from tensorflow.keras.callbacks import CSVLogger, EarlyStopping, TensorBoard
 from tensorflow.keras.models import load_model
 
 from src.core.backbones import resolve_backbone_name
+from src.core.preprocessing import preprocess_batch_for_model_tf
+from src.training.training_progress import (
+    EpochReviewCallback,
+    IntervalMetricsLogger,
+    ProgressEmitter,
+)
+from src.training.training_utils import (
+    BestModelSaver,
+    GradCamEpochCollageCallback,
+    PreOverfitRestorer,
+    WarmupCosineSchedule,
+    _build_heavy_augmentation_layer,
+    build_loss,
+    compute_class_weights_from_directory,
+    cutmix_batch_tf,
+    mixup_batch_tf,
+    resolve_augmentation_probabilities,
+    tensorboard_available,
+)
 from src.utils.config import (
     ACCUMULATION_STEPS,
     CHECKPOINT_PATH,
@@ -49,21 +68,6 @@ from src.utils.config import (
     WEIGHT_DECAY,
 )
 from src.utils.hardware import configure_tensorflow, get_training_strategy
-from src.core.preprocessing import preprocess_batch_for_model_tf
-from src.training.training_progress import IntervalMetricsLogger, ProgressEmitter, EpochReviewCallback
-from src.training.training_utils import (
-    BestModelSaver,
-    GradCamEpochCollageCallback,
-    PreOverfitRestorer,
-    WarmupCosineSchedule,
-    _build_heavy_augmentation_layer,
-    build_loss,
-    compute_class_weights_from_directory,
-    cutmix_batch_tf,
-    mixup_batch_tf,
-    resolve_augmentation_probabilities,
-    tensorboard_available,
-)
 
 # Internal helpers
 
@@ -678,7 +682,9 @@ def main():
                 tensorboard,
                 progress,
                 collage_callback,
-                EpochReviewCallback(total_epochs=total_epochs, stage="fine_tuning"),
+                EpochReviewCallback(
+                    total_epochs=total_epochs, stage="fine_tuning"
+                ),
             ]
             if cb is not None
         ],

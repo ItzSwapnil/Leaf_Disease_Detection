@@ -1,11 +1,10 @@
-import os
-import sys
-import numpy as np
-import traceback
 import glob
-import pytest
-import tensorflow as tf
+import os
+import traceback
+
 import keras
+import numpy as np
+import pytest
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 from scripts.gradcam_check import _make_gradcam_heatmap
@@ -22,7 +21,9 @@ def test_gradcam_heatmap_generation():
     print(f"Loading {model_path}...")
     model = keras.models.load_model(
         model_path,
-        custom_objects={"FamilyDeviationClassifier": FamilyDeviationClassifier},
+        custom_objects={
+            "FamilyDeviationClassifier": FamilyDeviationClassifier
+        },
     )
 
     # The callback uses self.model. functional_model is accessed automatically inside _make_gradcam_heatmap.
@@ -39,11 +40,12 @@ def test_gradcam_heatmap_generation():
             backbone_name="DINOv3",
             vit_block_idx=6,
         )
-        print("Success! Dimensions:", crop_heatmap.shape, disease_heatmap.shape)
+        print(
+            "Success! Dimensions:", crop_heatmap.shape, disease_heatmap.shape
+        )
         assert crop_heatmap.shape == (224, 224)
         assert disease_heatmap.shape == (224, 224)
     except Exception as e:
         print("FAILED with Exception:")
         traceback.print_exc()
         raise e
-

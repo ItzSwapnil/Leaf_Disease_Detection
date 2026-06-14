@@ -7,8 +7,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pytest
 
-from src.utils import model_paths
 from src.training.training_progress import ProgressEmitter
+from src.utils import model_paths
 
 
 def test_resolve_keras_model_path_prefers_existing_preferred(

@@ -25,6 +25,15 @@ from tensorflow.keras.preprocessing import image
 from werkzeug.utils import secure_filename
 
 from src.core.backbones import list_backbone_names
+from src.core.inference_guard import (
+    assess_leaf_likelihood,
+    compute_prediction_diagnostics,
+    evaluate_inference_safety,
+)
+from src.core.leaf_detector import detect_leaf_presence
+from src.core.leaf_detector_model import create_leaf_detector
+from src.core.preprocessing import preprocess_array_for_model
+from src.training.training_utils import WarmupCosineSchedule
 from src.utils.config import (
     CLASS_INDICES_PATH,
     CONFIDENCE_REJECT_THRESHOLD,
@@ -35,16 +44,7 @@ from src.utils.config import (
     OOD_MSP_THRESHOLD,
 )
 from src.utils.hardware import configure_tensorflow, get_compute_info
-from src.core.inference_guard import (
-    assess_leaf_likelihood,
-    compute_prediction_diagnostics,
-    evaluate_inference_safety,
-)
-from src.core.leaf_detector import detect_leaf_presence
-from src.core.leaf_detector_model import create_leaf_detector
 from src.utils.model_paths import resolve_keras_model_path
-from src.core.preprocessing import preprocess_array_for_model
-from src.training.training_utils import WarmupCosineSchedule
 
 # Suppress TensorFlow warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -85,8 +85,8 @@ MODEL_CACHE: dict[str, Any] = {}
 ACTIVE_BACKBONE = None
 LEAF_DETECTOR_MODEL = None
 
-# Keep complete per-job console history in memory for UI display.
-# Set to an integer to enable truncation if needed in low-memory environments.
+# Store per-job console history in memory.
+# Set limit for truncation in low-memory envs.
 JOB_LOG_LIMIT = None
 JOBS: dict[str, Any] = {}
 JOBS_LOCK = threading.Lock()
@@ -212,7 +212,7 @@ def _resolve_requested_model_path(model_name=None):
     if model_name in option_to_path:
         return option_to_path[model_name]
 
-    # Backward compatibility: allow basename selection when unique.
+    # Allow unique basename selection.
     if model_name in basename_to_paths:
         matches = basename_to_paths[model_name]
         if len(matches) == 1:
@@ -240,8 +240,7 @@ def _get_inference_model(model_name=None):
     if not model_name and ENSEMBLE_MODEL_PATHS:
         models = []
         for path in ENSEMBLE_MODEL_PATHS:
-            # We attempt to resolve the path. If it's absolute we use it, otherwise relative.
-            # ENSEMBLE_MODEL_PATHS are usually relative to MODELS_DIR or absolute.
+            # Resolve absolute or relative path.
             try:
                 target_path = _resolve_requested_model_path(path)
                 if target_path in MODEL_CACHE:
@@ -424,7 +423,7 @@ def _resolve_class_indices_for_model(model_path, active_model):
             print(f"Skipping invalid class indices file {candidate}: {exc}")
 
     if checked:
-        # Fallback to first readable mapping, but warn loudly on mismatch.
+        # Fallback to first mapping and warn on mismatch.
         fallback_path = checked[0][0]
         idx_to_label = _load_class_indices_map(fallback_path)
         print(
@@ -620,8 +619,7 @@ def _append_job_log(job, line):
     if job["logs"] and job["logs"][-1] == cleaned:
         return
 
-    # Keras/TensorFlow batch progress emits carriage-return updates.
-    # Keep a single live-updating progress line instead of appending a new line for each step.
+    # Keep a single live-updating batch progress line.
     is_batch_progress = (
         KERAS_BATCH_PROGRESS_RE.match(cleaned) is not None
         and "ms/step" in cleaned
@@ -1231,7 +1229,7 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
         img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
         model_input_array = np.expand_dims(image.img_to_array(img), axis=0)
 
-    # Skip external preprocessing when model already has an internal preprocess block.
+    # Skip preprocessing if model has internal block.
     if not _model_has_internal_preprocessing(active_model):
         model_input_array = preprocess_array_for_model(
             model_input_array, backbone_name=ACTIVE_BACKBONE
@@ -1375,29 +1373,34 @@ def init_review_samples():
     and copy it to annotations/samples/<class_name>.jpg.
     """
     import shutil
+
     from src.utils.config import TRAIN_DIR
-    
+
     samples_dir = os.path.join("annotations", "samples")
     masks_dir = os.path.join("annotations", "masks")
     os.makedirs(samples_dir, exist_ok=True)
     os.makedirs(masks_dir, exist_ok=True)
-    
+
     if not os.path.exists(TRAIN_DIR):
         print(f"[Warning] Training directory {TRAIN_DIR} does not exist.")
         return
-        
-    class_names = sorted([
-        entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
-    ])
-    
+
+    class_names = sorted(
+        [entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()]
+    )
+
     for class_name in class_names:
         sample_path = os.path.join(samples_dir, f"{class_name}.jpg")
         if not os.path.exists(sample_path):
             class_dir = os.path.join(TRAIN_DIR, class_name)
-            images = sorted([
-                entry.name for entry in os.scandir(class_dir) 
-                if entry.is_file() and entry.name.lower().endswith(('.jpg', '.jpeg', '.png'))
-            ])
+            images = sorted(
+                [
+                    entry.name
+                    for entry in os.scandir(class_dir)
+                    if entry.is_file()
+                    and entry.name.lower().endswith((".jpg", ".jpeg", ".png"))
+                ]
+            )
             if images:
                 src_path = os.path.join(class_dir, images[0])
                 shutil.copy(src_path, sample_path)
@@ -1409,27 +1412,34 @@ def get_review_classes():
     init_review_samples()
     samples_dir = os.path.join("annotations", "samples")
     masks_dir = os.path.join("annotations", "masks")
-    
+
     classes_status = []
     if os.path.exists(samples_dir):
         files = sorted(os.listdir(samples_dir))
         for filename in files:
             if filename.lower().endswith(".jpg"):
                 class_name = filename[:-4]
-                leaf_exists = os.path.exists(os.path.join(masks_dir, f"{class_name}_leaf.png"))
-                focus_exists = os.path.exists(os.path.join(masks_dir, f"{class_name}_focus.png"))
-                classes_status.append({
-                    "class_name": class_name,
-                    "annotated": leaf_exists or focus_exists,
-                    "leaf_annotated": leaf_exists,
-                    "focus_annotated": focus_exists
-                })
+                leaf_exists = os.path.exists(
+                    os.path.join(masks_dir, f"{class_name}_leaf.png")
+                )
+                focus_exists = os.path.exists(
+                    os.path.join(masks_dir, f"{class_name}_focus.png")
+                )
+                classes_status.append(
+                    {
+                        "class_name": class_name,
+                        "annotated": leaf_exists or focus_exists,
+                        "leaf_annotated": leaf_exists,
+                        "focus_annotated": focus_exists,
+                    }
+                )
     return jsonify({"classes": classes_status})
 
 
 @app.route("/review/sample/<class_name>")
 def get_review_sample(class_name):
     from flask import send_from_directory
+
     samples_dir = os.path.abspath(os.path.join("annotations", "samples"))
     filename = f"{class_name}.jpg"
     if not os.path.exists(os.path.join(samples_dir, filename)):
@@ -1450,7 +1460,7 @@ def generate_default_leaf_mask(image_path):
     s = hsv[:, :, 1]
     v = hsv[:, :, 2]
 
-    # Thresholds: saturation <= 0.15 * 255 (~38), value <= 0.08 * 255 (~20), value >= 0.94 * 255 (~240)
+    # HSV thresholds for leaf detection.
     bg_mask = (s <= 38) | (v <= 20) | (v >= 240)
     leaf_mask = ~bg_mask
 
@@ -1464,13 +1474,16 @@ def generate_default_leaf_mask(image_path):
     mask_rgba[leaf_mask, 3] = 255
 
     # Resize to 448x448 to match front-end canvas
-    mask_rgba = cv2.resize(mask_rgba, (448, 448), interpolation=cv2.INTER_NEAREST)
+    mask_rgba = cv2.resize(
+        mask_rgba, (448, 448), interpolation=cv2.INTER_NEAREST
+    )
     return mask_rgba
 
 
 def generate_default_focus_mask(class_name, image_path):
     import cv2
     import numpy as np
+
     global model, class_indices, ACTIVE_BACKBONE
 
     img = cv2.imread(image_path)
@@ -1484,11 +1497,17 @@ def generate_default_focus_mask(class_name, image_path):
 
         if model is not None and class_indices is not None:
             from tensorflow.keras.preprocessing import image as keras_image
+
+            from scripts.gradcam_check import (
+                _find_target_layer,
+                _make_gradcam_heatmap,
+            )
             from src.core.preprocessing import preprocess_array_for_model
-            from scripts.gradcam_check import _make_gradcam_heatmap, _find_target_layer
 
             # Load and preprocess image
-            img_loaded = keras_image.load_img(image_path, target_size=(224, 224))
+            img_loaded = keras_image.load_img(
+                image_path, target_size=(224, 224)
+            )
             img_array = keras_image.img_to_array(img_loaded)
             img_array_exp = np.expand_dims(img_array, axis=0)
 
@@ -1581,6 +1600,7 @@ def generate_default_focus_mask(class_name, image_path):
 @app.route("/review/mask/<class_name>/<mask_type>")
 def get_review_mask(class_name, mask_type):
     from flask import send_from_directory
+
     masks_dir = os.path.abspath(os.path.join("annotations", "masks"))
     os.makedirs(masks_dir, exist_ok=True)
     filename = f"{class_name}_{mask_type}.png"
@@ -1591,10 +1611,13 @@ def get_review_mask(class_name, mask_type):
         sample_img_path = os.path.join(samples_dir, f"{class_name}.jpg")
         if os.path.exists(sample_img_path):
             import cv2
+
             if mask_type == "leaf":
                 mask_data = generate_default_leaf_mask(sample_img_path)
             else:
-                mask_data = generate_default_focus_mask(class_name, sample_img_path)
+                mask_data = generate_default_focus_mask(
+                    class_name, sample_img_path
+                )
 
             if mask_data is not None:
                 cv2.imwrite(filepath, mask_data)
@@ -1611,13 +1634,13 @@ def save_review_annotation():
     class_name = payload.get("class_name")
     leaf_mask_b64 = payload.get("leaf_mask")
     focus_mask_b64 = payload.get("focus_mask")
-    
+
     if not class_name:
         return jsonify({"error": "Missing class_name"}), 400
-        
+
     masks_dir = os.path.join("annotations", "masks")
     os.makedirs(masks_dir, exist_ok=True)
-    
+
     def decode_and_save(b64_str, filename):
         if not b64_str:
             return
@@ -1627,7 +1650,7 @@ def save_review_annotation():
         filepath = os.path.join(masks_dir, filename)
         with open(filepath, "wb") as f:
             f.write(img_data)
-            
+
     try:
         if leaf_mask_b64:
             decode_and_save(leaf_mask_b64, f"{class_name}_leaf.png")
@@ -1641,9 +1664,10 @@ def save_review_annotation():
 @app.route("/")
 def index():
     """Render the main page"""
-    available_model_names = [
-        _model_option_name(path) for path in _list_available_model_paths()
-    ]
+    available_model_names = sorted(
+        [_model_option_name(path) for path in _list_available_model_paths()],
+        key=lambda s: s.lower(),
+    )
     active_name = (
         _model_option_name(ACTIVE_MODEL_PATH) if ACTIVE_MODEL_PATH else None
     )
@@ -1675,7 +1699,7 @@ def index():
         compute_info=get_compute_info(),
         available_models=available_model_names,
         active_model_name=active_name,
-        training_backbones=TRAIN_BACKBONES,
+        training_backbones=sorted(TRAIN_BACKBONES, key=lambda s: s.lower()),
         training_optimizer_options=TRAIN_OPTIMIZER_OPTIONS,
         training_save_modes=TRAIN_SAVE_MODES,
         default_train_fraction_pct=round(default_fraction_pct, 2),
@@ -1933,10 +1957,13 @@ def control_resume():
         with open(flag_path, "w", encoding="utf-8") as f:
             f.write("resume")
 
-        # Set job stage to resuming in memory for immediate UI feedback
+        # Set job stage to resuming for UI feedback.
         with JOBS_LOCK:
             for job in JOBS.values():
-                if job["status"] == "running" and job.get("progress_stage") == "paused_for_review":
+                if (
+                    job["status"] == "running"
+                    and job.get("progress_stage") == "paused_for_review"
+                ):
                     job["progress_stage"] = "resuming"
 
         return jsonify({"message": "Resume signal sent."})

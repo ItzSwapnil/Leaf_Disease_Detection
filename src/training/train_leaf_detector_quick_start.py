@@ -4,7 +4,10 @@ Quick-start guide for training the binary leaf detector model.
 This script demonstrates how to train Stage 1 of the multi-stage pipeline.
 """
 
-from src.training.train_leaf_detector import BINARY_DETECTOR_FINAL, train_leaf_detector
+from src.training.train_leaf_detector import (
+    BINARY_DETECTOR_FINAL,
+    train_leaf_detector,
+)
 
 
 def _print_model_saved_info() -> None:
@@ -18,7 +21,9 @@ def _print_model_saved_info() -> None:
             "  1. Run your pipeline - it will automatically detect the model"
         )
         print("  2. Or explicitly pass it: ")
-        print("     from src.pipeline.disease_detection_pipeline import create_pipeline")
+        print(
+            "     from src.pipeline.disease_detection_pipeline import create_pipeline"
+        )
         print("     pipeline = create_pipeline()")
         print(
             "\n✓ The pipeline will now use the trained model for leaf detection!"

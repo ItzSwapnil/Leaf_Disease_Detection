@@ -316,7 +316,9 @@ class OverfittingStopper(keras.callbacks.Callback):
         loss = logs.get("loss")
         val_loss = logs.get("val_loss")
         acc = logs.get("accuracy")
-        val_acc = logs.get("val_disease_output_accuracy") or logs.get("val_accuracy")
+        val_acc = logs.get("val_disease_output_accuracy") or logs.get(
+            "val_accuracy"
+        )
 
         if None in (loss, val_loss, acc, val_acc):
             return
@@ -368,7 +370,9 @@ class PreOverfitRestorer(keras.callbacks.Callback):
         loss = logs.get("loss")
         val_loss = logs.get("val_loss")
         acc = logs.get("accuracy")
-        val_acc = logs.get("val_disease_output_accuracy") or logs.get("val_accuracy")
+        val_acc = logs.get("val_disease_output_accuracy") or logs.get(
+            "val_accuracy"
+        )
 
         if None in (loss, val_loss, acc, val_acc):
             return
@@ -464,7 +468,9 @@ class RollingPreOverfitRestorer(keras.callbacks.Callback):
         loss = logs.get("loss")
         val_loss = logs.get("val_loss")
         acc = logs.get("accuracy")
-        val_acc = logs.get("val_disease_output_accuracy") or logs.get("val_accuracy")
+        val_acc = logs.get("val_disease_output_accuracy") or logs.get(
+            "val_accuracy"
+        )
         if None in (loss, val_loss, acc, val_acc):
             return False
         gap = float(acc) - float(val_acc)
@@ -1687,7 +1693,7 @@ class GradCamEpochCollageCallback(keras.callbacks.Callback):
                     disease_preds = preds["disease_output"]
                 else:
                     disease_preds = preds
-                    
+
                 pred_idx = int(np.argmax(disease_preds[0]))
                 pred_label = self.class_names[pred_idx]
                 pred_conf = float(disease_preds[0][pred_idx])
@@ -1703,8 +1709,12 @@ class GradCamEpochCollageCallback(keras.callbacks.Callback):
                 )
 
                 # Overlay crop and disease separately
-                overlay1 = _overlay_heatmap(original_img, crop_heatmap, alpha=0.3, colormap="viridis")
-                overlay = _overlay_heatmap(overlay1, disease_heatmap, alpha=0.5, colormap="jet")
+                overlay1 = _overlay_heatmap(
+                    original_img, crop_heatmap, alpha=0.3, colormap="viridis"
+                )
+                overlay = _overlay_heatmap(
+                    overlay1, disease_heatmap, alpha=0.5, colormap="jet"
+                )
 
                 # Display image
                 ax.imshow(overlay)

@@ -12,6 +12,14 @@ from typing import Any
 import numpy as np
 import tensorflow as tf
 
+from src.core.inference_guard import (
+    compute_prediction_diagnostics,
+    evaluate_inference_safety,
+)
+from src.core.leaf_detector import detect_leaf_presence
+from src.core.leaf_detector_model import create_leaf_detector
+from src.core.preprocessing import get_preprocessing_fn
+
 # Background removal bypassed
 from src.utils.config import (
     CHECKPOINT_PATH,
@@ -21,14 +29,7 @@ from src.utils.config import (
     IMG_SIZE,
     OOD_MSP_THRESHOLD,
 )
-from src.core.inference_guard import (
-    compute_prediction_diagnostics,
-    evaluate_inference_safety,
-)
-from src.core.leaf_detector import detect_leaf_presence
-from src.core.leaf_detector_model import create_leaf_detector
 from src.utils.model_paths import resolve_keras_model_path
-from src.core.preprocessing import get_preprocessing_fn
 
 
 class LeafDiseasePipeline:
