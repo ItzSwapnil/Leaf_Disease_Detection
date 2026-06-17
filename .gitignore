@@ -43,6 +43,8 @@ EXP/
 /models/logs/
 /models/archived/
 /logs/
+*.pt
+*.pt.tmp
 
 # --- Temporary & Upload Files ---
 /uploads/*

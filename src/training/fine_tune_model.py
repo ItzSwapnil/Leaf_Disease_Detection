@@ -4,6 +4,7 @@ import os
 import random
 import time
 from datetime import datetime
+from pathlib import Path
 
 import tensorflow as tf
 import tensorflow.keras as keras
@@ -64,6 +65,7 @@ from src.utils.config import (
     USE_MIXUP,
     USE_OPTIMIZER_EMA,
     USE_RANDAUGMENT,
+    USE_YOLO_LEAF_DETECTION,
     VAL_DIR,
     WEIGHT_DECAY,
 )
@@ -97,6 +99,12 @@ def _patch_vit_layer_init_for_compat() -> bool:
     def _patched_init(self, *args, **kwargs):
         kwargs.pop("num_patches", None)
         kwargs.pop("num_positions", None)
+        image_size = kwargs.get("image_size")
+        if isinstance(image_size, int):
+            kwargs["image_size"] = (image_size, image_size)
+        patch_size = kwargs.get("patch_size")
+        if isinstance(patch_size, int):
+            kwargs["patch_size"] = (patch_size, patch_size)
         return original_init(self, *args, **kwargs)
 
     layer_cls.__init__ = _patched_init
@@ -348,23 +356,45 @@ def main():
             )
     autotune = tf.data.AUTOTUNE
 
-    train_ds = keras.utils.image_dataset_from_directory(
-        TRAIN_DIR,
-        labels="inferred",
-        label_mode="categorical",
-        image_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=batch_size,
-        shuffle=True,
-        seed=seed,
-    )
-    val_ds = keras.utils.image_dataset_from_directory(
-        VAL_DIR,
-        labels="inferred",
-        label_mode="categorical",
-        image_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=batch_size,
-        shuffle=False,
-    )
+    train_dir_path = Path(TRAIN_DIR)
+    val_dir_path = Path(VAL_DIR)
+
+    if USE_YOLO_LEAF_DETECTION:
+        from src.training.training_utils import build_dynamic_yolo_dataset
+        train_class_names = sorted(
+            entry.name for entry in os.scandir(train_dir_path) if entry.is_dir()
+        )
+        train_ds = build_dynamic_yolo_dataset(
+            train_dir_path,
+            train_class_names,
+            batch_size=batch_size,
+            shuffle=True,
+            seed=seed,
+        )
+        val_ds = build_dynamic_yolo_dataset(
+            val_dir_path,
+            train_class_names,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+    else:
+        train_ds = keras.utils.image_dataset_from_directory(
+            train_dir_path,
+            labels="inferred",
+            label_mode="categorical",
+            image_size=(IMG_SIZE, IMG_SIZE),
+            batch_size=batch_size,
+            shuffle=True,
+            seed=seed,
+        )
+        val_ds = keras.utils.image_dataset_from_directory(
+            val_dir_path,
+            labels="inferred",
+            label_mode="categorical",
+            image_size=(IMG_SIZE, IMG_SIZE),
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
     def _prep(ds, training=False):
         if training and USE_RANDAUGMENT:
@@ -410,7 +440,7 @@ def main():
 
     # ── class weighting and loss ──────────────────────────────────────────
     class_weight = compute_class_weights_from_directory(
-        TRAIN_DIR, train_ds.class_names
+        str(train_dir_path), train_ds.class_names
     )
     if class_weight:
         print("Class-balanced weighting enabled for fine-tuning.")
@@ -658,7 +688,7 @@ def main():
     )
 
     collage_callback = GradCamEpochCollageCallback(
-        val_dir=VAL_DIR,
+        val_dir=str(val_dir_path),
         class_names=train_ds.class_names,
         backbone_name=detected_backbone,
         output_dir="plots/gradcam_epochs_finetune",

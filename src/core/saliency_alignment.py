@@ -216,7 +216,13 @@ class SaliencyAlignedModel(keras.Model):
         ] + super().metrics
 
     def call(self, inputs, training=None):
-        return self.functional_model(inputs, training=training)
+        if isinstance(inputs, tuple) or isinstance(inputs, list):
+            image = inputs[0]
+        elif isinstance(inputs, dict):
+            image = inputs["image"]
+        else:
+            image = inputs
+        return self.functional_model(image, training=training)
 
     def get_layer(self, name=None, index=None):
         return self.functional_model.get_layer(name=name, index=index)
@@ -367,6 +373,15 @@ class SaliencyAlignedModel(keras.Model):
     @tf.function
     def train_step(self, data):
         x, y = data
+        if isinstance(x, tuple) or isinstance(x, list):
+            image_tensor, yolo_mask = x
+        elif isinstance(x, dict):
+            image_tensor = x["image"]
+            yolo_mask = x.get("yolo_mask", None)
+        else:
+            image_tensor = x
+            yolo_mask = None
+
         if isinstance(y, dict):
             _y_crop = y["crop_output"]
             y_disease = y["disease_output"]
@@ -378,22 +393,32 @@ class SaliencyAlignedModel(keras.Model):
         if self.backbone_name == "DINOv3":
             mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
             std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
-            x_orig = (x * std + mean) * 255.0
+            x_orig = (image_tensor * std + mean) * 255.0
         else:
-            x_orig = x
+            x_orig = image_tensor
 
         # HSV-based background/shadow mask
         x_01 = tf.clip_by_value(x_orig / 255.0, 0.0, 1.0)
         hsv = tf.image.rgb_to_hsv(x_01)
         saturation = hsv[..., 1:2]
         value = hsv[..., 2:3]
-        bg_mask = tf.cast(
+        hsv_bg_mask = tf.cast(
             (saturation <= 0.15) | (value <= 0.08) | (value >= 0.94),
             dtype=tf.float32,
         )
+        hsv_leaf_mask = 1.0 - hsv_bg_mask
 
-        # Leaf mask for anomaly detection
-        leaf_mask = 1.0 - bg_mask
+        if yolo_mask is not None:
+            # yolo_mask shape is (batch_size, H, W, 1)
+            # check where yolo_mask is valid (sum > 10.0)
+            yolo_sum = tf.reduce_sum(yolo_mask, axis=[1, 2, 3], keepdims=True)
+            is_yolo_valid = yolo_sum > 10.0
+            leaf_mask = tf.where(is_yolo_valid, yolo_mask, hsv_leaf_mask)
+            bg_mask = 1.0 - leaf_mask
+        else:
+            leaf_mask = hsv_leaf_mask
+            bg_mask = hsv_bg_mask
+
         leaf_pixels_count = (
             tf.reduce_sum(leaf_mask, axis=[1, 2], keepdims=True) + 1e-5
         )
@@ -433,17 +458,17 @@ class SaliencyAlignedModel(keras.Model):
                         logits,
                         target_activations,
                         target_attn_list,
-                    ) = self._forward_vit_multiblock(x, inner)
+                    ) = self._forward_vit_multiblock(image_tensor, inner)
                 else:
                     if self.grad_model is not None:
-                        target_act, logits = self.grad_model(x, training=True)
+                        target_act, logits = self.grad_model(image_tensor, training=True)
                         inner.watch(target_act)
                         target_activations = [target_act]
                         target_attn_list = [None]
                     else:
                         target_activations = []
                         target_attn_list = []
-                        logits = self.functional_model(x, training=True)
+                        logits = self.functional_model(image_tensor, training=True)
 
                 # Classification loss
                 cls_loss = self.compiled_loss(y, logits)
@@ -760,7 +785,7 @@ class SaliencyAlignedModel(keras.Model):
         self.human_bg_penalty_tracker.update_state(human_bg_penalty)
         self.human_disease_reward_tracker.update_state(human_disease_reward)
 
-        self.compute_metrics(x, y, logits, sample_weight=None)
+        self.compute_metrics(image_tensor, y, logits, sample_weight=None)
 
         results = {}
         for m in self.metrics:
@@ -913,8 +938,14 @@ class SaliencyAlignedModel(keras.Model):
     @tf.function
     def test_step(self, data):
         x, y = data
-        logits = self.functional_model(x, training=False)
-        loss = self.compute_loss(x, y, logits)
+        if isinstance(x, tuple) or isinstance(x, list):
+            image_tensor, _ = x
+        elif isinstance(x, dict):
+            image_tensor = x["image"]
+        else:
+            image_tensor = x
+        logits = self.functional_model(image_tensor, training=False)
+        loss = self.compute_loss(image_tensor, y, logits)
 
         self.loss_tracker.update_state(loss)
         self.cls_loss_tracker.update_state(loss)
@@ -926,7 +957,7 @@ class SaliencyAlignedModel(keras.Model):
         self.human_bg_penalty_tracker.update_state(0.0)
         self.human_disease_reward_tracker.update_state(0.0)
 
-        self.compute_metrics(x, y, logits, sample_weight=None)
+        self.compute_metrics(image_tensor, y, logits, sample_weight=None)
 
         results = {}
         for m in self.metrics:

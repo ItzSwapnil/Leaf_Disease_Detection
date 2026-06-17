@@ -74,6 +74,12 @@ def _patch_vit_layer_init_for_compat() -> bool:
     def _patched_init(self, *args, **kwargs):
         kwargs.pop("num_patches", None)
         kwargs.pop("num_positions", None)
+        image_size = kwargs.get("image_size")
+        if isinstance(image_size, int):
+            kwargs["image_size"] = (image_size, image_size)
+        patch_size = kwargs.get("patch_size")
+        if isinstance(patch_size, int):
+            kwargs["patch_size"] = (patch_size, patch_size)
         return original_init(self, *args, **kwargs)
 
     layer_cls.__init__ = _patched_init

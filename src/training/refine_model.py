@@ -58,6 +58,7 @@ from src.utils.config import (
     USE_CUTMIX,
     USE_MIXUP,
     USE_RANDAUGMENT,
+    USE_YOLO_LEAF_DETECTION,
     VAL_DIR,
 )
 from src.utils.hardware import configure_tensorflow, get_training_strategy
@@ -304,40 +305,54 @@ def main():
     else:
         print(f"Unfroze {trainable_count} trainable layers (BN kept frozen).")
 
-    autotune = tf.data.AUTOTUNE
-    train_ds = keras.utils.image_dataset_from_directory(
-        TRAIN_DIR,
-        labels="inferred",
-        label_mode="categorical",
-        image_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=batch_size,
-        shuffle=True,
-        seed=seed,
-    )
-    val_ds = keras.utils.image_dataset_from_directory(
-        VAL_DIR,
-        labels="inferred",
-        label_mode="categorical",
-        image_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=batch_size,
-        shuffle=False,
+    train_dir_path = Path(TRAIN_DIR)
+    val_dir_path = Path(VAL_DIR)
+
+    train_class_names = sorted(
+        entry.name for entry in os.scandir(train_dir_path) if entry.is_dir()
     )
 
-    train_class_names = (
-        list(train_ds.class_names)
-        if getattr(train_ds, "class_names", None)
-        else []
-    )
-    if not train_class_names:
-        train_class_names = sorted(
-            entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir()
+    if USE_YOLO_LEAF_DETECTION:
+        from src.training.training_utils import build_dynamic_yolo_dataset
+        train_ds = build_dynamic_yolo_dataset(
+            train_dir_path,
+            train_class_names,
+            batch_size=batch_size,
+            shuffle=True,
+            seed=seed,
+        )
+        val_ds = build_dynamic_yolo_dataset(
+            val_dir_path,
+            train_class_names,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+    else:
+        train_ds = keras.utils.image_dataset_from_directory(
+            train_dir_path,
+            labels="inferred",
+            label_mode="categorical",
+            image_size=(IMG_SIZE, IMG_SIZE),
+            batch_size=batch_size,
+            shuffle=True,
+            seed=seed,
+        )
+        val_ds = keras.utils.image_dataset_from_directory(
+            val_dir_path,
+            labels="inferred",
+            label_mode="categorical",
+            image_size=(IMG_SIZE, IMG_SIZE),
+            batch_size=batch_size,
+            shuffle=False,
         )
 
+    autotune = tf.data.AUTOTUNE
+
     _, train_samples = count_class_samples_from_directory(
-        str(TRAIN_DIR), train_class_names
+        str(train_dir_path), train_class_names
     )
     _, val_samples = count_class_samples_from_directory(
-        str(VAL_DIR), train_class_names
+        str(val_dir_path), train_class_names
     )
 
     print(f"Training samples: {train_samples}")
@@ -386,7 +401,7 @@ def main():
     val_ds = val_ds.prefetch(autotune)
 
     class_weight = compute_class_weights_from_directory(
-        str(TRAIN_DIR), train_class_names
+        str(train_dir_path), train_class_names
     )
     if class_weight:
         print("Class-balanced weighting enabled for refinement.")
@@ -571,7 +586,7 @@ def main():
     )
 
     collage_callback = GradCamEpochCollageCallback(
-        val_dir=VAL_DIR,
+        val_dir=str(val_dir_path),
         class_names=train_class_names,
         backbone_name=detected_backbone,
         output_dir="plots/gradcam_epochs_refine",

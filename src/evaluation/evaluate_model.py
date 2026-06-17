@@ -114,6 +114,12 @@ def _patch_vit_layer_init_for_compat() -> bool:
     def _patched_init(self, *args, **kwargs):
         kwargs.pop("num_patches", None)
         kwargs.pop("num_positions", None)
+        image_size = kwargs.get("image_size")
+        if isinstance(image_size, int):
+            kwargs["image_size"] = (image_size, image_size)
+        patch_size = kwargs.get("patch_size")
+        if isinstance(patch_size, int):
+            kwargs["patch_size"] = (patch_size, patch_size)
         return original_init(self, *args, **kwargs)
 
     layer_cls.__init__ = _patched_init
@@ -271,8 +277,23 @@ def _build_feature_model(model):
     return keras.Model(inputs=model.input, outputs=model.layers[-2].output)
 
 
+def _extract_disease_predictions(predictions):
+    """Return disease probabilities from single-output or multi-output models."""
+    if isinstance(predictions, dict):
+        if "disease_output" in predictions:
+            predictions = predictions["disease_output"]
+        else:
+            predictions = next(iter(predictions.values()))
+    elif isinstance(predictions, (list, tuple)):
+        predictions = predictions[-1]
+    return np.asarray(predictions)
+
+
 def _predict_probs_and_logits(model, dataset):
-    probs = np.asarray(model.predict(dataset, verbose=1), dtype=np.float64)
+    probs = np.asarray(
+        _extract_disease_predictions(model.predict(dataset, verbose=1)),
+        dtype=np.float64,
+    )
     logits_model = _build_logits_model(model)
     if logits_model is None:
         logits = np.log(np.clip(probs, 1e-8, 1.0))
@@ -428,7 +449,9 @@ def _compute_ood_report(
         id_labels = y_true
 
     ood_probs = np.asarray(
-        model.predict(_take_dataset(ood_gen, OOD_MAX_SAMPLES), verbose=0),
+        _extract_disease_predictions(
+            model.predict(_take_dataset(ood_gen, OOD_MAX_SAMPLES), verbose=0)
+        ),
         dtype=np.float64,
     )
     ood_probs = _slice_to_limit(ood_probs, OOD_MAX_SAMPLES)
@@ -873,7 +896,11 @@ def main():
         else:
             robustness_report = evaluate_robustness_suite(
                 predictor=lambda arr: np.asarray(
-                    model.predict(arr, batch_size=EVAL_BATCH_SIZE, verbose=0),
+                    _extract_disease_predictions(
+                        model.predict(
+                            arr, batch_size=EVAL_BATCH_SIZE, verbose=0
+                        )
+                    ),
                     dtype=np.float64,
                 ),
                 images=robust_images,
@@ -896,7 +923,10 @@ def main():
         try:
             baseline_model = _load_model(baseline_path)
             baseline_probs = np.asarray(
-                baseline_model.predict(val_gen, verbose=0), dtype=np.float64
+                _extract_disease_predictions(
+                    baseline_model.predict(val_gen, verbose=0)
+                ),
+                dtype=np.float64,
             )
             baseline_pred = np.argmax(baseline_probs, axis=1)
             mcnemar_report = mcnemar_test(y_true, y_pred, baseline_pred)

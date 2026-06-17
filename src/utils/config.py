@@ -152,6 +152,7 @@ RANDOM_ERASING_SCALE_MAX = _env_float("LEAF_RANDOM_ERASING_SCALE_MAX", 0.33)
 USE_BACKGROUND_RANDOMIZATION = _env_bool(
     "LEAF_USE_BACKGROUND_RANDOMIZATION", True
 )
+USE_YOLO_LEAF_DETECTION = _env_bool("LEAF_USE_YOLO_LEAF_DETECTION", True)
 
 # ============================================================
 #                 ATTENTION GUIDANCE HYPERPARAMETERS

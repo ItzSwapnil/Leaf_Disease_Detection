@@ -87,6 +87,7 @@ from src.utils.config import (
     USE_ATTENTION_GUIDANCE,
     USE_MIXUP,
     USE_RANDAUGMENT,
+    USE_YOLO_LEAF_DETECTION,
     VAL_DIR,
     VALIDATION_STEPS,
     WARMUP_EPOCHS,
@@ -277,10 +278,15 @@ def _build_labeled_image_dataset(
         crop_mapping_tensor = None
 
     def _decode(path, label):
-        image_bytes = tf.io.read_file(path)
-        image_tensor = tf.io.decode_jpeg(image_bytes, channels=3)
-        image_tensor = tf.image.resize(image_tensor, (IMG_SIZE, IMG_SIZE))
-        image_tensor = tf.cast(image_tensor, tf.float32)
+        if USE_YOLO_LEAF_DETECTION:
+            from src.training.training_utils import dynamic_yolo_focus_tf
+            image_tensor, yolo_mask = dynamic_yolo_focus_tf(path)
+        else:
+            image_bytes = tf.io.read_file(path)
+            image_tensor = tf.io.decode_jpeg(image_bytes, channels=3)
+            image_tensor = tf.image.resize(image_tensor, (IMG_SIZE, IMG_SIZE))
+            image_tensor = tf.cast(image_tensor, tf.float32)
+            yolo_mask = tf.ones((IMG_SIZE, IMG_SIZE, 1), dtype=tf.float32)
 
         disease_one_hot = tf.one_hot(
             tf.cast(label, tf.int32), depth=NUM_CLASSES
@@ -298,7 +304,7 @@ def _build_labeled_image_dataset(
         else:
             targets = disease_one_hot
 
-        return image_tensor, targets
+        return (image_tensor, yolo_mask), targets
 
     ds = ds.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=False)
@@ -530,6 +536,9 @@ def main():
         val_to_train_map=val_to_train_map,
         class_indices=class_indices,
     )
+
+
+
     val_ds = _build_labeled_image_dataset(
         val_paths,
         val_labels,

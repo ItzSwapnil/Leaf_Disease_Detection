@@ -1761,3 +1761,98 @@ class GradCamEpochCollageCallback(keras.callbacks.Callback):
             f"\n[GradCamEpochCollageCallback] Saved Grad-CAM collage "
             f"to: {collage_path}"
         )
+
+
+_yolo_leaf_detector = None
+
+
+def _dynamic_yolo_focus(path_tensor):
+    """Load original image and extract leaf focus mask via YOLO (no background removal)."""
+    global _yolo_leaf_detector
+    if _yolo_leaf_detector is None:
+        from src.core.yolo_leaf import YOLOLeafDetector
+        _yolo_leaf_detector = YOLOLeafDetector()
+
+    path_str = path_tensor.numpy().decode("utf-8")
+    import cv2
+    img_bgr = cv2.imread(path_str)
+    if img_bgr is None:
+        return (
+            np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32),
+            np.ones((IMG_SIZE, IMG_SIZE, 1), dtype=np.float32),
+        )
+
+    # 1. Focus mask (on original image resolution, then resized)
+    focus_mask = _yolo_leaf_detector.get_focus_mask(img_bgr)
+    mask_resized = cv2.resize(
+        focus_mask, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_NEAREST
+    )
+    if len(mask_resized.shape) == 2:
+        mask_resized = np.expand_dims(mask_resized, axis=-1)
+
+    # 2. Original RGB image resized
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_resized = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE))
+
+    return img_resized.astype(np.float32), mask_resized.astype(np.float32)
+
+
+def dynamic_yolo_focus_tf(path):
+    """Wrap dynamic YOLO focus mask in tf.py_function."""
+    img_tensor, mask_tensor = tf.py_function(
+        func=_dynamic_yolo_focus,
+        inp=[path],
+        Tout=[tf.float32, tf.float32]
+    )
+    img_tensor.set_shape((IMG_SIZE, IMG_SIZE, 3))
+    mask_tensor.set_shape((IMG_SIZE, IMG_SIZE, 1))
+    return img_tensor, mask_tensor
+
+
+def collect_dataset_files(dir_path: str | Path, class_names: list[str]) -> tuple[list[str], list[int]]:
+    """Scan directory for category images."""
+    dir_path = Path(dir_path)
+    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    filepaths = []
+    labels = []
+    for category_name in class_names:
+        category_dir = dir_path / category_name
+        if not category_dir.exists():
+            continue
+        idx = class_to_idx[category_name]
+        for entry in os.scandir(category_dir):
+            if entry.is_file() and entry.name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                filepaths.append(entry.path)
+                labels.append(idx)
+    return filepaths, labels
+
+
+def build_dynamic_yolo_dataset(
+    dir_path: str | Path,
+    class_names: list[str],
+    batch_size: int,
+    shuffle: bool,
+    seed: int | None = None,
+) -> tf.data.Dataset:
+    """Build dataset with dynamic YOLOv26 leaf focus attention."""
+    filepaths, labels = collect_dataset_files(dir_path, class_names)
+    ds = tf.data.Dataset.from_tensor_slices((filepaths, labels))
+    if shuffle:
+        ds = ds.shuffle(
+            buffer_size=max(1, min(len(filepaths), 20000)),
+            seed=seed,
+            reshuffle_each_iteration=True,
+        )
+
+    num_classes = len(class_names)
+
+    def _decode_and_yolo_focus(path, label):
+        image_tensor, yolo_mask = dynamic_yolo_focus_tf(path)
+        one_hot = tf.one_hot(tf.cast(label, tf.int32), depth=num_classes)
+        one_hot = tf.cast(one_hot, tf.float32)
+        return (image_tensor, yolo_mask), one_hot
+
+    ds = ds.map(_decode_and_yolo_focus, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size)
+    return ds
+

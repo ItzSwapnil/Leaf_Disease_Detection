@@ -1274,13 +1274,13 @@
 
                 <div class="training-option">
                     <label for="backgroundRemovalToggle">
-                        <span>Stage-2 background removal</span>
+                        <span>Stage-2 leaf focus detection</span>
                     </label>
                     <label class="archive-toggle" style="margin: 0;">
                         <input type="checkbox" id="backgroundRemovalToggle" {% if default_use_background_removal %}checked{% endif %}>
-                        <span>Enable segmentation before classification</span>
+                        <span>Show YOLO focus overlay</span>
                     </label>
-                    <small>When enabled, the app crops the leaf region before classification.</small>
+                    <small>When enabled, the app draws a green focus box while classifying the original image.</small>
                 </div>
 
                 <div class="training-option">
@@ -1571,6 +1571,20 @@
                                 <button class="mode-btn" id="toolErase" onclick="setTool('erase')">
                                     <i class="fas fa-eraser"></i> Erase
                                 </button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <h4>Layer Visibility</h4>
+                            <div style="display: flex; gap: 15px; margin-top: 5px;">
+                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #cbd5e1; cursor: pointer;">
+                                    <input type="checkbox" id="showLeafMask" checked onchange="redrawDisplay()" style="accent-color: #22c55e;">
+                                    Green (Leaf)
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #cbd5e1; cursor: pointer;">
+                                    <input type="checkbox" id="showFocusMask" checked onchange="redrawDisplay()" style="accent-color: #ef4444;">
+                                    Red (Focus)
+                                </label>
                             </div>
                         </div>
 
@@ -2319,11 +2333,18 @@
             if (!dCtx) return;
             dCtx.clearRect(0, 0, 448, 448);
             
-            dCtx.globalAlpha = 0.45;
-            dCtx.drawImage(leafOffscreen, 0, 0);
+            const showLeaf = document.getElementById('showLeafMask')?.checked !== false;
+            const showFocus = document.getElementById('showFocusMask')?.checked !== false;
 
-            dCtx.globalAlpha = 0.5;
-            dCtx.drawImage(focusOffscreen, 0, 0);
+            if (showLeaf) {
+                dCtx.globalAlpha = 0.45;
+                dCtx.drawImage(leafOffscreen, 0, 0);
+            }
+
+            if (showFocus) {
+                dCtx.globalAlpha = 0.5;
+                dCtx.drawImage(focusOffscreen, 0, 0);
+            }
             
             dCtx.globalAlpha = 1.0;
         }

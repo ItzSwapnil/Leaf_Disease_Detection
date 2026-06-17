@@ -218,6 +218,10 @@ and $\tau_h$ is entropy threshold.
 
 ## Mermaid Diagrams
 
+For the full system workflow, including YOLO focus alignment, training,
+evaluation, inference, web serving, safety gates, and artifact flow, see
+[docs/WORKFLOW.md](docs/WORKFLOW.md).
+
 ### End-to-end Training and Deployment Flow
 
 ```mermaid

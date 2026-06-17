@@ -30,6 +30,18 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 configure_tensorflow()
 
 
+def _extract_disease_predictions(predictions):
+    """Return disease probabilities from single-output or multi-output models."""
+    if isinstance(predictions, dict):
+        if "disease_output" in predictions:
+            predictions = predictions["disease_output"]
+        else:
+            predictions = next(iter(predictions.values()))
+    elif isinstance(predictions, (list, tuple)):
+        predictions = predictions[-1]
+    return np.asarray(predictions)
+
+
 def _load_model_robust(model_path: str):
     from src.training.training_utils import HierarchicalLoss
 
@@ -78,6 +90,12 @@ def _patch_vit_layer_init_for_compat() -> bool:
     def _patched_init(self, *args, **kwargs):
         kwargs.pop("num_patches", None)
         kwargs.pop("num_positions", None)
+        image_size = kwargs.get("image_size")
+        if isinstance(image_size, int):
+            kwargs["image_size"] = (image_size, image_size)
+        patch_size = kwargs.get("patch_size")
+        if isinstance(patch_size, int):
+            kwargs["patch_size"] = (patch_size, patch_size)
         return original_init(self, *args, **kwargs)
 
     layer_cls.__init__ = _patched_init
@@ -237,7 +255,10 @@ class LeafDiseasePredictor:
         # Ensemble inference: average probabilities across all models
         all_preds = []
         for model in self.models:
-            all_preds.append(model.predict(img_array, verbose=0)[0])
+            predictions = _extract_disease_predictions(
+                model.predict(img_array, verbose=0)
+            )
+            all_preds.append(predictions[0])
 
         predictions = np.mean(all_preds, axis=0)
 

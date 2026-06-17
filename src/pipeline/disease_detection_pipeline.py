@@ -1,16 +1,21 @@
 """
 Multi-stage leaf disease detection pipeline.
 
-Orchestrates leaf detection, background removal, classification, and analysis.
+Orchestrates leaf validation, YOLO focus detection, classification, and
+analysis. Stage 2 preserves the original image pixels; any YOLO bounding box is
+metadata for review and saliency guidance only.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
+import cv2
 import numpy as np
 import tensorflow as tf
+from PIL import Image
 
 from src.core.inference_guard import (
     compute_prediction_diagnostics,
@@ -19,8 +24,6 @@ from src.core.inference_guard import (
 from src.core.leaf_detector import detect_leaf_presence
 from src.core.leaf_detector_model import create_leaf_detector
 from src.core.preprocessing import get_preprocessing_fn
-
-# Background removal bypassed
 from src.utils.config import (
     CHECKPOINT_PATH,
     CLASS_INDICES_PATH,
@@ -28,8 +31,20 @@ from src.utils.config import (
     ENTROPY_REJECT_THRESHOLD,
     IMG_SIZE,
     OOD_MSP_THRESHOLD,
+    USE_YOLO_LEAF_DETECTION,
 )
 from src.utils.model_paths import resolve_keras_model_path
+
+
+def _extract_disease_output(outputs):
+    """Return disease output tensor from single-output or multi-output models."""
+    if isinstance(outputs, dict):
+        if "disease_output" in outputs:
+            return outputs["disease_output"]
+        return next(iter(outputs.values()))
+    if isinstance(outputs, (list, tuple)):
+        return outputs[-1]
+    return outputs
 
 
 class LeafDiseasePipeline:
@@ -81,6 +96,29 @@ class LeafDiseasePipeline:
                 "Using heuristic instead. Run: python train_leaf_detector.py"
             )
 
+        # YOLO focus detection is intentionally lazy. Importing Ultralytics can
+        # initialize Torch/Triton, which is unnecessary for classifier startup.
+        self.use_yolo = USE_YOLO_LEAF_DETECTION and (
+            os.getenv("LEAF_PIPELINE_YOLO_FOCUS", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.yolo_leaf_detector = None
+
+    def _get_yolo_leaf_detector(self):
+        """Return a lazily initialized YOLO focus detector, if available."""
+        if not self.use_yolo:
+            return None
+        if self.yolo_leaf_detector is not None:
+            return self.yolo_leaf_detector
+        try:
+            from src.core.yolo_leaf import YOLOLeafDetector
+
+            self.yolo_leaf_detector = YOLOLeafDetector()
+        except Exception as exc:
+            print(f"[!] Failed to initialize YOLOLeafDetector: {exc}")
+            self.yolo_leaf_detector = None
+        return self.yolo_leaf_detector
+
     def _load_class_indices(self) -> None:
         """Load class name mapping."""
         from pathlib import Path
@@ -88,7 +126,15 @@ class LeafDiseasePipeline:
         if Path(CLASS_INDICES_PATH).exists():
             with open(CLASS_INDICES_PATH, encoding="utf-8") as f:
                 indices_dict = json.load(f)
-                self.class_names = {int(k): v for k, v in indices_dict.items()}
+                first_key = next(iter(indices_dict), None)
+                if first_key is not None and str(first_key).isdigit():
+                    self.class_names = {
+                        int(k): str(v) for k, v in indices_dict.items()
+                    }
+                else:
+                    self.class_names = {
+                        int(v): str(k) for k, v in indices_dict.items()
+                    }
         else:
             # Fallback: numeric class names
             self.class_names = {i: f"Class_{i}" for i in range(46)}
@@ -109,20 +155,35 @@ class LeafDiseasePipeline:
 
     def stage_2_remove_background(self, img_path: str) -> dict[str, Any]:
         """
-        Stage 2: Remove background and crop leaf region (Bypassed).
-        """
-        from PIL import Image
+        Stage 2: Load original image and compute the YOLO focus bounding box.
 
+        The method name and return keys remain for compatibility with older
+        callers. ``preprocessed_image`` is the untouched resized RGB image, and
+        ``crop_bbox`` is only a focus/review bounding box.
+        """
         try:
             with Image.open(img_path) as img:
                 img_resized = img.convert("RGB").resize((IMG_SIZE, IMG_SIZE))
                 img_array = np.asarray(img_resized, dtype=np.float32)
+
+            crop_bbox = (0, 0, img_array.shape[1], img_array.shape[0])
+            reason = "Bypassed masking (kept original image)"
+
+            yolo_leaf_detector = self._get_yolo_leaf_detector()
+            if yolo_leaf_detector is not None:
+                img_bgr = cv2.imread(img_path)
+                if img_bgr is not None:
+                    detection = yolo_leaf_detector.detect(img_bgr)
+                    if detection["found"]:
+                        crop_bbox = detection["bbox"]
+                        reason = f"YOLOv26 leaf focus detected bbox: {crop_bbox}"
+
             return {
                 "preprocessed_image": img_array,
-                "crop_bbox": (0, 0, img_array.shape[1], img_array.shape[0]),
+                "crop_bbox": crop_bbox,
                 "mask": None,
                 "segmentation_ratio": 1.0,
-                "reason": "Background removal bypassed",
+                "reason": reason,
             }
         except Exception as exc:
             return {
@@ -156,8 +217,6 @@ class LeafDiseasePipeline:
                 img_array.shape[0] != IMG_SIZE
                 or img_array.shape[1] != IMG_SIZE
             ):
-                from PIL import Image
-
                 img_array = (
                     np.asarray(
                         Image.fromarray(
@@ -176,10 +235,12 @@ class LeafDiseasePipeline:
             all_probs = []
             for m in self.models:
                 logits = m(img_processed, training=False)
+                logits = _extract_disease_output(logits)
                 all_probs.append(tf.nn.softmax(logits, axis=-1).numpy()[0])
             probs = np.mean(all_probs, axis=0)
         else:
             logits = self.models[0](img_processed, training=False)
+            logits = _extract_disease_output(logits)
             probs = tf.nn.softmax(logits, axis=-1).numpy()[0]
 
         # Diagnostics

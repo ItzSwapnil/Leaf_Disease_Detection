@@ -76,14 +76,14 @@ def main():
         parser.error("--base-model can only be used with train or resume.")
 
     command_map = {
-        "serve": PROJECT_ROOT / "app.py",
-        "train": PROJECT_ROOT / "train_model.py",
-        "fine_tune": PROJECT_ROOT / "fine_tune_model.py",
-        "refine": PROJECT_ROOT / "refine_model.py",
-        "evaluate": PROJECT_ROOT / "evaluate_model.py",
-        "visualize": PROJECT_ROOT / "scripts" / "generate_figures.py",
-        "resume": PROJECT_ROOT / "fine_tune_model.py",
-        "validate": PROJECT_ROOT / "evaluate_model.py",
+        "serve": PROJECT_ROOT / "web" / "app.py",
+        "train": PROJECT_ROOT / "training" / "train_model.py",
+        "fine_tune": PROJECT_ROOT / "training" / "fine_tune_model.py",
+        "refine": PROJECT_ROOT / "training" / "refine_model.py",
+        "evaluate": PROJECT_ROOT / "evaluation" / "evaluate_model.py",
+        "visualize": PROJECT_ROOT.parent / "scripts" / "generate_figures.py",
+        "resume": PROJECT_ROOT / "training" / "fine_tune_model.py",
+        "validate": PROJECT_ROOT / "evaluation" / "evaluate_model.py",
     }
     script_path = command_map[args.task]
     if not script_path.exists():
@@ -102,7 +102,13 @@ def main():
     if args.base_model:
         child_env["LEAF_BASE_MODEL"] = args.base_model
 
-    raise SystemExit(_run_command(command, PROJECT_ROOT, env=child_env))
+    # Ensure python can find modules in the root directory
+    project_root_parent = str(PROJECT_ROOT.parent)
+    child_env["PYTHONPATH"] = (
+        project_root_parent + os.path.pathsep + child_env.get("PYTHONPATH", "")
+    ).strip(os.path.pathsep)
+
+    raise SystemExit(_run_command(command, PROJECT_ROOT.parent, env=child_env))
 
 
 if __name__ == "__main__":

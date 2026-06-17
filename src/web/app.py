@@ -7,6 +7,7 @@ for triggering training, fine-tuning, evaluation, and figure generation jobs.
 """
 
 import base64
+import io
 import json
 import os
 import re
@@ -17,9 +18,15 @@ import time
 import uuid
 from typing import Any
 
+# Set TensorFlow logging before TensorFlow is imported. GPU/CPU selection is
+# controlled by LEAF_TF_GPU_MODE in src.utils.hardware.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+import cv2
 import numpy as np
 import tensorflow as tf
 from flask import Flask, jsonify, render_template, request
+from PIL import Image
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 from werkzeug.utils import secure_filename
@@ -42,12 +49,10 @@ from src.utils.config import (
     IMG_SIZE,
     MODELS_DIR,
     OOD_MSP_THRESHOLD,
+    USE_YOLO_LEAF_DETECTION,
 )
 from src.utils.hardware import configure_tensorflow, get_compute_info
 from src.utils.model_paths import resolve_keras_model_path
-
-# Suppress TensorFlow warnings
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
 def _log_tf_runtime_info():
@@ -61,6 +66,18 @@ def _log_tf_runtime_info():
         print(f"Built with ROCm: {tf.test.is_built_with_rocm()}")
     except Exception as exc:  # Best effort; do not block app startup
         print(f"TensorFlow runtime probe failed: {exc}")
+
+
+def _extract_disease_predictions(predictions):
+    """Return disease probabilities from single-output or multi-output models."""
+    if isinstance(predictions, dict):
+        if "disease_output" in predictions:
+            predictions = predictions["disease_output"]
+        else:
+            predictions = next(iter(predictions.values()))
+    elif isinstance(predictions, (list, tuple)):
+        predictions = predictions[-1]
+    return np.asarray(predictions)
 
 
 configure_tensorflow()
@@ -84,6 +101,7 @@ MODEL_PATH = None
 MODEL_CACHE: dict[str, Any] = {}
 ACTIVE_BACKBONE = None
 LEAF_DETECTOR_MODEL = None
+YOLO_FOCUS_DETECTOR = None
 
 # Store per-job console history in memory.
 # Set limit for truncation in low-memory envs.
@@ -318,6 +336,12 @@ def _patch_vit_layer_init_for_compat() -> bool:
     def _patched_init(self, *args, **kwargs):
         kwargs.pop("num_patches", None)
         kwargs.pop("num_positions", None)
+        image_size = kwargs.get("image_size")
+        if isinstance(image_size, int):
+            kwargs["image_size"] = (image_size, image_size)
+        patch_size = kwargs.get("patch_size")
+        if isinstance(patch_size, int):
+            kwargs["patch_size"] = (patch_size, patch_size)
         return original_init(self, *args, **kwargs)
 
     layer_cls.__init__ = _patched_init
@@ -370,8 +394,18 @@ def _infer_model_num_classes(active_model):
     """Best-effort extraction of output class count from a loaded Keras model."""
     try:
         output_shape = active_model.output_shape
-        if isinstance(output_shape, list):
-            output_shape = output_shape[0]
+        output_names = list(getattr(active_model, "output_names", []) or [])
+        if isinstance(output_shape, dict):
+            output_shape = output_shape.get("disease_output") or next(
+                iter(output_shape.values())
+            )
+        elif isinstance(output_shape, list):
+            if "disease_output" in output_names:
+                output_shape = output_shape[
+                    output_names.index("disease_output")
+                ]
+            else:
+                output_shape = output_shape[-1]
         if not output_shape:
             return None
         # Most classifiers expose shape like (None, num_classes).
@@ -493,6 +527,20 @@ def _get_leaf_detector_model():
         print(f"Leaf detector model unavailable: {exc}")
         LEAF_DETECTOR_MODEL = None
     return LEAF_DETECTOR_MODEL
+
+
+def _get_yolo_leaf_detector():
+    global YOLO_FOCUS_DETECTOR
+    if YOLO_FOCUS_DETECTOR is not None:
+        return YOLO_FOCUS_DETECTOR
+
+    try:
+        from src.core.yolo_leaf import YOLOLeafDetector
+        YOLO_FOCUS_DETECTOR = YOLOLeafDetector()
+    except Exception as exc:
+        print(f"YOLOLeafDetector unavailable: {exc}")
+        YOLO_FOCUS_DETECTOR = None
+    return YOLO_FOCUS_DETECTOR
 
 
 def _parse_pipeline_options(payload):
@@ -1223,11 +1271,58 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
             }
 
     model_input_array = None
-    stage_details.append({"stage": "background_removal", "applied": False})
+    focus_overlay_b64 = None
+    focus_overlay_enabled = bool(
+        USE_YOLO_LEAF_DETECTION and options["use_background_removal"]
+    )
+    stage_details.append(
+        {"stage": "leaf_focus_detection", "applied": focus_overlay_enabled}
+    )
 
     if model_input_array is None:
-        img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
-        model_input_array = np.expand_dims(image.img_to_array(img), axis=0)
+        try:
+            img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
+            model_input_array = np.expand_dims(image.img_to_array(img), axis=0)
+        except Exception as exc:
+            print(f"Failed to load image for classification: {exc}")
+
+        if focus_overlay_enabled:
+            detector = _get_yolo_leaf_detector()
+            if detector is not None:
+                try:
+                    img_bgr = cv2.imread(img_path)
+                    if img_bgr is not None:
+                        detection = detector.detect(img_bgr)
+                        if detection["found"]:
+                            x1, y1, x2, y2 = detection["bbox"]
+                            img_boxed = img_bgr.copy()
+                            cv2.rectangle(
+                                img_boxed,
+                                (x1, y1),
+                                (x2, y2),
+                                (34, 197, 94),
+                                3,
+                            )
+                            cv2.putText(
+                                img_boxed,
+                                f"Leaf Focus ({int(detection['confidence'] * 100)}%)",
+                                (x1, max(y1 - 10, 20)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                (34, 197, 94),
+                                2,
+                            )
+                            img_boxed_rgb = cv2.cvtColor(
+                                img_boxed, cv2.COLOR_BGR2RGB
+                            )
+                            img_pil = Image.fromarray(img_boxed_rgb)
+                            buffered = io.BytesIO()
+                            img_pil.save(buffered, format="JPEG")
+                            focus_overlay_b64 = base64.b64encode(
+                                buffered.getvalue()
+                            ).decode("utf-8")
+                except Exception as exc:
+                    print(f"YOLOv26 focus visualization failed: {exc}")
 
     # Skip preprocessing if model has internal block.
     if not _model_has_internal_preprocessing(active_model):
@@ -1238,12 +1333,15 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
     # Make prediction
     if isinstance(active_model, list):
         all_preds = [
-            m.predict(model_input_array, verbose=0)[0] for m in active_model
+            _extract_disease_predictions(m.predict(model_input_array, verbose=0))[0]
+            for m in active_model
         ]
         prediction_probs = np.mean(all_preds, axis=0)
         diagnostics = compute_prediction_diagnostics(prediction_probs)
     else:
-        predictions = active_model.predict(model_input_array, verbose=0)
+        predictions = _extract_disease_predictions(
+            active_model.predict(model_input_array, verbose=0)
+        )
         diagnostics = compute_prediction_diagnostics(predictions[0])
     predicted_class_idx = int(diagnostics["top1_index"])
     confidence = float(diagnostics["top1_prob"]) * 100.0
@@ -1300,7 +1398,7 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
         plant = parts[0].replace("_", " ") if len(parts) > 0 else "Unknown"
         disease = parts[1].replace("_", " ") if len(parts) > 1 else class_name
 
-        return {
+        ret = {
             "class_name": class_name,
             "confidence": round(confidence, 2),
             "plant": plant,
@@ -1325,6 +1423,9 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
                 "stages": stage_details,
             },
         }
+        if focus_overlay_b64:
+            ret["cropped_image"] = f"data:image/jpeg;base64,{focus_overlay_b64}"
+        return ret
 
     # Get disease info
     info = DISEASE_INFO.get(
@@ -1343,7 +1444,7 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
         },
     )
 
-    return {
+    ret = {
         "class_name": class_name,
         "confidence": round(confidence, 2),
         "plant": info["plant"],
@@ -1366,6 +1467,9 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
             "stages": stage_details,
         },
     }
+    if focus_overlay_b64:
+        ret["cropped_image"] = f"data:image/jpeg;base64,{focus_overlay_b64}"
+    return ret
 
 
 def init_review_samples():
@@ -1455,16 +1559,33 @@ def generate_default_leaf_mask(image_path):
     if img is None:
         return None
 
-    # Convert to HSV
+    h, w = img.shape[:2]
+    leaf_mask = np.ones((h, w), dtype=bool)
+
+    # If YOLOv26 leaf detection is active, run it to get leaf bounding box.
+    if USE_YOLO_LEAF_DETECTION:
+        detector = _get_yolo_leaf_detector()
+        if detector is not None:
+            try:
+                detection = detector.detect(img)
+                if detection["found"]:
+                    x1, y1, x2, y2 = detection["bbox"]
+                    yolo_mask = np.zeros((h, w), dtype=bool)
+                    yolo_mask[y1:y2, x1:x2] = True
+                    leaf_mask = yolo_mask
+            except Exception as exc:
+                print(f"YOLOv26 detect failed in default mask gen: {exc}")
+
+    # Refine the mask using HSV color thresholding
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     s = hsv[:, :, 1]
     v = hsv[:, :, 2]
-
-    # HSV thresholds for leaf detection.
     bg_mask = (s <= 38) | (v <= 20) | (v >= 240)
-    leaf_mask = ~bg_mask
 
-    h, w = img.shape[:2]
+    refined_mask = leaf_mask & (~bg_mask)
+    if np.sum(refined_mask) > 100:
+        leaf_mask = refined_mask
+
     # Create 4-channel transparent PNG
     mask_rgba = np.zeros((h, w, 4), dtype=np.uint8)
     # Paint leaf green: BGR = (94, 197, 34), alpha = 255
@@ -1765,11 +1886,13 @@ def predict():
             )
             result["model_name"] = _model_option_name(active_model_path)
 
-            # Read image for preview
-            with open(filepath, "rb") as f:
-                img_data = base64.b64encode(f.read()).decode("utf-8")
-
-            result["image"] = f"data:image/jpeg;base64,{img_data}"
+            if "cropped_image" in result:
+                result["image"] = result["cropped_image"]
+            else:
+                # Read image for preview
+                with open(filepath, "rb") as f:
+                    img_data = base64.b64encode(f.read()).decode("utf-8")
+                result["image"] = f"data:image/jpeg;base64,{img_data}"
 
             return jsonify(result)
 
@@ -1798,10 +1921,10 @@ def health():
             "active_model": _model_option_name(ACTIVE_MODEL_PATH)
             if ACTIVE_MODEL_PATH
             else None,
-            "available_models": [
-                _model_option_name(path)
-                for path in _list_available_model_paths()
-            ],
+            "available_models": sorted(
+                [_model_option_name(path) for path in _list_available_model_paths()],
+                key=lambda s: s.lower()
+            ),
         }
     )
 
