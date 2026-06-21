@@ -4,18 +4,15 @@ import os
 from pathlib import Path
 
 import numpy as np
-import tensorflow.keras as keras
+import torch
 from PIL import Image
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
+from torchvision.transforms import v2
 
 from src.core.inference_guard import (
     assess_leaf_likelihood,
     compute_prediction_diagnostics,
     evaluate_inference_safety,
 )
-from src.core.preprocessing import preprocess_array_for_model
-from src.training.training_utils import WarmupCosineSchedule
 from src.utils.config import (
     CLASS_INDICES_PATH,
     CONFIDENCE_REJECT_THRESHOLD,
@@ -23,11 +20,7 @@ from src.utils.config import (
     IMG_SIZE,
     OOD_MSP_THRESHOLD,
 )
-from src.utils.hardware import configure_tensorflow
-from src.utils.model_paths import resolve_keras_model_path
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-configure_tensorflow()
+from src.utils.model_paths import resolve_pytorch_model_path
 
 
 def _extract_disease_predictions(predictions):
@@ -41,66 +34,75 @@ def _extract_disease_predictions(predictions):
         predictions = predictions[-1]
     return np.asarray(predictions)
 
-
 def _load_model_robust(model_path: str):
-    from src.training.training_utils import HierarchicalLoss
+    import os
+    os.environ["KERAS_BACKEND"] = "torch"
 
-    custom_objects = {
-        "WarmupCosineSchedule": WarmupCosineSchedule,
-        "HierarchicalLoss": HierarchicalLoss,
-    }
-    try:
-        return load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
-    except TypeError as exc:
-        error_text = str(exc)
-        if "ViTPatchingAndEmbedding" not in error_text:
-            raise
+    from src.training.train_model import LeafDiseaseModel
+    from src.training.training_utils import parse_class_structure
+    from src.utils.config import TRAIN_DIR
+    from src.utils.hardware import get_device
 
-        if not _patch_vit_layer_init_for_compat():
-            raise RuntimeError(
-                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch. "
-                "Install a compatible keras-hub version or retrain with current stack."
-            ) from exc
+    device = get_device()
 
-        print(
-            "Detected KerasHub ViT checkpoint compatibility mismatch; "
-            "retrying load with compatibility shim."
-        )
-        return load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
+    # Need class names to initialize model
+    if os.path.exists(CLASS_INDICES_PATH):
+        with open(CLASS_INDICES_PATH, "r") as f:
+            idx_to_class = {int(v): k for k, v in json.load(f).items()}
+    elif os.path.exists(TRAIN_DIR):
+        train_class_names = sorted(entry.name for entry in os.scandir(TRAIN_DIR) if entry.is_dir())
+        idx_to_class = {i: name for i, name in enumerate(train_class_names)}
+        # Auto-save for next time
+        os.makedirs(os.path.dirname(CLASS_INDICES_PATH), exist_ok=True)
+        try:
+            with open(CLASS_INDICES_PATH, "w", encoding="utf-8") as f:
+                json.dump({name: idx for idx, name in idx_to_class.items()}, f, indent=2)
+        except Exception as e:
+            print(f"[!] Warning: Failed to save class indices: {e}")
+    else:
+        # Fallback if neither exists
+        idx_to_class = {i: f"Class_{i}" for i in range(46)}
 
+    class_names = [idx_to_class[i] for i in range(len(idx_to_class))]
+    num_classes = len(class_names)
+    crop_names = sorted(list(set(name.split("___")[0] for name in class_names)))
+    num_crops = len(crop_names)
+    healthy_partners = parse_class_structure(class_names)
 
-def _patch_vit_layer_init_for_compat() -> bool:
-    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
-    try:
-        from keras_hub.src.models.vit import vit_layers
+    path_hint = str(model_path).lower()
 
-        layer_cls = vit_layers.ViTPatchingAndEmbedding
-    except Exception:
-        return False
+    if str(model_path).endswith(".keras"):
+        if any(token in path_hint for token in ["dino", "vit", "refined"]):
+            backbone_name = "DINOv3"
+        else:
+            backbone_name = "EfficientNetV2B0"
 
-    if getattr(layer_cls, "_leaf_compat_patched", False):
-        return True
+        import keras
+        model = keras.models.load_model(model_path)
+    else:
+        state = torch.load(model_path, map_location=device, weights_only=True)
+        actual_state = state.get('model_state_dict', state)
 
-    original_init = layer_cls.__init__
+        # Auto-detect backbone from state dict keys
+        has_vit_keys = any("class_token" in k or "encoder." in k for k in actual_state.keys())
+        has_efficientnet_keys = any("features.0.0.weight" in k for k in actual_state.keys())
 
-    def _patched_init(self, *args, **kwargs):
-        kwargs.pop("num_patches", None)
-        kwargs.pop("num_positions", None)
-        image_size = kwargs.get("image_size")
-        if isinstance(image_size, int):
-            kwargs["image_size"] = (image_size, image_size)
-        patch_size = kwargs.get("patch_size")
-        if isinstance(patch_size, int):
-            kwargs["patch_size"] = (patch_size, patch_size)
-        return original_init(self, *args, **kwargs)
+        if has_vit_keys:
+            backbone_name = "DINOv3"
+        elif has_efficientnet_keys:
+            backbone_name = "EfficientNetV2B0"
+        else:
+            if any(token in path_hint for token in ["dino", "vit", "refined"]):
+                backbone_name = "DINOv3"
+            else:
+                backbone_name = "EfficientNetV2B0"
 
-    layer_cls.__init__ = _patched_init
-    layer_cls._leaf_compat_patched = True
-    return True
+        model = LeafDiseaseModel(backbone_name, num_classes, num_crops, healthy_partners)
+        model.load_state_dict(actual_state)
+        model.to(device)
+        model.eval()
+
+    return model, backbone_name
 
 
 class LeafDiseasePredictor:
@@ -111,8 +113,11 @@ class LeafDiseasePredictor:
         img_size: int = IMG_SIZE,
         model_path: str | None = None,
     ):
+        from src.utils.hardware import get_device
+        self.device = get_device()
         self.img_size = img_size
         self.models = []
+        self.backbone_name = "EfficientNetV2B0"
 
         # Resolve model paths into a clean list of paths
         from src.utils.config import ENSEMBLE_MODEL_PATHS
@@ -134,22 +139,13 @@ class LeafDiseasePredictor:
         )
 
         for path in resolved_paths:
-            resolved_path = resolve_keras_model_path([path] if path else None)
+            resolved_path = resolve_pytorch_model_path([path] if path else None)
             print(f"Loading model from {resolved_path}...")
-            model = _load_model_robust(resolved_path)
+            model, b_name = _load_model_robust(resolved_path)
+            self.backbone_name = b_name
             self.models.append(model)
 
         print(f"{len(self.models)} model(s) loaded successfully.")
-
-        # Detect backbone architecture for correct preprocessing
-        # For ensembles, we assume all models use the same input preprocessing (backbone family)
-        self.backbone_name = self._infer_backbone_from_model(
-            resolve_keras_model_path(
-                [resolved_paths[0]] if resolved_paths[0] else None
-            ),
-            self.models[0],
-        )
-        print(f"Detected primary backbone architecture: {self.backbone_name}")
 
         if os.path.exists(class_indices_path):
             with open(class_indices_path, "r") as f:
@@ -163,69 +159,16 @@ class LeafDiseasePredictor:
             "(13 healthy, 33 disease)."
         )
 
-    def _infer_backbone_from_model(
-        self, model_path: str | None = None, model: keras.Model | None = None
-    ) -> str:
-        """Best-effort backbone name detection from loaded model layer names."""
-        if model is None:
-            model = getattr(self, "model", None) or (
-                self.models[0] if getattr(self, "models", None) else None
-            )
-        if model is None:
-            return "EfficientNetV2B0"
-        path_hint = (model_path or "").lower()
-        if any(token in path_hint for token in ["dino", "vit", "refined"]):
-            return "DINOv3"
-        if "efficientnetv2s" in path_hint:
-            return "EfficientNetV2S"
-        if "efficientnetv2b0" in path_hint:
-            return "EfficientNetV2B0"
-        if "efficientnetv2b1" in path_hint:
-            return "EfficientNetV2B1"
-        if "efficientnetv2b2" in path_hint:
-            return "EfficientNetV2B2"
-        if "efficientnetv2b3" in path_hint:
-            return "EfficientNetV2B3"
-        if "efficientnetv2m" in path_hint:
-            return "EfficientNetV2M"
-        if "efficientnetv2l" in path_hint:
-            return "EfficientNetV2L"
-
-        model_name = str(getattr(model, "name", "")).lower()
-        layer_names = [
-            str(getattr(layer, "name", "")).lower() for layer in model.layers
-        ]
-        haystack = " ".join([model_name, *layer_names])
-
-        # Check for DINOv3/ViT models
-        if "dinov3" in haystack or "vit" in haystack:
-            return "DINOv3"
-
-        # Check for EfficientNetV2 variants
-        if "efficientnetv2s" in haystack:
-            return "EfficientNetV2S"
-        if "efficientnetv2b0" in haystack:
-            return "EfficientNetV2B0"
-        if "efficientnetv2b1" in haystack:
-            return "EfficientNetV2B1"
-        if "efficientnetv2b2" in haystack:
-            return "EfficientNetV2B2"
-        if "efficientnetv2b3" in haystack:
-            return "EfficientNetV2B3"
-        if "efficientnetv2m" in haystack:
-            return "EfficientNetV2M"
-        if "efficientnetv2l" in haystack:
-            return "EfficientNetV2L"
-
-        # Default to EfficientNetV2B0 if detection fails
-        print(
-            "[WARNING] Could not detect backbone from model names. "
-            "Defaulting to EfficientNetV2B0."
-        )
-        return "EfficientNetV2B0"
+        self.transform = v2.Compose([
+            v2.Resize((self.img_size, self.img_size)),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            # Note: We rely on the model backbone wrapper to apply ImageNet normalization if needed,
+            # or we can apply it here. Keras EfficientNetV2 expects [-1, 1] or [0, 255]. Torch expects ImageNet std/mean.
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
     def _generate_class_indices(self) -> dict:
-
         train_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "dataset", "train"
         )
@@ -236,29 +179,25 @@ class LeafDiseasePredictor:
             if os.path.isdir(os.path.join(train_dir, cls))
         }
 
-    def preprocess_image(self, img_path: str) -> np.ndarray:
+    def preprocess_image(self, img_path: str) -> torch.Tensor:
+        img = Image.open(img_path).convert("RGB")
+        tensor = self.transform(img).unsqueeze(0).to(self.device)
+        return tensor
 
-        img = image.load_img(
-            img_path, target_size=(self.img_size, self.img_size)
-        )
-        img_array = image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0)
-        # Use detected backbone for correct preprocessing
-        return preprocess_array_for_model(
-            img_array, backbone_name=self.backbone_name
-        )
-
+    @torch.no_grad()
     def predict(self, img_path: str) -> dict:
-
-        img_array = self.preprocess_image(img_path)
+        tensor = self.preprocess_image(img_path)
 
         # Ensemble inference: average probabilities across all models
         all_preds = []
         for model in self.models:
-            predictions = _extract_disease_predictions(
-                model.predict(img_array, verbose=0)
-            )
-            all_preds.append(predictions[0])
+            output = model(tensor)
+            if isinstance(output, dict) and "disease_output" in output:
+                logits = output["disease_output"]
+            else:
+                logits = output
+            probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+            all_preds.append(probs)
 
         predictions = np.mean(all_preds, axis=0)
 
@@ -451,7 +390,7 @@ def main():
         "-m",
         type=str,
         default=None,
-        help="Path to a saved .keras model file.",
+        help="Path to a saved model file.",
     )
     parser.add_argument(
         "--save",

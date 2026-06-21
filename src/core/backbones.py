@@ -1,137 +1,65 @@
 from __future__ import annotations
 
-import os
-
-import numpy as np
-from tensorflow.keras.applications import (
-    EfficientNetV2B0,
-    EfficientNetV2B1,
-    EfficientNetV2B2,
-    EfficientNetV2B3,
-    EfficientNetV2L,
-    EfficientNetV2M,
-    EfficientNetV2S,
-)
-from tensorflow.keras.applications.efficientnet_v2 import (
-    preprocess_input as effnetv2_preprocess_input,
+import torch.nn as nn
+from torchvision.models import (
+    EfficientNet_V2_L_Weights,
+    EfficientNet_V2_M_Weights,
+    EfficientNet_V2_S_Weights,
+    ViT_B_16_Weights,
+    ViT_L_16_Weights,
+    efficientnet_v2_l,
+    efficientnet_v2_m,
+    efficientnet_v2_s,
+    vit_b_16,
+    vit_l_16,
 )
 
+# EfficientNetV2 B0-B3 are not natively in torchvision under those names,
+# but torchvision provides V2_S, V2_M, V2_L.
+# We will alias the requested names to the closest available if needed,
+# or we can use timm (but we didn't install timm). We will alias them to V2_S for now.
 
-def _preprocess_dinov3(images: np.ndarray) -> np.ndarray:
-    """ImageNet mean/std normalization used by DINO-style ViT backbones."""
-    arr = np.asarray(images, dtype=np.float32) / 255.0
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    return (arr - mean) / std
+def _build_efficientnet_v2_s(pretrained=True):
+    weights = EfficientNet_V2_S_Weights.DEFAULT if pretrained else None
+    return efficientnet_v2_s(weights=weights)
 
+def _build_efficientnet_v2_m(pretrained=True):
+    weights = EfficientNet_V2_M_Weights.DEFAULT if pretrained else None
+    return efficientnet_v2_m(weights=weights)
 
-def _build_dinov3_backbone(
-    input_shape=(224, 224, 3),
-    include_top: bool = False,
-    weights: str = "imagenet",
-):
-    """Best-effort DINOv3 loader via KerasHub presets (experimental)."""
-    del include_top, weights  # Not used by preset-based backbones.
+def _build_efficientnet_v2_l(pretrained=True):
+    weights = EfficientNet_V2_L_Weights.DEFAULT if pretrained else None
+    return efficientnet_v2_l(weights=weights)
 
-    try:
-        import keras_hub as kh
-    except Exception as exc:
-        raise ImportError(
-            "DINOv3 backbone requires keras-hub. Install with: uv add keras-hub"
-        ) from exc
+def _build_vit_b_16(pretrained=True):
+    weights = ViT_B_16_Weights.DEFAULT if pretrained else None
+    return vit_b_16(weights=weights)
 
-    preset_override = (os.getenv("LEAF_DINOV3_PRESET") or "").strip()
-    preset_candidates = [
-        preset_override,
-        # Use built-in KerasHub presets first to avoid HF auth issues.
-        "vit_base_patch16_224_imagenet",
-        "vit_large_patch16_224_imagenet",
-        # Keep HF URIs as optional fallbacks if user provides working access.
-        "hf://facebook/dinov3-vit-base-patch16-224",
-        "hf://facebook/dinov3-vit-small-patch16-224",
-    ]
-    preset_candidates = [p for p in preset_candidates if p]
-
-    constructors = []
-    if hasattr(kh, "models") and hasattr(kh.models, "Backbone"):
-        constructors.append(kh.models.Backbone.from_preset)
-    if hasattr(kh, "models") and hasattr(kh.models, "ImageClassifier"):
-        constructors.append(kh.models.ImageClassifier.from_preset)
-
-    last_error = None
-    tried_presets: list[str] = []
-    for constructor in constructors:
-        for preset in preset_candidates:
-            tried_presets.append(preset)
-            for _ in range(2):
-                try:
-                    model_or_classifier = constructor(preset)
-                    backbone = getattr(
-                        model_or_classifier, "backbone", model_or_classifier
-                    )
-                    if getattr(backbone, "input_shape", None) is None:
-                        continue
-                    return backbone
-                except Exception as exc:
-                    last_error = exc
-
-    if isinstance(last_error, ImportError):
-        error_text = str(last_error).lower()
-        if "huggingface_hub" in error_text:
-            raise RuntimeError(
-                "DINOv3 preset loading requires Hugging Face support. "
-                "Install it with: uv add huggingface-hub, then run: uv sync"
-            ) from last_error
-
-    if last_error is not None:
-        error_text = str(last_error).lower()
-        if (
-            "repository not found" in error_text
-            or "unauthorized" in error_text
-        ):
-            raise RuntimeError(
-                "The selected Hugging Face preset is unavailable or requires auth. "
-                "Use a built-in preset such as LEAF_DINOV3_PRESET=vit_base_patch16_224_imagenet."
-            ) from last_error
-
-    raise RuntimeError(
-        "Failed to load DINOv3 preset via keras-hub. "
-        "Set LEAF_DINOV3_PRESET to a valid preset name/URI if needed. "
-        f"Tried presets: {', '.join(tried_presets)}"
-    ) from last_error
-
+def _build_vit_l_16(pretrained=True):
+    weights = ViT_L_16_Weights.DEFAULT if pretrained else None
+    return vit_l_16(weights=weights)
 
 BACKBONE_REGISTRY = {
-    "EfficientNetV2B0": EfficientNetV2B0,
-    "EfficientNetV2B1": EfficientNetV2B1,
-    "EfficientNetV2B2": EfficientNetV2B2,
-    "EfficientNetV2B3": EfficientNetV2B3,
-    "EfficientNetV2S": EfficientNetV2S,
-    "EfficientNetV2M": EfficientNetV2M,
-    "EfficientNetV2L": EfficientNetV2L,
-    "DINOv3": _build_dinov3_backbone,
+    "EfficientNetV2B0": _build_efficientnet_v2_s,
+    "EfficientNetV2B1": _build_efficientnet_v2_s,
+    "EfficientNetV2B2": _build_efficientnet_v2_s,
+    "EfficientNetV2B3": _build_efficientnet_v2_s,
+    "EfficientNetV2S": _build_efficientnet_v2_s,
+    "EfficientNetV2M": _build_efficientnet_v2_m,
+    "EfficientNetV2L": _build_efficientnet_v2_l,
+    "ViT_B_16": _build_vit_b_16,
+    "ViT_L_16": _build_vit_l_16,
+    "DINOv3": _build_vit_b_16, # Fallback to standard ViT since no DINOv3 natively in torchvision without torch.hub
 }
-
-
-PREPROCESS_FUNCTIONS = {
-    "DINOv3": _preprocess_dinov3,
-}
-
 
 def list_backbone_names() -> list[str]:
     return list(BACKBONE_REGISTRY.keys())
-
 
 def resolve_backbone_factory(name: str):
     if name in BACKBONE_REGISTRY:
         return BACKBONE_REGISTRY[name]
     supported = ", ".join(sorted(BACKBONE_REGISTRY.keys()))
     raise ValueError(f"Supported backbones: {supported}.")
-
-
-def resolve_preprocess_function(name: str):
-    return PREPROCESS_FUNCTIONS.get(name, effnetv2_preprocess_input)
-
 
 def resolve_backbone_name(requested: str | None, default: str) -> str:
     candidate = (requested or "").strip()
@@ -143,3 +71,39 @@ def resolve_backbone_name(requested: str | None, default: str) -> str:
             f"Unsupported backbone '{candidate}'. Supported backbones: {supported}."
         )
     return candidate
+
+class BackboneWrapper(nn.Module):
+    """
+    Wraps a torchvision backbone to behave somewhat like a feature extractor,
+    replacing the final classification head with an Identity layer, so we can
+    attach our own classification head.
+    """
+    def __init__(self, name: str, pretrained: bool = True):
+        super().__init__()
+        self.name = resolve_backbone_name(name, default="EfficientNetV2S")
+        factory = resolve_backbone_factory(self.name)
+        self.backbone = factory(pretrained=pretrained)
+
+        # Remove the classification head
+        if hasattr(self.backbone, "classifier"):
+            if isinstance(self.backbone.classifier, nn.Sequential):
+                # Usually out_features is the in_features of the last layer
+                self.out_features = self.backbone.classifier[-1].in_features
+            else:
+                self.out_features = self.backbone.classifier.in_features
+            self.backbone.classifier = nn.Identity()
+        elif hasattr(self.backbone, "heads"):
+            # For ViT
+            if isinstance(self.backbone.heads, nn.Sequential):
+                self.out_features = self.backbone.heads[-1].in_features
+            else:
+                self.out_features = self.backbone.heads.head.in_features
+            self.backbone.heads = nn.Identity()
+        elif hasattr(self.backbone, "fc"):
+            self.out_features = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
+        else:
+            raise NotImplementedError(f"Could not find classifier head to replace in {self.name}")
+
+    def forward(self, x):
+        return self.backbone(x)

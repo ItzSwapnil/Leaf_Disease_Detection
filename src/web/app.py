@@ -18,29 +18,23 @@ import time
 import uuid
 from typing import Any
 
-# Set TensorFlow logging before TensorFlow is imported. GPU/CPU selection is
-# controlled by LEAF_TF_GPU_MODE in src.utils.hardware.
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-
 import cv2
 import numpy as np
-import tensorflow as tf
+import torch
 from flask import Flask, jsonify, render_template, request
 from PIL import Image
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
+from torchvision.transforms import v2
 from werkzeug.utils import secure_filename
 
 from src.core.backbones import list_backbone_names
 from src.core.inference_guard import (
+    SafetyEvaluation,
     assess_leaf_likelihood,
     compute_prediction_diagnostics,
     evaluate_inference_safety,
 )
 from src.core.leaf_detector import detect_leaf_presence
 from src.core.leaf_detector_model import create_leaf_detector
-from src.core.preprocessing import preprocess_array_for_model
-from src.training.training_utils import WarmupCosineSchedule
 from src.utils.config import (
     CLASS_INDICES_PATH,
     CONFIDENCE_REJECT_THRESHOLD,
@@ -51,21 +45,20 @@ from src.utils.config import (
     OOD_MSP_THRESHOLD,
     USE_YOLO_LEAF_DETECTION,
 )
-from src.utils.hardware import configure_tensorflow, get_compute_info
-from src.utils.model_paths import resolve_keras_model_path
+from src.utils.hardware import get_compute_info, get_device
+from src.utils.model_paths import resolve_pytorch_model_path
 
 
-def _log_tf_runtime_info():
-    """Log TensorFlow build info and detected GPU devices at startup."""
+def _log_torch_runtime_info():
+    """Log PyTorch build info and detected GPU devices at startup."""
     try:
-        print(f"TensorFlow version: {tf.__version__}")
-        print(
-            f"CUDA visible devices: {tf.config.list_physical_devices('GPU')}"
-        )
-        print(f"Built with CUDA: {tf.test.is_built_with_cuda()}")
-        print(f"Built with ROCm: {tf.test.is_built_with_rocm()}")
-    except Exception as exc:  # Best effort; do not block app startup
-        print(f"TensorFlow runtime probe failed: {exc}")
+        print(f"PyTorch version: {torch.__version__}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"CUDA device count: {torch.cuda.device_count()}")
+            print(f"Current device: {torch.cuda.get_device_name(0)}")
+    except Exception as exc:
+        print(f"PyTorch runtime probe failed: {exc}")
 
 
 def _extract_disease_predictions(predictions):
@@ -80,8 +73,8 @@ def _extract_disease_predictions(predictions):
     return np.asarray(predictions)
 
 
-configure_tensorflow()
-_log_tf_runtime_info()
+get_device()
+_log_torch_runtime_info()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
@@ -124,6 +117,253 @@ TRAIN_SAVE_MODES = [
     {"value": "all", "label": "Save both variants"},
 ]
 
+# ---------------------------------------------------------------------------
+# Exhaustive config registry: every tunable parameter, with metadata for the
+# web UI to render controls and for the backend to forward env vars.
+# ---------------------------------------------------------------------------
+ADVANCED_ENV_KEYS: dict[str, dict[str, Any]] = {
+    # -- Training Hyperparameters --
+    "epochs_phase1": {
+        "env": "LEAF_EPOCHS_PHASE1", "type": "int",
+        "default": 5, "min": 1, "max": 200, "step": 1,
+        "label": "Phase 1 epochs (frozen backbone)",
+        "section": "training",
+    },
+    "epochs_phase2": {
+        "env": "LEAF_EPOCHS_PHASE2", "type": "int",
+        "default": 10, "min": 1, "max": 200, "step": 1,
+        "label": "Phase 2 epochs (fine-tune backbone)",
+        "section": "training",
+    },
+    "batch_size": {
+        "env": "LEAF_BATCH_SIZE", "type": "int",
+        "default": 32, "min": 4, "max": 128, "step": 4,
+        "label": "Batch size",
+        "section": "training",
+    },
+    "accumulation_steps": {
+        "env": "LEAF_ACCUMULATION_STEPS", "type": "int",
+        "default": 1, "min": 1, "max": 16, "step": 1,
+        "label": "Gradient accumulation steps",
+        "section": "training",
+    },
+    "weight_decay": {
+        "env": "LEAF_WEIGHT_DECAY", "type": "float",
+        "default": 0.02, "min": 0.0, "max": 0.5, "step": 0.001,
+        "label": "Weight decay (AdamW)",
+        "section": "training",
+    },
+    "dropout_rate": {
+        "env": "LEAF_DROPOUT_RATE", "type": "float",
+        "default": 0.5, "min": 0.0, "max": 0.9, "step": 0.01,
+        "label": "Dropout rate",
+        "section": "training",
+    },
+    "label_smoothing": {
+        "env": "LEAF_LABEL_SMOOTHING", "type": "float",
+        "default": 0.15, "min": 0.0, "max": 0.5, "step": 0.01,
+        "label": "Label smoothing",
+        "section": "training",
+    },
+    # -- Augmentation Pipeline --
+    "use_random_resized_crop": {
+        "env": "LEAF_USE_RANDOM_RESIZED_CROP", "type": "bool",
+        "default": True,
+        "label": "Random resized crop",
+        "section": "augmentation",
+    },
+    "random_crop_scale_min": {
+        "env": "LEAF_RANDOM_CROP_SCALE_MIN", "type": "float",
+        "default": 0.6, "min": 0.1, "max": 1.0, "step": 0.05,
+        "label": "Crop scale min",
+        "section": "augmentation",
+    },
+    "random_crop_scale_max": {
+        "env": "LEAF_RANDOM_CROP_SCALE_MAX", "type": "float",
+        "default": 1.0, "min": 0.1, "max": 1.0, "step": 0.05,
+        "label": "Crop scale max",
+        "section": "augmentation",
+    },
+    "use_color_jitter": {
+        "env": "LEAF_USE_COLOR_JITTER", "type": "bool",
+        "default": True,
+        "label": "Color jitter",
+        "section": "augmentation",
+    },
+    "color_jitter_brightness": {
+        "env": "LEAF_COLOR_JITTER_BRIGHTNESS", "type": "float",
+        "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Brightness jitter",
+        "section": "augmentation",
+    },
+    "color_jitter_contrast": {
+        "env": "LEAF_COLOR_JITTER_CONTRAST", "type": "float",
+        "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Contrast jitter",
+        "section": "augmentation",
+    },
+    "color_jitter_saturation": {
+        "env": "LEAF_COLOR_JITTER_SATURATION", "type": "float",
+        "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Saturation jitter",
+        "section": "augmentation",
+    },
+    "color_jitter_hue": {
+        "env": "LEAF_COLOR_JITTER_HUE", "type": "float",
+        "default": 0.1, "min": 0.0, "max": 0.5, "step": 0.01,
+        "label": "Hue jitter",
+        "section": "augmentation",
+    },
+    "use_gaussian_blur": {
+        "env": "LEAF_USE_GAUSSIAN_BLUR", "type": "bool",
+        "default": True,
+        "label": "Gaussian blur",
+        "section": "augmentation",
+    },
+    "gaussian_blur_prob": {
+        "env": "LEAF_GAUSSIAN_BLUR_PROB", "type": "float",
+        "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Gaussian blur probability",
+        "section": "augmentation",
+    },
+    "use_random_erasing": {
+        "env": "LEAF_USE_RANDOM_ERASING", "type": "bool",
+        "default": True,
+        "label": "Random erasing",
+        "section": "augmentation",
+    },
+    "random_erasing_prob": {
+        "env": "LEAF_RANDOM_ERASING_PROB", "type": "float",
+        "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Random erasing probability",
+        "section": "augmentation",
+    },
+    "use_mixup": {
+        "env": "LEAF_USE_MIXUP", "type": "bool",
+        "default": False,
+        "label": "MixUp augmentation",
+        "section": "augmentation",
+    },
+    "mixup_prob": {
+        "env": "LEAF_MIXUP_PROB", "type": "float",
+        "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "MixUp probability",
+        "section": "augmentation",
+    },
+    "use_cutmix": {
+        "env": "LEAF_USE_CUTMIX", "type": "bool",
+        "default": False,
+        "label": "CutMix augmentation",
+        "section": "augmentation",
+    },
+    "cutmix_prob": {
+        "env": "LEAF_CUTMIX_PROB", "type": "float",
+        "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "CutMix probability",
+        "section": "augmentation",
+    },
+    "normal_prob": {
+        "env": "LEAF_NORMAL_PROB", "type": "float",
+        "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Normal (no-augment) probability",
+        "section": "augmentation",
+    },
+    "use_yolo_leaf_detection": {
+        "env": "LEAF_USE_YOLO_LEAF_DETECTION", "type": "bool",
+        "default": True,
+        "label": "YOLO leaf detection (training)",
+        "section": "augmentation",
+    },
+    "use_background_randomization": {
+        "env": "LEAF_USE_BACKGROUND_RANDOMIZATION", "type": "bool",
+        "default": True,
+        "label": "Background randomization",
+        "section": "augmentation",
+    },
+    # -- Attention Guidance --
+    "use_attention_guidance": {
+        "env": "LEAF_USE_ATTENTION_GUIDANCE", "type": "bool",
+        "default": True,
+        "label": "Attention guidance",
+        "section": "attention",
+    },
+    "attention_bg_penalty_weight": {
+        "env": "LEAF_ATTENTION_BG_PENALTY_WEIGHT", "type": "float",
+        "default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5,
+        "label": "Background penalty weight",
+        "section": "attention",
+    },
+    "attention_sparsity_weight": {
+        "env": "LEAF_ATTENTION_SPARSITY_WEIGHT", "type": "float",
+        "default": 0.3, "min": 0.0, "max": 5.0, "step": 0.1,
+        "label": "Sparsity weight",
+        "section": "attention",
+    },
+    # -- Overfitting Protection --
+    "overfitting_stop_enabled": {
+        "env": "LEAF_OVERFITTING_STOP_ENABLED", "type": "bool",
+        "default": True,
+        "label": "Overfitting stopper",
+        "section": "overfitting",
+    },
+    "overfitting_stop_min_gap": {
+        "env": "LEAF_OVERFITTING_STOP_MIN_GAP", "type": "float",
+        "default": 0.04, "min": 0.0, "max": 0.2, "step": 0.005,
+        "label": "Minimum accuracy gap",
+        "section": "overfitting",
+    },
+    "overfitting_stop_patience": {
+        "env": "LEAF_OVERFITTING_STOP_PATIENCE", "type": "int",
+        "default": 2, "min": 1, "max": 20, "step": 1,
+        "label": "Patience (epochs)",
+        "section": "overfitting",
+    },
+    # -- Inference Thresholds --
+    "confidence_reject_threshold": {
+        "env": "LEAF_CONFIDENCE_REJECT_THRESHOLD", "type": "float",
+        "default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01,
+        "label": "Confidence reject threshold",
+        "section": "inference",
+    },
+    "entropy_reject_threshold": {
+        "env": "LEAF_ENTROPY_REJECT_THRESHOLD", "type": "float",
+        "default": 0.8, "min": 0.0, "max": 5.0, "step": 0.05,
+        "label": "Entropy reject threshold (bits)",
+        "section": "inference",
+    },
+    "ood_msp_threshold": {
+        "env": "LEAF_OOD_MSP_THRESHOLD", "type": "float",
+        "default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01,
+        "label": "OOD MSP threshold",
+        "section": "inference",
+    },
+    # -- Fine-Tuning --
+    "fine_tune_epochs": {
+        "env": "LEAF_FINE_TUNE_EPOCHS", "type": "int",
+        "default": 10, "min": 1, "max": 100, "step": 1,
+        "label": "Fine-tune epochs",
+        "section": "fine_tuning",
+    },
+    "fine_tune_learning_rate": {
+        "env": "LEAF_FINE_TUNE_LEARNING_RATE", "type": "float",
+        "default": 5e-5, "min": 1e-7, "max": 1e-2, "step": 1e-6,
+        "label": "Fine-tune learning rate",
+        "section": "fine_tuning",
+    },
+    "fine_tune_batch_size": {
+        "env": "LEAF_FINE_TUNE_BATCH_SIZE", "type": "int",
+        "default": 32, "min": 4, "max": 128, "step": 4,
+        "label": "Fine-tune batch size",
+        "section": "fine_tuning",
+    },
+    "fine_tune_unfreeze_layers": {
+        "env": "LEAF_FINE_TUNE_UNFREEZE_LAYERS", "type": "int",
+        "default": -1, "min": -1, "max": 200, "step": 1,
+        "label": "Layers to unfreeze (-1 = all)",
+        "section": "fine_tuning",
+    },
+}
+
 CONTROL_ACTIONS = {
     "train": {
         "label": "Train Model",
@@ -164,7 +404,7 @@ CONTROL_ACTIONS = {
 
 
 def _resolve_model_path():
-    return resolve_keras_model_path([FINAL_MODEL_PATH])
+    return resolve_pytorch_model_path([FINAL_MODEL_PATH])
 
 
 def _model_option_name(model_path):
@@ -178,17 +418,15 @@ def _model_option_name(model_path):
 
 
 def _list_available_model_paths():
-    candidates = []
+    candidates: list[str] = []
     models_root = os.path.abspath(str(MODELS_DIR))
     if not os.path.isdir(models_root):
         return candidates
 
     for root, _, files in os.walk(models_root):
         for filename in files:
-            if filename.lower().endswith(".keras"):
-                path = os.path.join(root, filename)
-                if os.path.isfile(path):
-                    candidates.append(os.path.abspath(path))
+            if filename.lower().endswith((".pt", ".pth")):
+                candidates.append(os.path.abspath(os.path.join(root, filename)))
 
     return sorted(candidates)
 
@@ -198,7 +436,7 @@ def _resolve_requested_model_path(model_name=None):
     option_to_path = {
         _model_option_name(path): path for path in available_paths
     }
-    basename_to_paths = {}
+    basename_to_paths: dict[str, list[str]] = {}
     for path in available_paths:
         basename_to_paths.setdefault(os.path.basename(path), []).append(path)
 
@@ -214,7 +452,7 @@ def _resolve_requested_model_path(model_name=None):
         if available_paths:
             return available_paths[0]
         raise ValueError(
-            "No model files were found under models/. Add at least one .keras model."
+            "No model files were found under models/. Add at least one .pt model."
         )
 
     model_name = str(model_name).strip().replace("\\", "/")
@@ -224,7 +462,7 @@ def _resolve_requested_model_path(model_name=None):
         if available_paths:
             return available_paths[0]
         raise ValueError(
-            "No model files were found under models/. Add at least one .keras model."
+            "No model files were found under models/. Add at least one .pt model."
         )
 
     if model_name in option_to_path:
@@ -293,127 +531,25 @@ def _get_inference_model(model_name=None):
 
 
 def _load_model_robust(model_path: str):
-    """Load model with compatibility fallback for older KerasHub ViT configs."""
-    custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
-    try:
-        return load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
-    except TypeError as exc:
-        error_text = str(exc)
-        if "ViTPatchingAndEmbedding" not in error_text:
-            raise
-
-        if not _patch_vit_layer_init_for_compat():
-            raise RuntimeError(
-                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch. "
-                "Install a compatible keras-hub version or retrain with current stack."
-            ) from exc
-
-        print(
-            "Detected KerasHub ViT checkpoint compatibility mismatch; "
-            "retrying load with compatibility shim."
-        )
-        return load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
-
-
-def _patch_vit_layer_init_for_compat() -> bool:
-    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
-    try:
-        from keras_hub.src.models.vit import vit_layers
-
-        layer_cls = vit_layers.ViTPatchingAndEmbedding
-    except Exception:
-        return False
-
-    if getattr(layer_cls, "_leaf_compat_patched", False):
-        return True
-
-    original_init = layer_cls.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        kwargs.pop("num_patches", None)
-        kwargs.pop("num_positions", None)
-        image_size = kwargs.get("image_size")
-        if isinstance(image_size, int):
-            kwargs["image_size"] = (image_size, image_size)
-        patch_size = kwargs.get("patch_size")
-        if isinstance(patch_size, int):
-            kwargs["patch_size"] = (patch_size, patch_size)
-        return original_init(self, *args, **kwargs)
-
-    layer_cls.__init__ = _patched_init
-    layer_cls._leaf_compat_patched = True
-    return True
+    from src.pipeline.predict import _load_model_robust as load_pytorch_model
+    model, b_name = load_pytorch_model(model_path)
+    return model
 
 
 def _infer_backbone_name(active_model, model_path: str | None = None) -> str:
-    """Best-effort backbone detection for selecting the correct preprocessing."""
     path_hint = (model_path or "").lower()
     if any(token in path_hint for token in ["dino", "vit", "refined"]):
         return "DINOv3"
-
-    try:
-        for layer in getattr(active_model, "layers", []):
-            layer_name = (getattr(layer, "name", "") or "").lower()
-            class_name = layer.__class__.__name__.lower()
-            if any(
-                token in layer_name
-                for token in ["vit", "dino", "patching", "transformer"]
-            ):
-                return "DINOv3"
-            if any(
-                token in class_name
-                for token in ["vit", "patch", "transformer"]
-            ):
-                return "DINOv3"
-    except Exception:
-        pass
-
     return "EfficientNetV2B0"
 
 
 def _model_has_internal_preprocessing(active_model) -> bool:
-    """Detect whether a model already performs input preprocessing internally."""
-    try:
-        for layer in getattr(active_model, "layers", []):
-            lname = (getattr(layer, "name", "") or "").lower()
-            lclass = layer.__class__.__name__.lower()
-            if "dinov3_preprocess" in lname:
-                return True
-            if lclass in {"rescaling", "normalization"}:
-                return True
-    except Exception:
-        return False
     return False
 
 
 def _infer_model_num_classes(active_model):
-    """Best-effort extraction of output class count from a loaded Keras model."""
-    try:
-        output_shape = active_model.output_shape
-        output_names = list(getattr(active_model, "output_names", []) or [])
-        if isinstance(output_shape, dict):
-            output_shape = output_shape.get("disease_output") or next(
-                iter(output_shape.values())
-            )
-        elif isinstance(output_shape, list):
-            if "disease_output" in output_names:
-                output_shape = output_shape[
-                    output_names.index("disease_output")
-                ]
-            else:
-                output_shape = output_shape[-1]
-        if not output_shape:
-            return None
-        # Most classifiers expose shape like (None, num_classes).
-        last_dim = output_shape[-1]
-        if isinstance(last_dim, int) and last_dim > 0:
-            return int(last_dim)
-    except Exception:
-        return None
+    if hasattr(active_model, "num_classes"):
+        return active_model.num_classes
     return None
 
 
@@ -558,16 +694,29 @@ def _parse_pipeline_options(payload):
         options["use_background_removal"] = True
     if "use_safety_gate" not in source:
         options["use_safety_gate"] = True
+
+    # Per-request inference threshold overrides
+    ct = _to_float(source.get("confidence_threshold"), None)
+    if ct is not None:
+        options["confidence_threshold"] = max(0.0, min(1.0, ct))
+    et = _to_float(source.get("entropy_threshold"), None)
+    if et is not None:
+        options["entropy_threshold"] = max(0.0, min(10.0, et))
+    mt = _to_float(source.get("msp_threshold"), None)
+    if mt is not None:
+        options["msp_threshold"] = max(0.0, min(1.0, mt))
     return options
 
 
 def _create_job(
-    action_key, archive_logs=False, base_model=None, train_options=None
+    action_key, archive_logs=False, base_model=None,
+    train_options=None, advanced_config=None,
 ):
     action = CONTROL_ACTIONS[action_key]
     script = action["script"]
     script_args = []
     train_options = train_options or {}
+    advanced_config = advanced_config or {}
 
     train_fraction = train_options.get("train_fraction")
     train_fraction_pct = train_options.get("train_fraction_pct")
@@ -615,6 +764,18 @@ def _create_job(
     if action_key == "train" and must_review is not None:
         env_overrides["LEAF_MUST_REVIEW"] = "1" if must_review else "0"
 
+    # Forward all advanced config keys as env vars to the subprocess.
+    for ui_key, value in advanced_config.items():
+        meta = ADVANCED_ENV_KEYS.get(ui_key)
+        if meta is None:
+            continue
+        env_name = meta["env"]
+        param_type = meta["type"]
+        if param_type == "bool":
+            env_overrides[env_name] = "1" if _to_bool(value) else "0"
+        else:
+            env_overrides[env_name] = str(value)
+
     job_id = uuid.uuid4().hex
     now = time.time()
     job = {
@@ -633,6 +794,7 @@ def _create_job(
         "save_mode": save_mode,
         "class_equalizer": class_equalizer,
         "must_review": must_review,
+        "advanced_config": advanced_config,
         "env_overrides": env_overrides,
         "status": "starting",
         "start_time": now,
@@ -679,12 +841,36 @@ def _append_job_log(job, line):
             and "ms/step" in prev
         )
         if prev_is_batch:
-            job["logs"][-1] = cleaned
+            # We don't overwrite the line here since we're using tqdm now, but keep logic in case.
+            pass
+
+    # Clean up carriage returns from tqdm so they don't break the UI
+    if "\r" in line:
+        parts = [p.strip() for p in line.split("\r") if p.strip()]
+        line = parts[-1] if parts else ""
+    else:
+        line = line.strip()
+
+    if not line:
+        return
+
+    # Keep a single live-updating batch progress line for tqdm.
+    is_tqdm_progress = "Train:" in line or "Validate:" in line or "%|" in line
+    if is_tqdm_progress and job["logs"]:
+        prev = job["logs"][-1]
+        if "Train:" in prev and "Train:" in line:
+            prefix_prev = prev.split("Train:")[0]
+            prefix_line = line.split("Train:")[0]
+            if prefix_prev == prefix_line:
+                job["logs"][-1] = line
+                return
+        elif "Validate:" in prev and "Validate:" in line:
+            job["logs"][-1] = line
             return
 
-    job["logs"].append(cleaned)
+    job["logs"].append(line)
     if (
-        isinstance(JOB_LOG_LIMIT, int)
+        JOB_LOG_LIMIT is not None
         and JOB_LOG_LIMIT > 0
         and len(job["logs"]) > JOB_LOG_LIMIT
     ):
@@ -693,25 +879,38 @@ def _append_job_log(job, line):
 
 def _parse_progress_line(job, raw_line):
     prefix = "TRAINING_PROGRESS "
-    line = (raw_line or "").strip()
-    if not line.startswith(prefix):
-        return False
+    parts = (raw_line or "").split("\r")
 
-    try:
-        payload = json.loads(line[len(prefix) :])
-        progress = float(
-            payload.get("progress_pct", job.get("progress_pct", 0.0))
-        )
-        eta = payload.get("eta_seconds")
+    kept_parts = []
+    for part in parts:
+        idx = part.find(prefix)
+        if idx == -1:
+            kept_parts.append(part)
+            continue
 
-        job["progress_pct"] = max(0.0, min(100.0, progress))
-        job["eta_seconds"] = None if eta is None else max(0.0, float(eta))
-        job["progress_stage"] = payload.get(
-            "stage", job.get("progress_stage", "running")
-        )
-        return True
-    except Exception:
-        return False
+        json_str = part[idx + len(prefix) :].strip()
+        before_str = part[:idx].strip()
+        if before_str:
+            kept_parts.append(before_str)
+
+        try:
+            payload = json.loads(json_str)
+            progress = float(
+                payload.get("progress_pct", job.get("progress_pct", 0.0))
+            )
+            eta = payload.get("eta_seconds")
+
+            job["progress_pct"] = max(0.0, min(100.0, progress))
+            job["eta_seconds"] = None if eta is None else max(0.0, float(eta))
+            job["progress_stage"] = payload.get(
+                "stage", job.get("progress_stage", "running")
+            )
+        except Exception:
+            kept_parts.append(part)
+
+    if not kept_parts:
+        return None
+    return "\r".join(kept_parts)
 
 
 def _run_job(job):
@@ -719,6 +918,7 @@ def _run_job(job):
     command = [sys.executable, script_path, *(job.get("script_args") or [])]
     child_env = dict(os.environ)
     child_env.update(job.get("env_overrides") or {})
+    child_env["PYTHONUNBUFFERED"] = "1"
     try:
         process = subprocess.Popen(
             command,
@@ -735,9 +935,9 @@ def _run_job(job):
 
         assert process.stdout is not None
         for line in process.stdout:
-            if _parse_progress_line(job, line):
-                continue
-            _append_job_log(job, line)
+            cleaned_line = _parse_progress_line(job, line)
+            if cleaned_line:
+                _append_job_log(job, cleaned_line)
 
         return_code = process.wait()
         job["return_code"] = int(return_code)
@@ -1270,7 +1470,6 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
                 },
             }
 
-    model_input_array = None
     focus_overlay_b64 = None
     focus_overlay_enabled = bool(
         USE_YOLO_LEAF_DETECTION and options["use_background_removal"]
@@ -1279,70 +1478,78 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
         {"stage": "leaf_focus_detection", "applied": focus_overlay_enabled}
     )
 
-    if model_input_array is None:
-        try:
-            img = image.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
-            model_input_array = np.expand_dims(image.img_to_array(img), axis=0)
-        except Exception as exc:
-            print(f"Failed to load image for classification: {exc}")
+    try:
+        img_pil = Image.open(img_path).convert("RGB")
 
-        if focus_overlay_enabled:
-            detector = _get_yolo_leaf_detector()
-            if detector is not None:
-                try:
-                    img_bgr = cv2.imread(img_path)
-                    if img_bgr is not None:
-                        detection = detector.detect(img_bgr)
-                        if detection["found"]:
-                            x1, y1, x2, y2 = detection["bbox"]
-                            img_boxed = img_bgr.copy()
-                            cv2.rectangle(
-                                img_boxed,
-                                (x1, y1),
-                                (x2, y2),
-                                (34, 197, 94),
-                                3,
-                            )
-                            cv2.putText(
-                                img_boxed,
-                                f"Leaf Focus ({int(detection['confidence'] * 100)}%)",
-                                (x1, max(y1 - 10, 20)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.7,
-                                (34, 197, 94),
-                                2,
-                            )
-                            img_boxed_rgb = cv2.cvtColor(
-                                img_boxed, cv2.COLOR_BGR2RGB
-                            )
-                            img_pil = Image.fromarray(img_boxed_rgb)
-                            buffered = io.BytesIO()
-                            img_pil.save(buffered, format="JPEG")
-                            focus_overlay_b64 = base64.b64encode(
-                                buffered.getvalue()
-                            ).decode("utf-8")
-                except Exception as exc:
-                    print(f"YOLOv26 focus visualization failed: {exc}")
+        transform = v2.Compose([
+            v2.Resize((IMG_SIZE, IMG_SIZE)),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        model_input_tensor = transform(img_pil).unsqueeze(0).to(get_device())
+    except Exception as exc:
+        print(f"Failed to load image for classification: {exc}")
+        model_input_tensor = None
 
-    # Skip preprocessing if model has internal block.
-    if not _model_has_internal_preprocessing(active_model):
-        model_input_array = preprocess_array_for_model(
-            model_input_array, backbone_name=ACTIVE_BACKBONE
-        )
+    if focus_overlay_enabled:
+        detector = _get_yolo_leaf_detector()
+        if detector is not None:
+            try:
+                img_bgr = cv2.imread(img_path)
+                if img_bgr is not None:
+                    detection = detector.detect(img_bgr)
+                    if detection["found"]:
+                        x1, y1, x2, y2 = detection["bbox"]
+                        img_boxed = img_bgr.copy()
+                        cv2.rectangle(
+                            img_boxed,
+                            (x1, y1),
+                            (x2, y2),
+                            (34, 197, 94),
+                            3,
+                        )
+                        cv2.putText(
+                            img_boxed,
+                            f"Leaf Focus ({int(detection['confidence'] * 100)}%)",
+                            (x1, max(y1 - 10, 20)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (34, 197, 94),
+                            2,
+                        )
+                        img_boxed_rgb = cv2.cvtColor(
+                            img_boxed, cv2.COLOR_BGR2RGB
+                        )
+                        img_pil_b = Image.fromarray(img_boxed_rgb)
+                        buffered = io.BytesIO()
+                        img_pil_b.save(buffered, format="JPEG")
+                        focus_overlay_b64 = base64.b64encode(
+                            buffered.getvalue()
+                        ).decode("utf-8")
+            except Exception as exc:
+                print(f"YOLOv26 focus visualization failed: {exc}")
+
+    if model_input_tensor is None:
+        raise ValueError("Failed to load image for classification; tensor is empty.")
 
     # Make prediction
-    if isinstance(active_model, list):
-        all_preds = [
-            _extract_disease_predictions(m.predict(model_input_array, verbose=0))[0]
-            for m in active_model
-        ]
-        prediction_probs = np.mean(all_preds, axis=0)
-        diagnostics = compute_prediction_diagnostics(prediction_probs)
-    else:
-        predictions = _extract_disease_predictions(
-            active_model.predict(model_input_array, verbose=0)
-        )
-        diagnostics = compute_prediction_diagnostics(predictions[0])
+    with torch.no_grad():
+        if isinstance(active_model, list):
+            all_preds = []
+            for m in active_model:
+                out = m(model_input_tensor)
+                logits = out["disease_output"] if isinstance(out, dict) and "disease_output" in out else out
+                probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+                all_preds.append(_extract_disease_predictions(probs))
+            prediction_probs = np.mean(all_preds, axis=0)
+            diagnostics = compute_prediction_diagnostics(prediction_probs)
+        else:
+            out = active_model(model_input_tensor)
+            logits = out["disease_output"] if isinstance(out, dict) and "disease_output" in out else out
+            probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+            predictions = _extract_disease_predictions(probs)
+            diagnostics = compute_prediction_diagnostics(predictions)
     predicted_class_idx = int(diagnostics["top1_index"])
     confidence = float(diagnostics["top1_prob"]) * 100.0
     confidence_margin = float(diagnostics["confidence_margin"]) * 100.0
@@ -1351,14 +1558,27 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
     # Get class name
     class_name = class_indices.get(predicted_class_idx, "Unknown")
 
-    safety = {"reject": False, "reasons": [], "uncertainty_score": 0}
+    safety: SafetyEvaluation = {
+        "reject": False,
+        "reasons": [],
+        "appears_non_leaf": False,
+        "weak_leaf_signal": False,
+        "uncertainty_score": 0,
+        "flags": {},
+    }
     if options["use_safety_gate"]:
         safety = evaluate_inference_safety(
             diagnostics=diagnostics,
             leaf_validation=leaf_validation,
-            confidence_threshold=CONFIDENCE_REJECT_THRESHOLD,
-            entropy_threshold_bits=ENTROPY_REJECT_THRESHOLD,
-            msp_threshold=OOD_MSP_THRESHOLD,
+            confidence_threshold=options.get(
+                "confidence_threshold", CONFIDENCE_REJECT_THRESHOLD
+            ),
+            entropy_threshold_bits=options.get(
+                "entropy_threshold", ENTROPY_REJECT_THRESHOLD
+            ),
+            msp_threshold=options.get(
+                "msp_threshold", OOD_MSP_THRESHOLD
+            ),
             min_margin=0.08,
         )
 
@@ -1611,87 +1831,9 @@ def generate_default_focus_mask(class_name, image_path):
     if img is None:
         return None
 
-    # Attempt to use model Grad-CAM if available
-    try:
-        if model is None or class_indices is None:
-            load_model_and_classes()
-
-        if model is not None and class_indices is not None:
-            from tensorflow.keras.preprocessing import image as keras_image
-
-            from scripts.gradcam_check import (
-                _find_target_layer,
-                _make_gradcam_heatmap,
-            )
-            from src.core.preprocessing import preprocess_array_for_model
-
-            # Load and preprocess image
-            img_loaded = keras_image.load_img(
-                image_path, target_size=(224, 224)
-            )
-            img_array = keras_image.img_to_array(img_loaded)
-            img_array_exp = np.expand_dims(img_array, axis=0)
-
-            if not _model_has_internal_preprocessing(model):
-                img_array_exp = preprocess_array_for_model(
-                    img_array_exp, backbone_name=ACTIVE_BACKBONE
-                )
-
-            # Find target class index
-            pred_index = None
-            for idx, name in class_indices.items():
-                if name == class_name:
-                    pred_index = idx
-                    break
-
-            # Resolve healthy partner for deviation calculation
-            healthy_partner_idx = None
-            from src.training.training_utils import parse_class_structure
-
-            class_names_list = [
-                class_indices[i] for i in sorted(class_indices.keys())
-            ]
-            partners = parse_class_structure(class_names_list)
-            if pred_index is not None and pred_index < len(partners):
-                healthy_partner_idx = partners[pred_index]
-
-            target_layer_name = None
-            if ACTIVE_BACKBONE != "DINOv3":
-                target_layer_name = _find_target_layer(model)
-
-            # Generate Grad-CAM heatmaps
-            _, disease_heatmap = _make_gradcam_heatmap(
-                model=model,
-                img_array=img_array_exp,
-                target_layer_name=target_layer_name,
-                pred_index=pred_index,
-                backbone_name=ACTIVE_BACKBONE or "DINOv3",
-                vit_block_idx=6,
-                healthy_partner_idx=healthy_partner_idx,
-            )
-
-            if disease_heatmap is not None and np.max(disease_heatmap) > 0:
-                h_orig, w_orig = img.shape[:2]
-                disease_heatmap_resized = cv2.resize(
-                    disease_heatmap, (w_orig, h_orig)
-                )
-
-                # Threshold Grad-CAM heatmap at > 0.3 as candidate focus
-                focus_mask = disease_heatmap_resized > 0.3
-
-                mask_rgba = np.zeros((h_orig, w_orig, 4), dtype=np.uint8)
-                # Paint focus red: BGR = (68, 68, 239), alpha = 255
-                mask_rgba[focus_mask, 0] = 68
-                mask_rgba[focus_mask, 1] = 68
-                mask_rgba[focus_mask, 2] = 239
-                mask_rgba[focus_mask, 3] = 255
-
-                mask_rgba = cv2.resize(
-                    mask_rgba, (448, 448), interpolation=cv2.INTER_NEAREST
-                )
-                return mask_rgba
-    except Exception as e:
-        print(f"Error generating model focus mask: {e}")
+    # PyTorch Grad-CAM is not implemented yet.
+    # Fallback to no Grad-CAM heatmap.
+    return None
 
     # Fallback: segment center region of leaf mask
     try:
@@ -1830,6 +1972,7 @@ def index():
         default_leaf_detection_mode="auto",
         default_use_background_removal=True,
         default_use_safety_gate=True,
+        advanced_env_keys=ADVANCED_ENV_KEYS,
     )
 
 
@@ -1863,6 +2006,9 @@ def predict():
             "use_background_removal", "on"
         ),
         "use_safety_gate": request.form.get("use_safety_gate", "on"),
+        "confidence_threshold": request.form.get("confidence_threshold"),
+        "entropy_threshold": request.form.get("entropy_threshold"),
+        "msp_threshold": request.form.get("msp_threshold"),
     }
 
     if file:
@@ -2048,11 +2194,14 @@ def control_run(action_key):
             train_options["class_equalizer"] = _to_bool(class_equalizer)
         train_options["must_review"] = _to_bool(must_review)
 
+    advanced_config = payload.get("advanced_config") or {}
+
     job = _create_job(
         action_key,
         archive_logs=archive_logs,
         base_model=base_model or None,
         train_options=train_options,
+        advanced_config=advanced_config,
     )
     thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
     thread.start()
@@ -2098,6 +2247,47 @@ def control_resume():
 def control_system():
     """Return compute backend information for control panel status."""
     return jsonify({"compute": get_compute_info()})
+
+
+@app.route("/config/current", methods=["GET"])
+def config_current():
+    """Return every configurable parameter with metadata for UI rendering."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for key, meta in ADVANCED_ENV_KEYS.items():
+        section = meta.get("section", "other")
+        entry = {
+            "key": key,
+            "label": meta["label"],
+            "type": meta["type"],
+            "default": meta["default"],
+            "env": meta["env"],
+        }
+        # Read current env value if set.
+        env_val = os.getenv(meta["env"])
+        if env_val is not None:
+            if meta["type"] == "bool":
+                entry["value"] = env_val.strip().lower() in {
+                    "1", "true", "yes", "y", "on",
+                }
+            elif meta["type"] == "int":
+                try:
+                    entry["value"] = int(env_val)
+                except ValueError:
+                    entry["value"] = meta["default"]
+            elif meta["type"] == "float":
+                try:
+                    entry["value"] = float(env_val)
+                except ValueError:
+                    entry["value"] = meta["default"]
+            else:
+                entry["value"] = env_val
+        else:
+            entry["value"] = meta["default"]
+        for optional in ("min", "max", "step"):
+            if optional in meta:
+                entry[optional] = meta[optional]
+        grouped.setdefault(section, []).append(entry)
+    return jsonify(grouped)
 
 
 @app.route("/control/stop/<job_id>", methods=["POST"])

@@ -13,7 +13,7 @@ from typing import TypedDict
 import cv2
 import numpy as np
 
-from src.utils.config import MODELS_DIR
+from src.utils.config import BASE_DIR, MODELS_DIR
 
 YOLO_MODEL_PATH = Path(MODELS_DIR) / "yolo26_leaf_detector.pt"
 
@@ -37,7 +37,11 @@ class YOLOLeafDetector:
 
     def __init__(self, model_path: str | Path | None = None) -> None:
         if model_path is None:
-            model_path = YOLO_MODEL_PATH if YOLO_MODEL_PATH.exists() else "yolo26n.pt"
+            model_path = (
+                YOLO_MODEL_PATH
+                if YOLO_MODEL_PATH.exists()
+                else Path(BASE_DIR) / "yolo26n.pt"
+            )
         self.model = _create_yolo_model(model_path)
         self.model_path = model_path
         print(f"[*] YOLOLeafDetector initialized: {model_path}")
@@ -45,11 +49,17 @@ class YOLOLeafDetector:
     def detect(self, image: np.ndarray | str | Path) -> LeafDetection:
         """Run YOLOv26 inference, return best leaf bbox and confidence."""
         if isinstance(image, (str, Path)):
-            image = cv2.imread(str(image))
-            if image is None:
-                return {"found": False, "bbox": (0, 0, 0, 0), "confidence": 0.0}
+            img_arr = cv2.imread(str(image))
+            if img_arr is None:
+                return {
+                    "found": False,
+                    "bbox": (0, 0, 0, 0),
+                    "confidence": 0.0,
+                }
+        else:
+            img_arr = image
 
-        results = self.model.predict(image, verbose=False)
+        results = self.model.predict(img_arr, verbose=False)
 
         if (
             len(results) > 0
@@ -59,7 +69,7 @@ class YOLOLeafDetector:
             confs = results[0].boxes.conf.cpu().numpy()
             best = int(np.argmax(confs))
             xyxy = results[0].boxes.xyxy[best].cpu().numpy()
-            h, w = image.shape[:2]
+            h, w = img_arr.shape[:2]
             x1 = max(0, int(xyxy[0]))
             y1 = max(0, int(xyxy[1]))
             x2 = min(w, int(xyxy[2]))

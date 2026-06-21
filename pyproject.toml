@@ -3,52 +3,50 @@ name = "leaf-disease-detection"
 version = "2.1.0"
 description = "Plant leaf disease detection using EfficientNetV2-B0 transfer learning with SOTA augmentation and training strategies"
 readme = "README.md"
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.14.6"
 dependencies = [
-	"tensorflow[and-cuda]>=2.18.0,<2.21; sys_platform != 'win32'",
-	"tensorflow>=2.21.0,<2.22; sys_platform == 'win32'",
-	"tensorflow-hub>=0.16.1,<0.17",
-	"keras>=3.13.0,<3.15",
-	"keras-cv>=0.9.0,<0.10",
-	"numpy>=2.2.0,<2.4",
-	"Pillow>=11.0.0,<12",
-	"matplotlib>=3.10.0,<4",
-	"seaborn>=0.13.2,<1",
-	"scikit-learn>=1.6.0,<2",
-	"statsmodels>=0.14.4,<0.15",
-	"flask>=3.1.0,<4",
-	"tensorboard>=2.20.0",
-	"keras-hub>=0.19.0",
-	"huggingface-hub>=0.34.0,<1",
-	"opencv-python-headless",
-	"ultralytics>=8.4.67",
+  "torch",
+  "torchvision",
+  "torchaudio",
+  "numpy",
+  "Pillow",
+  "seaborn",
+  "scikit-learn",
+  "statsmodels",
+  "flask",
+  "tensorboard",
+  "opencv-python-headless",
+  "keras-nightly",
+  "tqdm>=4.68.3",
+  "ultralytics>=8.4.75",
 ]
 
 [project.scripts]
 leaf-disease = "src.main:main"
 leaf-disease-train = "src.training.train_model:main"
-leaf-disease-fine-tune = "src.training.fine_tune_model:main"
-leaf-disease-refine = "src.training.refine_model:main"
 leaf-disease-evaluate = "src.evaluation.evaluate_model:main"
 leaf-disease-predict = "src.pipeline.predict:main"
-leaf-disease-figures = "scripts.generate_figures:main"
+leaf-disease-figures = "src.visualization.generate_figures:main"
 leaf-disease-multi-seed = "tools.run_multi_seed_experiment:main"
 
 [tool.uv]
-link-mode = "copy"
-required-environments = [
-	"sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
+package = true
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/nightly/cu132"
+explicit = true
 
 [dependency-groups]
 dev = [
-	"mypy>=2.1.0",
-	"pytest>=8.4.2,<9",
-	"ruff>=0.15.10",
+  "mypy",
+  "pytest",
+  "ruff",
 ]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 79
 
 [tool.ruff.lint]
@@ -56,24 +54,19 @@ select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["E402", "F841"]
 "tests/*.py" = ["E402"]
-"scripts/*_backup.py" = ["F841"]
-"scripts/*_v2.py" = ["F841"]
-"scripts/generate_ablation_figures.py" = ["E741", "F841"]
-"scripts/generate_evidence_figures.py" = ["F841"]
-"scripts/generate_phd_evidence_figures.py" = ["F841"]
-"scripts/generate_robustness_figures_model_based.py" = ["F841"]
-"scripts/generate_statistical_figures.py" = ["F841"]
-"scripts/generate_statistical_figures_model_based.py" = ["F841"]
+"src/training/*.py" = ["E402"]
+"src/evaluation/*.py" = ["E402"]
+"src/visualization/*.py" = ["E402", "F841"]
+"src/visualization/generate_ablation_figures.py" = ["E741", "F841"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 ignore_missing_imports = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["scripts.*"]
+module = ["src.visualization.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]

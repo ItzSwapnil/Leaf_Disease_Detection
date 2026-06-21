@@ -3,11 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-
-def _tf():
-    import tensorflow as tf
-
-    return tf
+import torch
 
 
 def _blackwell_gpu_present() -> bool:
@@ -20,104 +16,74 @@ def _blackwell_gpu_present() -> bool:
     gpu_info_lower = gpu_info.lower()
     return "rtx 50" in gpu_info_lower or "blackwell" in gpu_info_lower
 
+def _setup_gpu_visibility():
+    gpu_mode = os.getenv("LEAF_GPU_MODE", "auto").strip().lower()
+    if gpu_mode in {"cpu", "off", "disable", "disabled"}:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-def configure_tensorflow():
-    tf = _tf()
+_setup_gpu_visibility()
 
+def configure_hardware():
+    """Configure hardware for PyTorch."""
     try:
-        gpu_mode = os.getenv("LEAF_TF_GPU_MODE", "gpu").strip().lower()
+        gpu_mode = os.getenv("LEAF_GPU_MODE", "auto").strip().lower()
         if gpu_mode in {"cpu", "off", "disable", "disabled"}:
-            print("[*] LEAF_TF_GPU_MODE=cpu; disabling TensorFlow GPU backend.")
-            try:
-                tf.config.set_visible_devices([], "GPU")
-            except RuntimeError as exc:
-                print(f"TensorFlow GPU visibility was already initialized: {exc}")
-        elif gpu_mode == "auto" and _blackwell_gpu_present():
-            print("[*] Blackwell GPU detected via nvidia-smi.")
-            print(
-                "[*] LEAF_TF_GPU_MODE=auto; disabling TensorFlow GPU backend "
-                "to prevent JIT compilation compatibility issues."
-            )
-            try:
-                tf.config.set_visible_devices([], "GPU")
-            except RuntimeError as exc:
-                print(f"TensorFlow GPU visibility was already initialized: {exc}")
-        elif _blackwell_gpu_present():
-            print(
-                "[*] Blackwell GPU detected. LEAF_TF_GPU_MODE=gpu; TensorFlow "
-                "will use GPU and may JIT PTX on first inference."
-            )
+            print("[*] LEAF_GPU_MODE=cpu; using CPU backend.")
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-        gpus = tf.config.list_physical_devices("GPU")
-        for gpu in gpus:
-            try:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            except Exception:
-                pass
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            gpu_names = [torch.cuda.get_device_name(i) for i in range(device_count)]
+            print(f"GPU devices detected ({device_count}): {', '.join(gpu_names)}")
 
-        if gpus:
-            gpu_details = []
-            for gpu in gpus:
-                try:
-                    details = tf.config.experimental.get_device_details(gpu)
-                    gpu_details.append(details.get("device_name", gpu.name))
-                except Exception:
-                    gpu_details.append(gpu.name)
-            print(
-                f"GPU devices detected ({len(gpus)}): {', '.join(gpu_details)}"
-            )
+            # Enable TF32 for Ampere+ GPUs (speeds up training without much precision loss)
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
+            # Use deterministic algorithms if needed
+            # torch.backends.cudnn.benchmark = True
         else:
             print("No GPU detected; using CPU backend.")
+
     except Exception as exc:
         print(f"Hardware configuration failed: {exc}")
-    return tf.config.list_physical_devices()
-
 
 def get_compute_info() -> dict:
-    tf = _tf()
-
+    """Get information about available compute resources."""
     try:
-        gpus = tf.config.list_physical_devices("GPU")
-        cpus = tf.config.list_physical_devices("CPU")
-        gpu_names = []
-        for gpu in gpus:
-            try:
-                details = tf.config.experimental.get_device_details(gpu)
-                gpu_names.append(details.get("device_name", gpu.name))
-            except Exception:
-                gpu_names.append(gpu.name)
-
-        return {
-            "backend": "GPU" if gpus else "CPU",
-            "gpu_count": len(gpus),
-            "cpu_count": len(cpus),
-            "gpu_names": gpu_names,
-            "is_gpu_active": bool(gpus),
-            "tf_version": tf.__version__,
-        }
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            gpu_names = [torch.cuda.get_device_name(i) for i in range(device_count)]
+            return {
+                "backend": "GPU",
+                "gpu_count": device_count,
+                "cpu_count": os.cpu_count() or 1,
+                "gpu_names": gpu_names,
+                "is_gpu_active": True,
+                "torch_version": torch.__version__,
+            }
+        else:
+            return {
+                "backend": "CPU",
+                "gpu_count": 0,
+                "cpu_count": os.cpu_count() or 1,
+                "gpu_names": [],
+                "is_gpu_active": False,
+                "torch_version": torch.__version__,
+            }
     except Exception as exc:
         return {
             "backend": "CPU",
             "gpu_count": 0,
-            "cpu_count": 0,
+            "cpu_count": os.cpu_count() or 1,
             "gpu_names": [],
             "is_gpu_active": False,
-            "tf_version": tf.__version__,
+            "torch_version": getattr(torch, "__version__", "unknown"),
             "error": str(exc),
         }
 
-
-def get_training_strategy():
-    tf = _tf()
-
-    gpus = tf.config.list_physical_devices("GPU")
-    if len(gpus) > 1:
-        print(f"Using MirroredStrategy across {len(gpus)} GPUs")
-        return tf.distribute.MirroredStrategy()
-
-    if len(gpus) == 1:
-        print("Using single GPU with default strategy")
-    else:
-        print("Using CPU with default strategy")
-
-    return tf.distribute.get_strategy()
+def get_device() -> torch.device:
+    """Get the primary PyTorch device."""
+    if torch.cuda.is_available() and os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        return torch.device("cuda")
+    return torch.device("cpu")

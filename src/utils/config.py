@@ -24,6 +24,8 @@ References:
 import os
 from pathlib import Path
 
+os.environ["KERAS_BACKEND"] = "torch"
+
 
 def _env_bool(name: str, default: bool) -> bool:
     """Parse a boolean from an environment variable with a safe fallback."""
@@ -179,7 +181,7 @@ ATTENTION_VIT_BLOCK_IDX = _env_int("LEAF_ATTENTION_VIT_BLOCK_IDX", 10)
 #                 TRAINING HYPERPARAMETERS
 # ============================================================
 
-BATCH_SIZE = 32  # Safer default for 8 GB laptop GPUs at 224x224 + fp16
+BATCH_SIZE = _env_int("LEAF_BATCH_SIZE", 32)  # Safer default for 8 GB GPUs
 EPOCHS_PHASE1 = _env_int("LEAF_EPOCHS_PHASE1", 5)
 EPOCHS_PHASE2 = _env_int("LEAF_EPOCHS_PHASE2", 10)
 LEARNING_RATE_PHASE1 = 2e-4  # Safe LR for head-only + class equalizer
@@ -195,14 +197,14 @@ TRAIN_DATA_FRACTION = _env_float("LEAF_TRAIN_DATA_FRACTION", 1.0)
 
 # Optimiser settings (AdamW + cosine annealing)
 OPTIMIZER = "AdamW"
-WEIGHT_DECAY = 0.02  # Increased for stronger regularization
+WEIGHT_DECAY = _env_float("LEAF_WEIGHT_DECAY", 0.02)  # Stronger regularization
 LR_SCHEDULER = "cosine"
 WARMUP_EPOCHS = 1
 ACCUMULATION_STEPS = _env_int("LEAF_ACCUMULATION_STEPS", 1)
 
 # Regularisation
-DROPOUT_RATE = 0.5  # Increased from 0.4 for stronger regularization
-LABEL_SMOOTHING = 0.15  # Increased from 0.1 to discourage overconfidence
+DROPOUT_RATE = _env_float("LEAF_DROPOUT_RATE", 0.5)  # Stronger regularization
+LABEL_SMOOTHING = _env_float("LEAF_LABEL_SMOOTHING", 0.15)  # Discourage overconfidence
 USE_FOCAL_LOSS = False  # CrossEntropy + label smoothing preferred
 USE_HIERARCHICAL_LOSS = _env_bool("LEAF_USE_HIERARCHICAL_LOSS", True)
 FOCAL_GAMMA = 2.0
@@ -279,35 +281,37 @@ SAVE_RUN_MANIFESTS = _env_bool(
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Dataset directories
-TRAIN_DIR = BASE_DIR / "dataset" / "train"
-VAL_DIR = BASE_DIR / "dataset" / "val"
-TEST_DIR = BASE_DIR / "dataset" / "test"
+TRAIN_DIR = str(BASE_DIR / "dataset" / "train")
+VAL_DIR = str(BASE_DIR / "dataset" / "val")
+TEST_DIR = str(BASE_DIR / "dataset" / "test")
 
 # Model artefact paths
-MODELS_DIR = BASE_DIR / "models"
-CHECKPOINT_MODEL_PATH = (
-    MODELS_DIR / "leaf_disease_checkpoint.keras"
+MODELS_DIR = str(BASE_DIR / "models")
+CHECKPOINT_MODEL_PATH = str(
+    Path(MODELS_DIR) / "leaf_disease_checkpoint.pt"
 )  # train output
-CLASSIFIER_MODEL_PATH = (
-    MODELS_DIR / "leaf_disease_classifier.keras"
+CLASSIFIER_MODEL_PATH = str(
+    Path(MODELS_DIR) / "leaf_disease_classifier.pt"
 )  # fine-tune output
-REFINED_MODEL_PATH = MODELS_DIR / "leaf_disease_refined.keras"  # refine output
+REFINED_MODEL_PATH = str(
+    Path(MODELS_DIR) / "leaf_disease_refined.pt"
+)  # refine output
 # Strict canonical model path used across inference/evaluation/figure generation.
-FINAL_MODEL_FILE_PATH = MODELS_DIR / "leaf_disease_refined.keras"
-EFFNET_MODEL_FILE_PATH = (
-    MODELS_DIR / "EfficientNetv2B0" / "leaf_disease_EfficientNetV2-B0.keras"
+FINAL_MODEL_FILE_PATH = str(Path(MODELS_DIR) / "leaf_disease_refined.pt")
+EFFNET_MODEL_FILE_PATH = str(
+    Path(MODELS_DIR) / "EfficientNetv2B0" / "leaf_disease_EfficientNetV2-B0.pt"
 )
-CLASS_INDICES_PATH = MODELS_DIR / "class_indices.json"
+CLASS_INDICES_PATH = str(Path(MODELS_DIR) / "class_indices.json")
 MCNEMAR_BASELINE_MODEL_PATH = os.getenv(
     "LEAF_MCNEMAR_BASELINE_MODEL_PATH",
-    str(MODELS_DIR / "leaf_disease_effnetv2b1.keras"),
+    str(Path(MODELS_DIR) / "leaf_disease_effnetv2b1.pt"),
 )
 ENSEMBLE_MODEL_PATHS = _env_csv("LEAF_ENSEMBLE_MODELS")
 OOD_DIR = os.getenv("LEAF_OOD_DIR", str(BASE_DIR / "dataset" / "ood"))
 
 # Output directories
-PLOTS_DIR = BASE_DIR / "plots"
-LOGS_DIR = BASE_DIR / "logs"
+PLOTS_DIR = str(BASE_DIR / "plots")
+LOGS_DIR = str(BASE_DIR / "logs")
 
 # ============================================================
 #                     CPU OPTIMISATION
@@ -370,15 +374,8 @@ EFFNET_BEST_MODEL = str(EFFNET_MODEL_FILE_PATH)
 #           STRING ALIASES (backward compatibility)
 # ============================================================
 
-CHECKPOINT_PATH = str(CHECKPOINT_MODEL_PATH)
-CLASSIFIER_PATH = str(CLASSIFIER_MODEL_PATH)
-REFINED_PATH = str(REFINED_MODEL_PATH)
-FINAL_MODEL_PATH = str(FINAL_MODEL_FILE_PATH)
-EFFNET_MODEL_PATH = str(EFFNET_MODEL_FILE_PATH)
-CLASS_INDICES_PATH = str(CLASS_INDICES_PATH)
-TRAIN_DIR = str(TRAIN_DIR)
-VAL_DIR = str(VAL_DIR)
-TEST_DIR = str(TEST_DIR)
-MODELS_DIR = str(MODELS_DIR)
-PLOTS_DIR = str(PLOTS_DIR)
-LOGS_DIR = str(LOGS_DIR)
+CHECKPOINT_PATH = CHECKPOINT_MODEL_PATH
+CLASSIFIER_PATH = CLASSIFIER_MODEL_PATH
+REFINED_PATH = REFINED_MODEL_PATH
+FINAL_MODEL_PATH = FINAL_MODEL_FILE_PATH
+EFFNET_MODEL_PATH = EFFNET_MODEL_FILE_PATH

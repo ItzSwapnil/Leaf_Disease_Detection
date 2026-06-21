@@ -1,50 +1,21 @@
-from __future__ import annotations
-
-import inspect
-import math
 import os
-import shutil
-import tempfile
-import zipfile
-from collections import deque
+import random
 from pathlib import Path
-from typing import Dict, Optional, Sequence
-
-import tensorflow as tf
-import tensorflow.keras as keras
-
-# Provide a compatible `register_keras_serializable` decorator across TF/Keras versions.
-try:
-    # Preferred import location
-    from tensorflow.keras.utils import register_keras_serializable
-except Exception:
-    try:
-        register_keras_serializable = keras.saving.register_keras_serializable  # type: ignore
-    except Exception:
-
-        def register_keras_serializable(package=None):
-            def decorator(obj):
-                return obj
-
-            return decorator
-
+from typing import Dict, Optional
 
 import numpy as np
+import torch
+import torch.nn as nn
+from torchvision.transforms import v2
 
 from src.utils.config import (
-    ACCUMULATION_STEPS,
-    BATCH_SIZE,
     COLOR_JITTER_BRIGHTNESS,
     COLOR_JITTER_CONTRAST,
     COLOR_JITTER_HUE,
     COLOR_JITTER_SATURATION,
-    EMA_MOMENTUM,
-    FOCAL_GAMMA,
     GAUSSIAN_BLUR_PROB,
     GAUSSIAN_BLUR_SIGMA_MAX,
     GAUSSIAN_BLUR_SIGMA_MIN,
-    GAUSSIAN_NOISE_PROB,
-    GAUSSIAN_NOISE_SIGMA,
     IMG_SIZE,
     LABEL_SMOOTHING,
     OPTIMIZER,
@@ -55,1762 +26,333 @@ from src.utils.config import (
     RANDOM_ERASING_PROB,
     RANDOM_ERASING_SCALE_MAX,
     RANDOM_ERASING_SCALE_MIN,
-    USE_BACKGROUND_RANDOMIZATION,
     USE_COLOR_JITTER,
-    USE_FOCAL_LOSS,
     USE_GAUSSIAN_BLUR,
-    USE_GAUSSIAN_NOISE,
-    USE_HIERARCHICAL_LOSS,
-    USE_OPTIMIZER_EMA,
     USE_RANDOM_ERASING,
     USE_RANDOM_RESIZED_CROP,
     WEIGHT_DECAY,
 )
 
-# Learning rate schedule
+# -----------------------------------------------------------------------------
+# Learning Rate Schedulers
+# -----------------------------------------------------------------------------
 
-
-@register_keras_serializable(package="training_utils")
-class WarmupCosineSchedule(keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(
-        self,
-        peak_lr: float,
-        min_lr: float,
-        warmup_steps: int,
-        total_steps: int,
-    ):
-        super().__init__()
-        self.peak_lr = float(peak_lr)
-        self.min_lr = float(min_lr)
-        self.warmup_steps = int(max(0, warmup_steps))
-        self.total_steps = int(max(1, total_steps))
-
-    def __call__(self, step):
-        step = keras.ops.cast(step, "float32")
-        warmup_steps = keras.ops.cast(max(1, self.warmup_steps), "float32")
-        total_steps = keras.ops.cast(self.total_steps, "float32")
-
-        if self.warmup_steps > 0:
-            warmup_progress = keras.ops.minimum(1.0, step / warmup_steps)
-            warmup_lr = self.peak_lr * warmup_progress
-        else:
-            warmup_lr = keras.ops.cast(self.peak_lr, "float32")
-
-        decay_start = keras.ops.cast(self.warmup_steps, "float32")
-        decay_steps = keras.ops.maximum(1.0, total_steps - decay_start)
-        decay_progress = keras.ops.minimum(
-            1.0, keras.ops.maximum(0.0, (step - decay_start) / decay_steps)
-        )
-        cosine_decay = 0.5 * (1.0 + keras.ops.cos(math.pi * decay_progress))
-        cosine_lr = self.min_lr + (self.peak_lr - self.min_lr) * cosine_decay
-
-        return keras.ops.where(step < decay_start, warmup_lr, cosine_lr)
-
-    def get_config(self):
-        return {
-            "peak_lr": self.peak_lr,
-            "min_lr": self.min_lr,
-            "warmup_steps": self.warmup_steps,
-            "total_steps": self.total_steps,
-        }
-
-
-# Callbacks
-
-
-def _normalize_save_mode(save_mode: str) -> str:
-    mode = str(save_mode or "with_optimizer").strip().lower().replace("-", "_")
-    if mode not in {"with_optimizer", "without_optimizer", "all"}:
-        raise ValueError(
-            "Unsupported save mode "
-            f"'{save_mode}'. Expected one of: with_optimizer, without_optimizer, all."
-        )
-    return mode
-
-
-def _without_optimizer_path(model_path: str) -> str:
-    base, ext = os.path.splitext(model_path)
-    extension = ext or ".keras"
-    return f"{base}_no_optimizer{extension}"
-
-
-def _strip_optimizer_from_keras_archive(model_path: str) -> None:
-    """Rewrite a .keras archive and remove the top-level optimizer group from weights."""
-    try:
-        import h5py
-    except Exception:
-        # If h5py is unavailable, keep best-effort behavior from clone save.
-        return
-
-    if not str(model_path).lower().endswith(".keras"):
-        return
-
-    with tempfile.TemporaryDirectory(
-        prefix="leaf_strip_optimizer_"
-    ) as tmp_dir:
-        extracted_weights_path = os.path.join(tmp_dir, "model.weights.h5")
-        stripped_weights_path = os.path.join(
-            tmp_dir, "model.weights.stripped.h5"
-        )
-        rebuilt_archive_path = os.path.join(tmp_dir, "rebuilt.keras")
-        other_members: dict[str, bytes] = {}
-
-        with zipfile.ZipFile(model_path, "r") as archive:
-            member_names = archive.namelist()
-            if "model.weights.h5" not in member_names:
-                return
-
-            for member_name in member_names:
-                if member_name == "model.weights.h5":
-                    with (
-                        archive.open(member_name, "r") as src,
-                        open(extracted_weights_path, "wb") as dst,
-                    ):
-                        for chunk in iter(
-                            lambda: src.read(4 * 1024 * 1024), b""
-                        ):
-                            dst.write(chunk)
-                else:
-                    other_members[member_name] = archive.read(member_name)
-
-        with (
-            h5py.File(extracted_weights_path, "r") as src_h5,
-            h5py.File(stripped_weights_path, "w") as dst_h5,
-        ):
-            for top_key in src_h5.keys():
-                if str(top_key).lower() == "optimizer":
-                    continue
-                src_h5.copy(top_key, dst_h5, name=top_key)
-
-        with zipfile.ZipFile(
-            rebuilt_archive_path, "w", compression=zipfile.ZIP_STORED
-        ) as out:
-            if "metadata.json" in other_members:
-                out.writestr(
-                    "metadata.json", other_members.pop("metadata.json")
-                )
-            if "config.json" in other_members:
-                out.writestr("config.json", other_members.pop("config.json"))
-            out.write(stripped_weights_path, arcname="model.weights.h5")
-            for member_name in sorted(other_members.keys()):
-                out.writestr(member_name, other_members[member_name])
-
-        try:
-            os.replace(rebuilt_archive_path, model_path)
-        except OSError as exc:
-            # EXDEV can happen when temp dir and model dir are on different mounts.
-            if getattr(exc, "errno", None) != 18:
-                raise
-            shutil.copy2(rebuilt_archive_path, model_path)
-            os.remove(rebuilt_archive_path)
-
-
-def _save_model_with_include_optimizer(
-    model: keras.Model, model_path: str, include_optimizer: bool
-) -> None:
-    if include_optimizer:
-        try:
-            model.save(model_path, include_optimizer=True)
-            return
-        except TypeError:
-            # Older Keras variants may not expose include_optimizer.
-            model.save(model_path)
-            return
-
-    # Avoid clone_model for optimizer-free exports: some backbones (for example
-    # ViT variants) may not deserialize cleanly across keras-hub versions.
-    # Save directly, then force-strip optimizer tensors from the archive.
-    try:
-        model.save(model_path, include_optimizer=False)
-    except TypeError:
-        model.save(model_path)
-    _strip_optimizer_from_keras_archive(model_path)
-
-
-def save_model_variants(
-    model: keras.Model, model_path: str, save_mode: str = "with_optimizer"
-) -> list[str]:
-    mode = _normalize_save_mode(save_mode)
-
-    if mode == "with_optimizer":
-        _save_model_with_include_optimizer(
-            model, model_path, include_optimizer=True
-        )
-        return [model_path]
-
-    if mode == "without_optimizer":
-        _save_model_with_include_optimizer(
-            model, model_path, include_optimizer=False
-        )
-        return [model_path]
-
-    no_optimizer_path = _without_optimizer_path(model_path)
-    _save_model_with_include_optimizer(
-        model, model_path, include_optimizer=True
+def build_warmup_cosine_schedule(optimizer: torch.optim.Optimizer, peak_lr: float, min_lr: float, warmup_steps: int, total_steps: int):
+    from torch.optim.lr_scheduler import (
+        CosineAnnealingLR,
+        LinearLR,
+        SequentialLR,
     )
-    _save_model_with_include_optimizer(
-        model, no_optimizer_path, include_optimizer=False
-    )
-    return [model_path, no_optimizer_path]
-
-
-class BestModelSaver(keras.callbacks.Callback):
-    def __init__(
-        self,
-        model_path: str,
-        monitor: str = "val_disease_output_accuracy",
-        mode: str = "max",
-        initial_best: Optional[float] = None,
-        verbose: int = 1,
-        save_mode: str = "with_optimizer",
-    ):
-        super().__init__()
-        self.model_path = model_path
-        self.monitor = monitor
-        self.mode = mode
-        self.verbose = int(verbose)
-        self.save_mode = str(save_mode or "with_optimizer")
-        if initial_best is None:
-            self.best = float("-inf") if mode == "max" else float("inf")
-        else:
-            self.best = float(initial_best)
-
-    def _is_better(self, current: float) -> bool:
-        return (
-            current > self.best if self.mode == "max" else current < self.best
-        )
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        current = logs.get(self.monitor)
-        if current is None:
-            return
-
-        current = float(current)
-        if self._is_better(current):
-            self.best = current
-            saved_paths = save_model_variants(
-                self.model, self.model_path, save_mode=self.save_mode
-            )
-            if self.verbose:
-                print(
-                    f"Saved improved model at epoch {epoch + 1}: "
-                    f"{self.monitor}={current:.6f}"
-                )
-                if len(saved_paths) > 1:
-                    print("Saved variants: " + ", ".join(saved_paths))
-
-
-class OverfittingStopper(keras.callbacks.Callback):
-    def __init__(
-        self, min_gap: float = 0.05, patience: int = 2, verbose: int = 1
-    ):
-        super().__init__()
-        self.min_gap = float(min_gap)
-        self.patience = int(patience)
-        self.verbose = int(verbose)
-        self.bad_epochs = 0
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        loss = logs.get("loss")
-        val_loss = logs.get("val_loss")
-        acc = logs.get("accuracy")
-        val_acc = logs.get("val_disease_output_accuracy") or logs.get(
-            "val_accuracy"
-        )
-
-        if None in (loss, val_loss, acc, val_acc):
-            return
-
-        gap = float(acc) - float(val_acc)
-        overfitting_now = (float(val_loss) > float(loss)) and (
-            gap >= self.min_gap
-        )
-
-        if overfitting_now:
-            self.bad_epochs += 1
-            if self.verbose:
-                print(
-                    f"Overfitting signal: epoch={epoch + 1}, "
-                    f"train_loss={float(loss):.4f}, val_loss={float(val_loss):.4f}, "
-                    f"acc_gap={gap:.4f} ({self.bad_epochs}/{self.patience})"
-                )
-            if self.bad_epochs >= self.patience:
-                if self.verbose:
-                    print(
-                        "Stopping training: persistent overfitting detected."
-                    )
-                self.model.stop_training = True
-        else:
-            self.bad_epochs = 0
-
-
-class PreOverfitRestorer(keras.callbacks.Callback):
-    def __init__(
-        self,
-        min_gap: float = 0.05,
-        patience: int = 2,
-        verbose: int = 1,
-        save_path: Optional[str] = None,
-        save_mode: str = "with_optimizer",
-    ):
-        super().__init__()
-        self.min_gap = float(min_gap)
-        self.patience = int(patience)
-        self.verbose = int(verbose)
-        self.save_path = save_path
-        self.save_mode = str(save_mode or "with_optimizer")
-        self.bad_epochs = 0
-        self.last_safe_weights = None
-        self.last_safe_epoch = None
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        loss = logs.get("loss")
-        val_loss = logs.get("val_loss")
-        acc = logs.get("accuracy")
-        val_acc = logs.get("val_disease_output_accuracy") or logs.get(
-            "val_accuracy"
-        )
-
-        if None in (loss, val_loss, acc, val_acc):
-            return
-
-        gap = float(acc) - float(val_acc)
-        overfitting_now = (float(val_loss) > float(loss)) and (
-            gap >= self.min_gap
-        )
-
-        if overfitting_now:
-            self.bad_epochs += 1
-            if self.verbose:
-                print(
-                    f"Pre-overfit monitor: epoch={epoch + 1}, "
-                    f"train_loss={float(loss):.4f}, val_loss={float(val_loss):.4f}, "
-                    f"acc_gap={gap:.4f} ({self.bad_epochs}/{self.patience})"
-                )
-
-            if self.bad_epochs >= self.patience:
-                restored = False
-                if self.last_safe_weights is not None:
-                    self.model.set_weights(self.last_safe_weights)
-                    restored = True
-                    if self.verbose:
-                        safe_epoch = (
-                            (int(self.last_safe_epoch) + 1)
-                            if self.last_safe_epoch is not None
-                            else "unknown"
-                        )
-                        print(
-                            "Stopping training: overfitting detected. "
-                            f"Restored weights from epoch {safe_epoch}."
-                        )
-                elif self.verbose:
-                    print(
-                        "Stopping training: overfitting detected before a safe snapshot "
-                        "was available."
-                    )
-
-                if restored and self.save_path:
-                    save_model_variants(
-                        self.model, self.save_path, save_mode=self.save_mode
-                    )
-                    if self.verbose:
-                        print(
-                            f"Saved restored pre-overfit model to: {self.save_path}"
-                        )
-
-                self.model.stop_training = True
-        else:
-            self.bad_epochs = 0
-            self.last_safe_weights = self.model.get_weights()
-            self.last_safe_epoch = int(epoch)
-
-
-class RollingPreOverfitRestorer(keras.callbacks.Callback):
-    def __init__(
-        self,
-        min_gap: float = 0.0,
-        patience: int = 1,
-        snapshot_count: int = 10,
-        snapshot_dir: Optional[str] = None,
-        monitor: str = "val_disease_output_accuracy",
-        strict: bool = True,
-        verbose: int = 1,
-    ):
-        super().__init__()
-        self.min_gap = float(min_gap)
-        self.patience = int(patience)
-        self.snapshot_count = max(1, int(snapshot_count))
-        self.monitor = str(monitor)
-        self.strict = bool(strict)
-        self.verbose = int(verbose)
-        self.bad_epochs = 0
-        self.snapshot_dir = Path(
-            snapshot_dir or tempfile.mkdtemp(prefix="leaf_refine_snapshots_")
-        )
-        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
-        self.safe_snapshots: deque[dict[str, object]] = deque()
-        self.best_snapshot_path = self.snapshot_dir / "best_safe.weights.h5"
-        self.best_snapshot_epoch: Optional[int] = None
-        self.best_snapshot_metric = float("-inf")
-        self.initial_snapshot_path = (
-            self.snapshot_dir / "initial_safe.weights.h5"
-        )
-        self._restored = False
-
-    def on_train_begin(self, logs=None):
-        # Keep a guaranteed pre-training safe restore point.
-        self.model.save_weights(str(self.initial_snapshot_path))
-
-    def _is_overfitting(self, logs: dict) -> bool:
-        loss = logs.get("loss")
-        val_loss = logs.get("val_loss")
-        acc = logs.get("accuracy")
-        val_acc = logs.get("val_disease_output_accuracy") or logs.get(
-            "val_accuracy"
-        )
-        if None in (loss, val_loss, acc, val_acc):
-            return False
-        gap = float(acc) - float(val_acc)
-        loss_overfit = float(val_loss) > float(loss)
-        gap_overfit = gap > float(self.min_gap)
-        if self.strict:
-            return loss_overfit or gap_overfit
-        return loss_overfit and gap_overfit
-
-    def _snapshot_path(self, epoch: int, metric: float) -> Path:
-        return self.snapshot_dir / (
-            f"safe_epoch_{int(epoch) + 1:03d}_{self.monitor}_{float(metric):.6f}.weights.h5"
-        )
-
-    def _save_safe_snapshot(self, epoch: int, metric: float) -> None:
-        snapshot_path = self._snapshot_path(epoch, metric)
-        self.model.save_weights(str(snapshot_path))
-        snapshot = {
-            "epoch": int(epoch),
-            "metric": float(metric),
-            "path": str(snapshot_path),
-        }
-        self.safe_snapshots.append(snapshot)
-        if float(metric) >= float(self.best_snapshot_metric):
-            self.model.save_weights(str(self.best_snapshot_path))
-            self.best_snapshot_metric = float(metric)
-            self.best_snapshot_epoch = int(epoch)
-        while len(self.safe_snapshots) > self.snapshot_count:
-            oldest = self.safe_snapshots.popleft()
-            oldest_path = str(oldest["path"])
-            try:
-                if os.path.exists(oldest_path):
-                    os.remove(oldest_path)
-            except Exception:
-                pass
-
-    def _restore_best_safe_snapshot(self) -> bool:
-        if (
-            self.best_snapshot_epoch is not None
-            and self.best_snapshot_path.exists()
-        ):
-            self.model.load_weights(str(self.best_snapshot_path))
-            self._restored = True
-            if self.verbose:
-                print(
-                    "Stopping training: overfitting detected. "
-                    f"Restored best safe weights from epoch {int(self.best_snapshot_epoch) + 1}."
-                )
-            return True
-
-        if self.initial_snapshot_path.exists():
-            self.model.load_weights(str(self.initial_snapshot_path))
-            self._restored = True
-            if self.verbose:
-                print(
-                    "Stopping training: overfitting detected. "
-                    "Restored initial pre-training safe weights."
-                )
-            return True
-
-        return False
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-
-        if self._is_overfitting(logs):
-            self.bad_epochs += 1
-            if self.verbose:
-                print(
-                    f"Rolling pre-overfit monitor: epoch={epoch + 1}, "
-                    f"train_loss={float(logs.get('loss', 0.0)):.4f}, "
-                    f"val_loss={float(logs.get('val_loss', 0.0)):.4f}, "
-                    f"acc_gap={float(logs.get('disease_output_accuracy', logs.get('accuracy', 0.0))) - float(logs.get('val_disease_output_accuracy', logs.get('val_accuracy', 0.0))):.4f} "
-                    f"({self.bad_epochs}/{self.patience})"
-                )
-            if self.bad_epochs >= self.patience:
-                restored = self._restore_best_safe_snapshot()
-                if not restored and self.verbose:
-                    print(
-                        "Stopping training: overfitting detected before a safe snapshot was available."
-                    )
-                self.model.stop_training = True
-        else:
-            self.bad_epochs = 0
-            monitor_value = logs.get(self.monitor)
-            if monitor_value is not None:
-                self._save_safe_snapshot(int(epoch), float(monitor_value))
-
-    def on_train_end(self, logs=None):
-        if self._restored:
-            return
-        if (
-            self.best_snapshot_epoch is not None
-            and self.best_snapshot_path.exists()
-        ):
-            self.model.load_weights(str(self.best_snapshot_path))
-            if self.verbose:
-                print(
-                    "Training ended without an overfit stop. "
-                    f"Restored best safe weights from epoch {int(self.best_snapshot_epoch) + 1}."
-                )
-            return
-        if self.initial_snapshot_path.exists():
-            self.model.load_weights(str(self.initial_snapshot_path))
-            if self.verbose:
-                print(
-                    "Training ended without an overfit stop. "
-                    "Restored initial pre-training safe weights."
-                )
-
-
-@register_keras_serializable(package="training_utils")
-class HierarchicalLoss(keras.losses.Loss):
-    def __init__(
-        self,
-        class_names: list[str],
-        label_smoothing: float = 0.15,
-        name: str = "hierarchical_loss",
-        **kwargs,
-    ):
-        super().__init__(name=name, **kwargs)
-        self.class_names = list(class_names)
-        self.label_smoothing = float(label_smoothing)
-
-        # Parse families and health states
-        families = []
-        family_to_id = {}
-        class_to_family_id = []
-        class_is_healthy = []
-
-        for name_str in self.class_names:
-            if "___" in name_str:
-                family, subclass = name_str.split("___", 1)
-            else:
-                words = name_str.split()
-                family = words[0]
-                subclass = " ".join(words[1:])
-
-            if family not in family_to_id:
-                family_to_id[family] = len(families)
-                families.append(family)
-
-            class_to_family_id.append(family_to_id[family])
-            class_is_healthy.append(
-                1.0 if "healthy" in subclass.lower() else 0.0
-            )
-
-        self.num_classes = len(self.class_names)
-        self.num_families = len(families)
-        self.class_to_family_id = class_to_family_id
-        self.class_is_healthy = class_is_healthy
-
-    def call(self, y_true, y_pred):
-        y_pred = tf.cast(y_pred, tf.float32)
-        y_true = tf.cast(y_true, tf.float32)
-        dtype = tf.float32
-
-        # Construct constant tensors locally within the current traced graph context
-        family_matrix = tf.one_hot(
-            self.class_to_family_id, self.num_families, dtype=dtype
-        )
-        healthy_mask = tf.constant(self.class_is_healthy, dtype=dtype)
-        diseased_mask = 1.0 - healthy_mask
-        healthy_family_matrix = family_matrix * healthy_mask[:, tf.newaxis]
-        diseased_family_matrix = family_matrix * diseased_mask[:, tf.newaxis]
-
-        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
-
-        # 1. Family Level Loss
-        y_true_fam = tf.matmul(y_true, family_matrix)
-        y_pred_fam = tf.matmul(y_pred, family_matrix)
-        if self.label_smoothing > 0:
-            num_fam = tf.cast(self.num_families, tf.float32)
-            y_true_fam_smoothed = y_true_fam * (1.0 - self.label_smoothing) + (
-                self.label_smoothing / num_fam
-            )
-        else:
-            y_true_fam_smoothed = y_true_fam
-        loss_fam = -tf.reduce_sum(
-            y_true_fam_smoothed * tf.math.log(y_pred_fam), axis=-1
-        )
-
-        # 2. Healthy vs Diseased Level Loss
-        y_true_healthy_fam = tf.matmul(y_true, healthy_family_matrix)
-        y_pred_healthy_fam = tf.matmul(y_pred, healthy_family_matrix)
-        y_true_diseased_fam = tf.matmul(y_true, diseased_family_matrix)
-        y_pred_diseased_fam = tf.matmul(y_pred, diseased_family_matrix)
-
-        cond_pred_healthy = y_pred_healthy_fam / (y_pred_fam + 1e-7)
-        cond_pred_diseased = y_pred_diseased_fam / (y_pred_fam + 1e-7)
-        cond_pred_healthy = tf.clip_by_value(
-            cond_pred_healthy, 1e-7, 1.0 - 1e-7
-        )
-        cond_pred_diseased = tf.clip_by_value(
-            cond_pred_diseased, 1e-7, 1.0 - 1e-7
-        )
-
-        loss_health = -tf.reduce_sum(
-            y_true_healthy_fam * tf.math.log(cond_pred_healthy)
-            + y_true_diseased_fam * tf.math.log(cond_pred_diseased),
-            axis=-1,
-        )
-
-        # 3. Disease Subclass Level Loss
-        y_pred_diseased_fam_gathered = tf.gather(
-            y_pred_diseased_fam, self.class_to_family_id, axis=-1
-        )
-        cond_pred_disease = y_pred / (y_pred_diseased_fam_gathered + 1e-7)
-        cond_pred_disease = tf.clip_by_value(
-            cond_pred_disease, 1e-7, 1.0 - 1e-7
-        )
-
-        loss_disease = -tf.reduce_sum(
-            y_true * diseased_mask * tf.math.log(cond_pred_disease), axis=-1
-        )
-
-        total_loss = loss_fam + loss_health + loss_disease
-        return tf.reduce_mean(total_loss)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "class_names": self.class_names,
-                "label_smoothing": self.label_smoothing,
-            }
-        )
-        return config
-
-
-# Loss construction
-
-
-def build_loss(
-    class_weight: Optional[Dict[int, float]],
-    class_names: Optional[list[str]] = None,
-):
-
-    if USE_HIERARCHICAL_LOSS and class_names:
-        return HierarchicalLoss(
-            class_names=class_names, label_smoothing=LABEL_SMOOTHING
-        ), None
-
-    if not USE_FOCAL_LOSS or not class_weight:
-        return (
-            keras.losses.CategoricalCrossentropy(
-                label_smoothing=LABEL_SMOOTHING
-            ),
-            class_weight,
-        )
-
-    alpha = [class_weight[idx] for idx in sorted(class_weight.keys())]
-    alpha = np.array(alpha, dtype=np.float32)
-    alpha = (alpha / np.sum(alpha)).tolist()
-    focal = keras.losses.CategoricalFocalCrossentropy(
-        alpha=alpha,
-        gamma=FOCAL_GAMMA,
-        label_smoothing=max(0.0, LABEL_SMOOTHING * 0.3),
-    )
-    return focal, None
-
-
-# Class weighting
-
-
-def compute_class_weights_from_flow(train_flow) -> Optional[Dict[int, float]]:
-
-    classes = np.array(train_flow.classes, dtype=np.int64)
-    if classes.size == 0:
-        return None
-
-    num_classes = int(classes.max()) + 1
-    counts = np.bincount(classes, minlength=num_classes).astype(np.float64)
-    if np.any(counts <= 0.0):
-        return None
-
-    inv = 1.0 / np.sqrt(counts)
-    inv /= float(np.mean(inv))
-    inv = np.clip(inv, 0.5, 3.0)
-    return {int(idx): float(w) for idx, w in enumerate(inv)}
-
-
-def count_class_samples_from_directory(
-    train_dir: str, class_names: Sequence[str]
-) -> tuple[Dict[int, int], int]:
-    """Count samples per class directory and return both per-class and total counts."""
-    import os
-
-    counts: Dict[int, int] = {}
-    total = 0
-    for class_index, class_name in enumerate(class_names):
-        class_dir = os.path.join(train_dir, class_name)
-        if not os.path.isdir(class_dir):
-            counts[int(class_index)] = 0
-            continue
-        sample_count = sum(
-            1 for entry in os.scandir(class_dir) if entry.is_file()
-        )
-        counts[int(class_index)] = int(sample_count)
-        total += int(sample_count)
-    return counts, int(total)
-
-
-def compute_class_weights_from_directory(
-    train_dir: str, class_names: Sequence[str]
-) -> Optional[Dict[int, float]]:
-    counts_by_class, _ = count_class_samples_from_directory(
-        train_dir, class_names
-    )
-    count_arr = np.array(
-        [float(counts_by_class[idx]) for idx in sorted(counts_by_class)],
-        dtype=np.float64,
-    )
-    if count_arr.size == 0 or np.any(count_arr <= 0.0):
-        return None
-
-    inv = 1.0 / np.sqrt(count_arr)
-    inv /= float(np.mean(inv))
-    inv = np.clip(inv, 0.5, 3.0)
-    return {int(idx): float(w) for idx, w in enumerate(inv)}
-
-
-# Mixup & cutmix augmentation
-
-
-def mixup_numpy_batch(
-    images: np.ndarray, labels: np.ndarray, alpha: float = 0.3
-) -> tuple[np.ndarray, np.ndarray]:
-
-    if alpha <= 0.0 or images.shape[0] < 2:
-        return images, labels
-
-    batch_size = images.shape[0]
-    lam = np.random.beta(alpha, alpha, size=batch_size).astype(np.float32)
-    lam_x = lam.reshape((-1, 1, 1, 1))
-    lam_y = lam.reshape((-1, 1))
-    indices = np.random.permutation(batch_size)
-    mixed_images = images * lam_x + images[indices] * (1.0 - lam_x)
-    mixed_labels = labels * lam_y + labels[indices] * (1.0 - lam_y)
-    return mixed_images, mixed_labels
-
-
-def cutmix_numpy_batch(
-    images: np.ndarray, labels: np.ndarray, alpha: float = 1.0
-) -> tuple[np.ndarray, np.ndarray]:
-
-    if alpha <= 0.0 or images.shape[0] < 2:
-        return images, labels
-
-    batch_size = images.shape[0]
-    lam = np.random.beta(alpha, alpha)
-    indices = np.random.permutation(batch_size)
-
-    h, w = images.shape[1], images.shape[2]
-    cut_ratio = np.sqrt(1.0 - lam)
-    cut_h = int(h * cut_ratio)
-    cut_w = int(w * cut_ratio)
-    cy = np.random.randint(0, h)
-    cx = np.random.randint(0, w)
-    y1 = max(0, cy - cut_h // 2)
-    y2 = min(h, cy + cut_h // 2)
-    x1 = max(0, cx - cut_w // 2)
-    x2 = min(w, cx + cut_w // 2)
-
-    mixed_images = images.copy()
-    mixed_images[:, y1:y2, x1:x2, :] = images[indices, y1:y2, x1:x2, :]
-
-    lam_adj = 1.0 - (y2 - y1) * (x2 - x1) / float(h * w)
-    mixed_labels = labels * lam_adj + labels[indices] * (1.0 - lam_adj)
-    return mixed_images, mixed_labels
-
-
-def cutmix_batch_tf(images, labels, alpha: float = 1.0):
-    """TensorFlow CutMix for batched image tensors."""
-    import tensorflow as tf
-
-    if alpha <= 0:
-        return images, labels
-
-    batch_size = tf.shape(images)[0]
-    gamma_1 = tf.random.gamma(shape=[], alpha=alpha)
-    gamma_2 = tf.random.gamma(shape=[], alpha=alpha)
-    lam = gamma_1 / (gamma_1 + gamma_2 + 1e-8)
-    indices = tf.random.shuffle(tf.range(batch_size))
-
-    height = tf.shape(images)[1]
-    width = tf.shape(images)[2]
-    cut_ratio = tf.sqrt(1.0 - lam)
-    cut_h = tf.cast(tf.cast(height, tf.float32) * cut_ratio, tf.int32)
-    cut_w = tf.cast(tf.cast(width, tf.float32) * cut_ratio, tf.int32)
-    cy = tf.random.uniform([], 0, height, dtype=tf.int32)
-    cx = tf.random.uniform([], 0, width, dtype=tf.int32)
-
-    y1 = tf.maximum(0, cy - cut_h // 2)
-    y2 = tf.minimum(height, cy + cut_h // 2)
-    x1 = tf.maximum(0, cx - cut_w // 2)
-    x2 = tf.minimum(width, cx + cut_w // 2)
-
-    row_mask = tf.logical_and(tf.range(height) >= y1, tf.range(height) < y2)
-    col_mask = tf.logical_and(tf.range(width) >= x1, tf.range(width) < x2)
-    box_mask = tf.cast(
-        tf.logical_and(row_mask[:, None], col_mask[None, :]), images.dtype
-    )
-    box_mask = tf.reshape(box_mask, [1, height, width, 1])
-    box_mask = tf.broadcast_to(box_mask, tf.shape(images))
-
-    shuffled = tf.gather(images, indices)
-    mixed_images = images * (1.0 - box_mask) + shuffled * box_mask
-
-    cut_area = tf.cast((y2 - y1) * (x2 - x1), tf.float32)
-    image_area = tf.cast(height * width, tf.float32)
-    lam_adj = 1.0 - cut_area / tf.maximum(image_area, 1.0)
-    mixed_labels = labels * lam_adj + tf.gather(labels, indices) * (
-        1.0 - lam_adj
-    )
-    return mixed_images, mixed_labels
-
-
-def _build_randaugment_layer(
-    num_layers: int,
-    magnitude: float,
-    value_range: tuple[float, float] = (0.0, 255.0),
-):
-    """Build a lightweight augmentation stack without external tfds/keras_cv dependencies."""
-
-    magnitude = float(np.clip(magnitude, 0.0, 1.0))
-    rotation_factor = 0.08 * magnitude
-    translation_factor = 0.10 * magnitude
-    zoom_factor = 0.08 * magnitude
-    contrast_factor = 0.15 * magnitude
-    brightness_factor = 0.10 * magnitude
-
-    return keras.Sequential(
-        [
-            keras.layers.RandomFlip("horizontal_and_vertical"),
-            keras.layers.RandomRotation(rotation_factor),
-            keras.layers.RandomTranslation(
-                translation_factor, translation_factor
-            ),
-            keras.layers.RandomZoom(-zoom_factor, zoom_factor),
-            keras.layers.RandomContrast(contrast_factor),
-            keras.layers.Lambda(
-                lambda images: tf.clip_by_value(
-                    tf.cast(images, tf.float32)
-                    + tf.random.uniform(
-                        tf.shape(images),
-                        -brightness_factor,
-                        brightness_factor,
-                        dtype=tf.float32,
-                    ),
-                    value_range[0],
-                    value_range[1],
-                )
-            ),
-        ],
-        name=f"randaugment_like_{int(num_layers)}",
-    )
-
-
-# ── Heavy augmentation layers for background invariance ──────────────
-
-
-def _random_resized_crop_batch(
-    images, target_size, scale_min, scale_max, ratio_min, ratio_max
-):
-    """Apply random resized crop to a batch of images (TF ops only)."""
-    batch_size = tf.shape(images)[0]
-    h = tf.shape(images)[1]
-    w = tf.shape(images)[2]
-
-    # Sample scale and aspect ratio per image
-    scale = tf.random.uniform([batch_size], scale_min, scale_max)
-    log_ratio_min = tf.math.log(ratio_min)
-    log_ratio_max = tf.math.log(ratio_max)
-    log_ratio = tf.random.uniform([batch_size], log_ratio_min, log_ratio_max)
-    ratio = tf.exp(log_ratio)
-
-    # Compute crop dimensions
-    area = tf.cast(h * w, tf.float32) * scale
-    crop_h = tf.cast(tf.math.sqrt(area / ratio), tf.int32)
-    crop_w = tf.cast(tf.math.sqrt(area * ratio), tf.int32)
-    crop_h = tf.minimum(crop_h, h)
-    crop_w = tf.minimum(crop_w, w)
-
-    # Sample crop offsets
-    max_offset_h = h - crop_h
-    max_offset_w = w - crop_w
-    offset_h = tf.cast(
-        tf.random.uniform([batch_size], 0.0, 1.0)
-        * tf.cast(max_offset_h, tf.float32),
-        tf.int32,
-    )
-    offset_w = tf.cast(
-        tf.random.uniform([batch_size], 0.0, 1.0)
-        * tf.cast(max_offset_w, tf.float32),
-        tf.int32,
-    )
-
-    def _crop_single(args):
-        img, oh, ow, ch, cw = args
-        cropped = tf.image.crop_to_bounding_box(img, oh, ow, ch, cw)
-        return tf.image.resize(cropped, [target_size, target_size])
-
-    cropped_images = tf.map_fn(
-        _crop_single,
-        (images, offset_h, offset_w, crop_h, crop_w),
-        fn_output_signature=images.dtype,
-    )
-    return cropped_images
-
-
-def _color_jitter_batch(images, brightness, contrast, saturation, hue):
-    """Apply color jitter augmentation to a batch (operates in 0-255 range)."""
-    orig_dtype = images.dtype
-    images_f32 = tf.cast(images, tf.float32)
-
-    # Brightness
-    if brightness > 0:
-        factor = tf.random.uniform(
-            [], -brightness, brightness, dtype=tf.float32
-        )
-        images_f32 = images_f32 + factor * 255.0
-
-    # Contrast
-    if contrast > 0:
-        factor = tf.random.uniform(
-            [], 1.0 - contrast, 1.0 + contrast, dtype=tf.float32
-        )
-        mean = tf.reduce_mean(images_f32, axis=[1, 2], keepdims=True)
-        images_f32 = (images_f32 - mean) * factor + mean
-
-    # Saturation (convert to HSV, modify S, convert back)
-    if saturation > 0:
-        factor = tf.random.uniform(
-            [], 1.0 - saturation, 1.0 + saturation, dtype=tf.float32
-        )
-        images_01 = tf.clip_by_value(images_f32 / 255.0, 0.0, 1.0)
-        hsv = tf.image.rgb_to_hsv(images_01)
-        h_ch, s_ch, v_ch = hsv[..., 0:1], hsv[..., 1:2], hsv[..., 2:3]
-        s_ch = tf.clip_by_value(s_ch * factor, 0.0, 1.0)
-        hsv_mod = tf.concat([h_ch, s_ch, v_ch], axis=-1)
-        images_f32 = tf.image.hsv_to_rgb(hsv_mod) * 255.0
-
-    # Hue
-    if hue > 0:
-        delta = tf.random.uniform([], -hue, hue, dtype=tf.float32)
-        images_01 = tf.clip_by_value(images_f32 / 255.0, 0.0, 1.0)
-        hsv = tf.image.rgb_to_hsv(images_01)
-        h_ch = hsv[..., 0:1] + delta
-        h_ch = h_ch - tf.floor(h_ch)  # Wrap hue around [0, 1]
-        hsv_mod = tf.concat([h_ch, hsv[..., 1:2], hsv[..., 2:3]], axis=-1)
-        images_f32 = tf.image.hsv_to_rgb(hsv_mod) * 255.0
-
-    images_f32 = tf.clip_by_value(images_f32, 0.0, 255.0)
-    return tf.cast(images_f32, orig_dtype)
-
-
-def _gaussian_blur_batch(images, sigma_min, sigma_max):
-    """Apply Gaussian blur using depthwise convolution with a random kernel."""
-    sigma = tf.random.uniform([], sigma_min, sigma_max)
-    kernel_size = 7  # Fixed kernel size, sigma controls actual blur strength
-    ax = tf.range(-kernel_size // 2 + 1.0, kernel_size // 2 + 1.0)
-    xx, yy = tf.meshgrid(ax, ax)
-    kernel = tf.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
-    kernel = kernel / tf.reduce_sum(kernel)
-    kernel = tf.reshape(kernel, [kernel_size, kernel_size, 1, 1])
-    kernel = tf.tile(kernel, [1, 1, 3, 1])  # One kernel per channel
-    kernel = tf.cast(kernel, images.dtype)
-
-    # Pad images for same-size output
-    pad = kernel_size // 2
-    padded = tf.pad(
-        images, [[0, 0], [pad, pad], [pad, pad], [0, 0]], mode="REFLECT"
-    )
-    blurred = tf.nn.depthwise_conv2d(
-        padded, kernel, strides=[1, 1, 1, 1], padding="VALID"
-    )
-    return blurred
-
-
-def _gaussian_noise_batch(images, sigma):
-    """Add zero-mean Gaussian noise to a batch of images."""
-    noise = tf.random.normal(
-        tf.shape(images), mean=0.0, stddev=sigma * 255.0, dtype=images.dtype
-    )
-    return tf.clip_by_value(images + noise, 0.0, 255.0)
-
-
-def _random_erasing_batch(images, scale_min, scale_max):
-    """Apply random erasing (cutout) to each image in a batch independently."""
-    batch_size = tf.shape(images)[0]
-    h = tf.shape(images)[1]
-    w = tf.shape(images)[2]
-
-    # Sample erase area as fraction of image
-    scale = tf.random.uniform([batch_size], scale_min, scale_max)
-    area = tf.cast(h * w, tf.float32) * scale
-    erase_h = tf.cast(tf.math.sqrt(area), tf.int32)
-    erase_w = tf.cast(tf.math.sqrt(area), tf.int32)
-    erase_h = tf.minimum(erase_h, h - 1)
-    erase_w = tf.minimum(erase_w, w - 1)
-
-    # Random position for erase rectangle
-    offset_h = tf.cast(
-        tf.random.uniform([batch_size], 0.0, 1.0)
-        * tf.cast(h - erase_h, tf.float32),
-        tf.int32,
-    )
-    offset_w = tf.cast(
-        tf.random.uniform([batch_size], 0.0, 1.0)
-        * tf.cast(w - erase_w, tf.float32),
-        tf.int32,
-    )
-
-    def _erase_single(args):
-        img, oh, ow, eh, ew = args
-        # Build a mask: 1 everywhere except the erase rectangle
-        rows = tf.range(h)
-        cols = tf.range(w)
-        row_mask = tf.logical_and(rows >= oh, rows < oh + eh)
-        col_mask = tf.logical_and(cols >= ow, cols < ow + ew)
-        box_mask = tf.cast(
-            tf.logical_and(row_mask[:, None], col_mask[None, :]), img.dtype
-        )
-        box_mask = box_mask[:, :, None]  # Broadcast over channels
-        # Fill erased region with random noise (helps more than zero-fill)
-        noise = tf.random.uniform(tf.shape(img), 0.0, 255.0, dtype=img.dtype)
-        return img * (1.0 - box_mask) + noise * box_mask
-
-    erased = tf.map_fn(
-        _erase_single,
-        (images, offset_h, offset_w, erase_h, erase_w),
-        fn_output_signature=images.dtype,
-    )
-    return erased
-
-
-def _randomize_background_batch_tf(images):
-    """Dynamically segment the leaf and randomize the background color.
-
-    This breaks any correlation between background features and class labels.
-    """
-    # images is (B, H, W, 3) in [0, 255]
-    # Compute std deviation across RGB channels
-    mean_val = tf.reduce_mean(images, axis=-1, keepdims=True)  # (B, H, W, 1)
-    variance = tf.reduce_mean(
-        tf.square(images - mean_val), axis=-1, keepdims=True
-    )
-    std_val = tf.sqrt(variance + 1e-8)  # (B, H, W, 1)
-
-    # Segment leaf foreground
-    leaf_mask = tf.cast(
-        (std_val > 8.0) & (mean_val > 20.0), dtype=images.dtype
-    )  # (B, H, W, 1)
-
-    # Generate random background colors for each image in the batch
-    batch_size = tf.shape(images)[0]
-    random_colors = tf.random.uniform(
-        [batch_size, 1, 1, 3],
-        minval=0.0,
-        maxval=255.0,
-        dtype=images.dtype,
-    )
-
-    # Blend image leaf foreground with the random background color
-    randomized_images = images * leaf_mask + random_colors * (1.0 - leaf_mask)
-    return randomized_images
-
-
-def _build_heavy_augmentation_layer(value_range=(0.0, 255.0)):
-    """Build a comprehensive augmentation pipeline for background invariance.
-
-    Returns a function that takes (images, training) and applies:
-    RandomResizedCrop, BackgroundRandomization, Flip, Rotation, ColorJitter,
-    GaussianBlur, GaussianNoise, and RandomErasing.
-    """
-
-    flip_layer = keras.layers.RandomFlip("horizontal")
-    rotation_layer = keras.layers.RandomRotation(0.15)  # ~27 degrees
-
-    def augment(images, training=True):
-        if not training:
-            return images
-
-        x = tf.cast(images, tf.float32)
-
-        # 1. RandomResizedCrop — destroys background layout
-        if USE_RANDOM_RESIZED_CROP:
-            x = _random_resized_crop_batch(
-                x,
-                target_size=IMG_SIZE,
-                scale_min=RANDOM_CROP_SCALE_MIN,
-                scale_max=RANDOM_CROP_SCALE_MAX,
-                ratio_min=RANDOM_CROP_RATIO_MIN,
-                ratio_max=RANDOM_CROP_RATIO_MAX,
-            )
-
-        # 1b. Background Randomization — prevents shortcut learning
-        if USE_BACKGROUND_RANDOMIZATION:
-            x = _randomize_background_batch_tf(x)
-
-        # 2. Geometric augmentation (flip + rotation)
-        x = flip_layer(x, training=True)
-        x = rotation_layer(x, training=True)
-
-        # 3. ColorJitter — prevents color shortcut learning
-        if USE_COLOR_JITTER:
-            x = _color_jitter_batch(
-                x,
-                brightness=COLOR_JITTER_BRIGHTNESS,
-                contrast=COLOR_JITTER_CONTRAST,
-                saturation=COLOR_JITTER_SATURATION,
-                hue=COLOR_JITTER_HUE,
-            )
-
-        # 4. GaussianBlur (probabilistic)
-        if USE_GAUSSIAN_BLUR:
-            should_blur = tf.random.uniform([]) < GAUSSIAN_BLUR_PROB
-            x = tf.cond(
-                should_blur,
-                lambda: _gaussian_blur_batch(
-                    x, GAUSSIAN_BLUR_SIGMA_MIN, GAUSSIAN_BLUR_SIGMA_MAX
-                ),
-                lambda: x,
-            )
-
-        # 5. GaussianNoise (probabilistic)
-        if USE_GAUSSIAN_NOISE:
-            should_noise = tf.random.uniform([]) < GAUSSIAN_NOISE_PROB
-            x = tf.cond(
-                should_noise,
-                lambda: _gaussian_noise_batch(x, GAUSSIAN_NOISE_SIGMA),
-                lambda: x,
-            )
-
-        # 6. RandomErasing / Cutout (probabilistic)
-        if USE_RANDOM_ERASING:
-            should_erase = tf.random.uniform([]) < RANDOM_ERASING_PROB
-            x = tf.cond(
-                should_erase,
-                lambda: _random_erasing_batch(
-                    x, RANDOM_ERASING_SCALE_MIN, RANDOM_ERASING_SCALE_MAX
-                ),
-                lambda: x,
-            )
-
-        return tf.clip_by_value(x, value_range[0], value_range[1])
-
-    return augment
-
-
-def randaugment_generator(
-    base_generator,
-    num_layers: int = 2,
-    magnitude: float = 9.0,
-    value_range: tuple[float, float] = (0.0, 255.0),
-):
-    """Apply RandAugment to each batch yielded by a numpy generator."""
-    layer = _build_randaugment_layer(
-        num_layers=int(num_layers),
-        magnitude=float(magnitude),
-        value_range=value_range,
-    )
-    while True:
-        images, labels = next(base_generator)
-        images_tf = tf.convert_to_tensor(images, dtype=tf.float32)
-        aug_images = layer(images_tf, training=True)
-        yield aug_images.numpy(), labels
-
-
-def resolve_augmentation_probabilities(
-    use_mixup: bool,
-    use_cutmix: bool,
-    mixup_prob: float,
-    cutmix_prob: float,
-    normal_prob: float,
-) -> tuple[float, float, float]:
-    """Resolve and normalize batch routing probabilities."""
-    mix = max(0.0, float(mixup_prob)) if use_mixup else 0.0
-    cut = max(0.0, float(cutmix_prob)) if use_cutmix else 0.0
-    normal = max(0.0, float(normal_prob))
+    warmup_scheduler = LinearLR(optimizer, start_factor=1e-8, end_factor=1.0, total_iters=max(1, warmup_steps))
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=min_lr)
+    return SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+
+# -----------------------------------------------------------------------------
+# Optimizers & Loss
+# -----------------------------------------------------------------------------
+
+def build_optimizer(model: nn.Module, learning_rate: float, optimizer_name: Optional[str] = None):
+    name = str(optimizer_name or OPTIMIZER or "AdamW").strip().lower()
+
+    if name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=WEIGHT_DECAY)
+    elif name == "adam":
+        return torch.optim.Adam(model.parameters(), lr=learning_rate)
+    elif name == "sgd":
+        return torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, nesterov=True)
+    elif name == "rmsprop":
+        return torch.optim.RMSprop(model.parameters(), lr=learning_rate, momentum=0.9)
+    else:
+        raise ValueError(f"Unsupported optimizer '{name}'. Expected: AdamW, Adam, SGD, RMSprop.")
+
+def build_loss(class_weight: Optional[Dict[int, float]] = None, class_names: Optional[list[str]] = None):
+    weights = None
+    if class_weight:
+        # Sort weights by class index
+        w_list = [class_weight[i] for i in range(len(class_weight))]
+        weights = torch.tensor(w_list, dtype=torch.float32)
+
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=LABEL_SMOOTHING)
+    return criterion
+
+# -----------------------------------------------------------------------------
+# Augmentation
+# -----------------------------------------------------------------------------
+
+def _build_heavy_augmentation_layer():
+    """Builds a comprehensive v2 transforms pipeline for heavy data augmentation."""
+    transforms_list = []
+
+    if USE_RANDOM_RESIZED_CROP:
+        transforms_list.append(v2.RandomResizedCrop(
+            size=(IMG_SIZE, IMG_SIZE),
+            scale=(RANDOM_CROP_SCALE_MIN, RANDOM_CROP_SCALE_MAX),
+            ratio=(RANDOM_CROP_RATIO_MIN, RANDOM_CROP_RATIO_MAX)
+        ))
+
+    transforms_list.append(v2.RandomHorizontalFlip())
+    transforms_list.append(v2.RandomRotation(degrees=27))
+
+    if USE_COLOR_JITTER:
+        transforms_list.append(v2.ColorJitter(
+            brightness=COLOR_JITTER_BRIGHTNESS,
+            contrast=COLOR_JITTER_CONTRAST,
+            saturation=COLOR_JITTER_SATURATION,
+            hue=COLOR_JITTER_HUE
+        ))
+
+    if USE_GAUSSIAN_BLUR:
+        transforms_list.append(v2.RandomApply([
+            v2.GaussianBlur(kernel_size=7, sigma=(GAUSSIAN_BLUR_SIGMA_MIN, GAUSSIAN_BLUR_SIGMA_MAX))
+        ], p=GAUSSIAN_BLUR_PROB))
+
+    if USE_RANDOM_ERASING:
+        transforms_list.append(v2.RandomErasing(
+            p=RANDOM_ERASING_PROB,
+            scale=(RANDOM_ERASING_SCALE_MIN, RANDOM_ERASING_SCALE_MAX)
+        ))
+
+    # Note: Gaussian noise can be added dynamically inside the training loop if needed.
+    return v2.Compose(transforms_list)
+
+def resolve_augmentation_probabilities(use_mixup, use_cutmix, mixup_prob, cutmix_prob, normal_prob):
+    mix = float(mixup_prob) if use_mixup else 0.0
+    cut = float(cutmix_prob) if use_cutmix else 0.0
+    normal = float(normal_prob)
     total = mix + cut + normal
     if total <= 0.0:
         return 0.0, 0.0, 1.0
     return mix / total, cut / total, normal / total
 
+def get_mixup_cutmix_transforms(use_mixup, use_cutmix, mixup_alpha, cutmix_alpha, num_classes):
+    """Returns v2.MixUp and v2.CutMix instances."""
+    mixup_transform = v2.MixUp(alpha=mixup_alpha, num_classes=num_classes) if use_mixup else None
+    cutmix_transform = v2.CutMix(alpha=cutmix_alpha, num_classes=num_classes) if use_cutmix else None
+    return mixup_transform, cutmix_transform
 
-def sample_augmentation_route(
-    use_mixup: bool,
-    use_cutmix: bool,
-    mixup_prob: float,
-    cutmix_prob: float,
-    normal_prob: float,
-) -> str:
-    """Sample one augmentation route: mixup, cutmix, or normal."""
-    mix_p, cut_p, _ = resolve_augmentation_probabilities(
-        use_mixup=use_mixup,
-        use_cutmix=use_cutmix,
-        mixup_prob=mixup_prob,
-        cutmix_prob=cutmix_prob,
-        normal_prob=normal_prob,
-    )
-    route_sample = np.random.random()
-    if route_sample < mix_p:
-        return "mixup"
-    if route_sample < (mix_p + cut_p):
-        return "cutmix"
-    return "normal"
+# -----------------------------------------------------------------------------
+# Training Callbacks
+# -----------------------------------------------------------------------------
 
+class BestModelSaver:
+    def __init__(self, model_path: str, save_mode: str = "with_optimizer", verbose: int = 1, backbone_name: str | None = None):
+        self.model_path = model_path
+        self.save_mode = save_mode
+        self.verbose = verbose
+        self.backbone_name = backbone_name
+        self.best_acc = float('-inf')
 
-def mixup_cutmix_generator(
-    base_generator,
-    mixup_alpha: float = 0.3,
-    cutmix_alpha: float = 1.0,
-    use_mixup: bool = True,
-    use_cutmix: bool = True,
-    mixup_prob: float = 0.4,
-    cutmix_prob: float = 0.4,
-    normal_prob: float = 0.2,
-):
+    def step(self, epoch: int, model: nn.Module, optimizer: torch.optim.Optimizer, acc: float):
+        if acc > self.best_acc:
+            self.best_acc = acc
+            state = {'model_state_dict': model.state_dict()}
+            if self.save_mode == "with_optimizer":
+                state['optimizer_state_dict'] = optimizer.state_dict()
 
-    while True:
-        images, labels = next(base_generator)
-        route = sample_augmentation_route(
-            use_mixup=use_mixup,
-            use_cutmix=use_cutmix,
-            mixup_prob=mixup_prob,
-            cutmix_prob=cutmix_prob,
-            normal_prob=normal_prob,
-        )
-        if route == "mixup":
-            images, labels = mixup_numpy_batch(
-                images, labels, alpha=mixup_alpha
-            )
-        elif route == "cutmix":
-            images, labels = cutmix_numpy_batch(
-                images, labels, alpha=cutmix_alpha
-            )
-        yield images, labels
+            # Save standard model
+            torch.save(state, self.model_path)
 
+            # Save an explicitly named copy with the backbone for user convenience
+            if self.backbone_name:
+                named_path = self.model_path.replace(".pt", f"_{self.backbone_name}.pt")
+                if named_path != self.model_path:
+                    torch.save(state, named_path)
 
-def mixup_batch_tf(images, labels, alpha: float = 0.2):
+            # Save no-optimizer variant if requested
+            if self.save_mode == "all" or self.save_mode == "without_optimizer":
+                no_opt_path = self.model_path.replace(".pt", "_no_optimizer.pt")
+                if no_opt_path == self.model_path:
+                    no_opt_path += "_no_opt"
+                torch.save({'model_state_dict': model.state_dict()}, no_opt_path)
 
-    import tensorflow as tf
+            if self.verbose:
+                print(f"Saved improved model at epoch {epoch + 1}: acc={acc:.6f}")
 
-    batch_size = tf.shape(images)[0]
-    if alpha <= 0:
-        return images, labels
+class OverfittingStopper:
+    def __init__(self, min_gap: float = 0.05, patience: int = 2, verbose: int = 1):
+        self.min_gap = min_gap
+        self.patience = patience
+        self.verbose = verbose
+        self.bad_epochs = 0
+        self.stop_training = False
 
-    gamma_1 = tf.random.gamma(shape=[batch_size], alpha=alpha)
-    gamma_2 = tf.random.gamma(shape=[batch_size], alpha=alpha)
-    lam = gamma_1 / (gamma_1 + gamma_2 + 1e-8)
+    def step(self, epoch: int, train_loss: float, val_loss: float, train_acc: float, val_acc: float):
+        gap = train_acc - val_acc
+        overfitting_now = (val_loss > train_loss) and (gap >= self.min_gap)
 
-    lam_x = tf.reshape(lam, [batch_size, 1, 1, 1])
-    lam_y = tf.reshape(lam, [batch_size, 1])
+        if overfitting_now:
+            self.bad_epochs += 1
+            if self.verbose:
+                print(f"Overfitting signal: epoch={epoch + 1}, gap={gap:.4f} ({self.bad_epochs}/{self.patience})")
+            if self.bad_epochs >= self.patience:
+                self.stop_training = True
+        else:
+            self.bad_epochs = 0
 
-    indices = tf.random.shuffle(tf.range(batch_size))
-    mixed_images = images * lam_x + tf.gather(images, indices) * (1.0 - lam_x)
-    mixed_labels = labels * lam_y + tf.gather(labels, indices) * (1.0 - lam_y)
-    return mixed_images, mixed_labels
+class RollingPreOverfitRestorer:
+    def __init__(self, min_gap: float = 0.0, patience: int = 1, snapshot_count: int = 10, snapshot_dir: str = "snapshots", strict: bool = True, verbose: int = 1):
+        self.min_gap = min_gap
+        self.patience = patience
+        self.snapshot_count = max(1, snapshot_count)
+        self.strict = strict
+        self.verbose = verbose
+        self.bad_epochs = 0
+        self.stop_training = False
 
+        self.snapshot_dir = Path(snapshot_dir)
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self.safe_snapshots: list[Path] = []
+        self.best_snapshot_path = self.snapshot_dir / "best_safe.pt"
+        self.best_snapshot_metric = float("-inf")
+        self.initial_snapshot_path = self.snapshot_dir / "initial_safe.pt"
 
-# Optimiser
+    def on_train_begin(self, model: nn.Module):
+        torch.save(model.state_dict(), self.initial_snapshot_path)
 
+    def step(self, epoch: int, model: nn.Module, train_loss: float, val_loss: float, train_acc: float, val_acc: float):
+        gap = train_acc - val_acc
+        loss_overfit = val_loss > train_loss
+        gap_overfit = gap > self.min_gap
 
-def _build_adamw_kwargs(learning_rate):
+        if self.strict:
+            overfitting_now = loss_overfit or gap_overfit
+        else:
+            overfitting_now = loss_overfit and gap_overfit
 
-    optimizer_kwargs = {
-        "learning_rate": learning_rate,
-        "weight_decay": WEIGHT_DECAY,
-        "clipnorm": 1.0,
-        "use_ema": USE_OPTIMIZER_EMA,
-        "ema_momentum": EMA_MOMENTUM,
-    }
+        if overfitting_now:
+            self.bad_epochs += 1
+            if self.verbose:
+                print(f"Rolling restore monitor: gap={gap:.4f} ({self.bad_epochs}/{self.patience})")
 
-    accumulation = int(ACCUMULATION_STEPS)
-    if (
-        accumulation > 1
-        and "gradient_accumulation_steps"
-        in inspect.signature(keras.optimizers.AdamW).parameters
-    ):
-        optimizer_kwargs["gradient_accumulation_steps"] = accumulation
-        effective_bs = BATCH_SIZE * accumulation
-        print(
-            f"Gradient accumulation enabled: steps={accumulation}, "
-            f"effective_batch_size={effective_bs}"
-        )
-    else:
-        # If explicitly 1, we omit it to avoid keras validation errors
-        # If not supported by the keras version, it is also omitted
-        pass
+            if self.bad_epochs >= self.patience:
+                # Restore best safe model
+                if self.best_snapshot_metric != float("-inf"):
+                    model.load_state_dict(torch.load(self.best_snapshot_path, weights_only=True))
+                    if self.verbose:
+                        print("Stopping training: Restored best safe weights.")
+                else:
+                    model.load_state_dict(torch.load(self.initial_snapshot_path, weights_only=True))
+                    if self.verbose:
+                        print("Stopping training: Restored initial weights.")
+                self.stop_training = True
+                return True # Indicates restored
+        else:
+            self.bad_epochs = 0
+            # Save safe snapshot
+            snapshot_path = self.snapshot_dir / f"safe_epoch_{epoch+1}.pt"
+            torch.save(model.state_dict(), snapshot_path)
+            self.safe_snapshots.append(snapshot_path)
 
-    return optimizer_kwargs
+            if val_acc >= self.best_snapshot_metric:
+                torch.save(model.state_dict(), self.best_snapshot_path)
+                self.best_snapshot_metric = val_acc
 
+            if len(self.safe_snapshots) > self.snapshot_count:
+                oldest = self.safe_snapshots.pop(0)
+                if oldest.exists():
+                    oldest.unlink()
+        return False
 
-def build_adamw_optimizer(learning_rate):
-    configured = str(OPTIMIZER or "AdamW").strip().lower()
-    if configured != "adamw":
-        raise ValueError(
-            f"Unsupported OPTIMIZER '{OPTIMIZER}'. Expected 'AdamW'."
-        )
-
-    optimizer_kwargs = _build_adamw_kwargs(learning_rate)
-
-    if USE_OPTIMIZER_EMA:
-        print(f"AdamW EMA enabled (momentum={EMA_MOMENTUM}).")
-    print(f"AdamW weight_decay={WEIGHT_DECAY}.")
-    return keras.optimizers.AdamW(**optimizer_kwargs)
-
-
-def build_optimizer(learning_rate, optimizer_name: Optional[str] = None):
-    name = str(optimizer_name or OPTIMIZER or "AdamW").strip().lower()
-
-    if name == "adamw":
-        optimizer_kwargs = _build_adamw_kwargs(learning_rate)
-        if USE_OPTIMIZER_EMA:
-            print(f"AdamW EMA enabled (momentum={EMA_MOMENTUM}).")
-        print(f"AdamW weight_decay={WEIGHT_DECAY}.")
-        return keras.optimizers.AdamW(**optimizer_kwargs)
-
-    if name == "adam":
-        if USE_OPTIMIZER_EMA:
-            print(
-                "Optimizer EMA is only applied for AdamW; skipping for Adam."
-            )
-        print("Using Adam optimizer.")
-        return keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
-
-    if name == "sgd":
-        if USE_OPTIMIZER_EMA:
-            print("Optimizer EMA is only applied for AdamW; skipping for SGD.")
-        print("Using SGD optimizer (momentum=0.9, nesterov=True).")
-        return keras.optimizers.SGD(
-            learning_rate=learning_rate,
-            momentum=0.9,
-            nesterov=True,
-            clipnorm=1.0,
-        )
-
-    if name == "rmsprop":
-        if USE_OPTIMIZER_EMA:
-            print(
-                "Optimizer EMA is only applied for AdamW; skipping for RMSprop."
-            )
-        print("Using RMSprop optimizer (momentum=0.9).")
-        return keras.optimizers.RMSprop(
-            learning_rate=learning_rate,
-            momentum=0.9,
-            clipnorm=1.0,
-        )
-
-    raise ValueError(
-        "Unsupported optimizer "
-        f"'{optimizer_name}'. Expected one of: AdamW, Adam, SGD, RMSprop."
-    )
-
-
-# Misc helpers
-
-
-def resolve_step_count(
-    config_steps: int, total_samples: int, batch_size: int
-) -> int:
-
-    total_batches = max(1, math.ceil(float(total_samples) / float(batch_size)))
-    if int(config_steps) <= 0:
-        return total_batches
-    return min(int(config_steps), total_batches)
-
-
-def tensorboard_available() -> bool:
-
-    import importlib.util
-
-    return importlib.util.find_spec("tensorboard") is not None
-
+# -----------------------------------------------------------------------------
+# Family Deviation Classifier
+# -----------------------------------------------------------------------------
 
 def parse_class_structure(class_names: list[str]) -> list[int]:
-    """Identify healthy baseline class mapping for family-based learning.
-
-    For each class index, returns the index of its family's healthy baseline
-    class, or -1 if the family has no healthy baseline or if the class
-    itself is healthy.
-    """
     family_of_class = []
     healthy_class_of_family = {}
-
-    # First pass: map classes to families and find healthy class for family
     for idx, name in enumerate(class_names):
         if "___" in name:
             family, subclass = name.split("___", 1)
         else:
             family = name.split()[0]
             subclass = name
-
         family_of_class.append(family)
         if "healthy" in subclass.lower():
             healthy_class_of_family[family] = idx
 
-    # Second pass: map each class to its healthy partner index
     healthy_partner_indices = []
     for idx, name in enumerate(class_names):
         family = family_of_class[idx]
         partner_idx = healthy_class_of_family.get(family, -1)
         if partner_idx == idx:
-            # The class itself is the healthy baseline
             healthy_partner_indices.append(-1)
         else:
             healthy_partner_indices.append(partner_idx)
-
     return healthy_partner_indices
 
-
-@register_keras_serializable(package="training_utils")
-class FamilyDeviationClassifier(keras.layers.Layer):
-    """Custom classifier head that models disease classes as deviations.
-
-    Logits of diseased classes are calculated as: healthy baseline logit +
-    learned deviation score.
-    """
-
-    def __init__(
-        self, num_classes: int, healthy_partners: list[int], **kwargs
-    ):
-        super().__init__(**kwargs)
+class FamilyDeviationClassifier(nn.Module):
+    def __init__(self, num_features: int, num_classes: int, healthy_partners: list[int]):
+        super().__init__()
         self.num_classes = num_classes
         self.healthy_partners = list(healthy_partners)
 
-    def build(self, input_shape):
-        feature_dim = input_shape[-1]
-        self.kernel = self.add_weight(
-            shape=(feature_dim, self.num_classes),
-            initializer="glorot_uniform",
-            trainable=True,
-            name="kernel",
-        )
-        self.bias = self.add_weight(
-            shape=(self.num_classes,),
-            initializer="zeros",
-            trainable=True,
-            name="bias",
-        )
-        super().build(input_shape)
+        self.fc = nn.Linear(num_features, num_classes)
 
-    def call(self, inputs):
-        # inputs shape: (batch_size, feature_dim)
-        raw_logits = keras.ops.matmul(inputs, self.kernel) + self.bias
-
-        # Vectorized mapping: gather healthy partner logits for each class
-        gather_indices = [
-            idx if idx != -1 else 0 for idx in self.healthy_partners
-        ]
+        gather_indices = [idx if idx != -1 else 0 for idx in self.healthy_partners]
         mask = [1.0 if idx != -1 else 0.0 for idx in self.healthy_partners]
 
-        # Convert to tensors
-        gather_indices = keras.ops.convert_to_tensor(
-            gather_indices, dtype="int32"
-        )
-        mask = keras.ops.convert_to_tensor(mask, dtype=raw_logits.dtype)
+        self.register_buffer("gather_indices", torch.tensor(gather_indices, dtype=torch.long))
+        self.register_buffer("mask", torch.tensor(mask, dtype=torch.float32))
 
-        # Gather partner logits: shape (batch_size, num_classes)
-        partner_logits = keras.ops.take(raw_logits, gather_indices, axis=-1)
-
-        # Add partner logits to raw logits for disease classes
-        logits = raw_logits + partner_logits * mask
+    def forward(self, x):
+        raw_logits = self.fc(x)
+        partner_logits = raw_logits[:, self.gather_indices]
+        logits = raw_logits + partner_logits * self.mask
         return logits
 
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], self.num_classes)
+# -----------------------------------------------------------------------------
+# Dataset
+# -----------------------------------------------------------------------------
 
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "num_classes": self.num_classes,
-                "healthy_partners": self.healthy_partners,
-            }
-        )
-        return config
+import cv2
 
 
-class GradCamEpochCollageCallback(keras.callbacks.Callback):
-    """Custom Keras callback to generate and save a Grad-CAM collage after each epoch."""
+class LeafYOLODataset(torch.utils.data.Dataset):
+    def __init__(self, filepaths, labels, num_classes, use_yolo=True, transform=None):
+        self.filepaths = filepaths
+        self.labels = labels
+        self.num_classes = num_classes
+        self.use_yolo = use_yolo
+        self.transform = transform
+        self.detector = None
 
-    def __init__(
-        self,
-        val_dir: str,
-        class_names: list[str],
-        output_dir: str = "plots/gradcam_epochs",
-        backbone_name: str = "DINOv3",
-    ):
-        super().__init__()
-        self.val_dir = val_dir
-        self.class_names = class_names
-        self.output_dir = output_dir
-        self.backbone_name = backbone_name
-        self.representative_samples = []
+    def __len__(self):
+        return len(self.filepaths)
 
-    def on_train_begin(self, logs=None):
-        import os
-        import random
+    def __getitem__(self, idx):
+        if self.use_yolo and self.detector is None:
+            # Lazy init to avoid multiprocessing issues
+            from src.core.yolo_leaf import YOLOLeafDetector
+            self.detector = YOLOLeafDetector()
 
-        from tensorflow.keras.utils import img_to_array, load_img
+        path = self.filepaths[idx]
+        label = self.labels[idx]
 
-        from src.core.preprocessing import preprocess_array_for_model
+        img_bgr = cv2.imread(path)
+        if img_bgr is None:
+            img_bgr = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
 
-        print(
-            "\n[GradCamEpochCollageCallback] Preparing representative "
-            "validation images for Grad-CAM collage..."
-        )
+        if self.use_yolo:
+            assert self.detector is not None
+            focus_mask = self.detector.get_focus_mask(img_bgr)
+            focus_mask = cv2.resize(focus_mask, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_NEAREST)
+            if len(focus_mask.shape) == 2:
+                focus_mask = np.expand_dims(focus_mask, axis=-1)
+        else:
+            focus_mask = np.ones((IMG_SIZE, IMG_SIZE, 1), dtype=np.float32)
 
-        self.representative_samples = []
-        for class_name in self.class_names:
-            class_path = os.path.join(self.val_dir, class_name)
-            if not os.path.isdir(class_path):
-                # Fallback to case insensitive match
-                found_dir = None
-                if os.path.exists(self.val_dir):
-                    for d in os.listdir(self.val_dir):
-                        cleaned_d = d.lower().replace("_", "").replace(",", "")
-                        cleaned_cls = (
-                            class_name.lower()
-                            .replace("_", "")
-                            .replace(",", "")
-                        )
-                        if cleaned_d == cleaned_cls:
-                            found_dir = os.path.join(self.val_dir, d)
-                            break
-                if found_dir:
-                    class_path = found_dir
-                else:
-                    print(
-                        f"Warning: Directory not found for class: {class_name}"
-                    )
-                    continue
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE))
 
-            # Get all images in directory
-            fnames = [
-                f
-                for f in os.listdir(class_path)
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
-            ]
-            if not fnames:
-                continue
+        image_tensor = torch.from_numpy(img_resized.transpose((2, 0, 1))).contiguous().float() / 255.0
+        mask_tensor = torch.from_numpy(focus_mask.transpose((2, 0, 1))).contiguous().float()
 
-            # Select one image randomly
-            fname = random.choice(fnames)
-            img_path = os.path.join(class_path, fname)
+        if self.transform:
+            image_tensor = self.transform(image_tensor)
 
-            try:
-                # Load and preprocess
-                img = load_img(img_path, target_size=(224, 224))
-                img_array = img_to_array(img)
-                preprocessed = preprocess_array_for_model(
-                    img_array[np.newaxis, ...],
-                    backbone_name=self.backbone_name,
-                )
-                self.representative_samples.append(
-                    {
-                        "class_name": class_name,
-                        "img_path": img_path,
-                        "original_img": img_array,
-                        "preprocessed": preprocessed,
-                    }
-                )
-            except Exception as e:
-                print(
-                    f"Warning: Failed to load image {img_path} for "
-                    f"collage: {e}"
-                )
-
-        print(
-            f"[GradCamEpochCollageCallback] Loaded "
-            f"{len(self.representative_samples)} validation samples "
-            f"for collage."
-        )
-
-    def on_epoch_end(self, epoch, logs=None):
-        if not self.representative_samples:
-            return
-
-        import os
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-
-        from scripts.gradcam_check import (
-            _make_gradcam_heatmap,
-            _overlay_heatmap,
-        )
-
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        # Dynamically size the grid based on number of samples
-        cols = 8
-        rows = int(np.ceil(len(self.representative_samples) / cols))
-        fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
-        fig.suptitle(
-            f"Grad-CAM Epoch Collage - Epoch {epoch + 1}",
-            fontsize=24,
-            y=0.98,
-        )
-
-        target_layer_name = None
-
-        # Generate overlays
-        for idx, sample in enumerate(self.representative_samples):
-            r = idx // cols
-            c = idx % cols
-            ax = axes[r, c]
-
-            class_name = sample["class_name"]
-            preprocessed = sample["preprocessed"]
-            original_img = sample["original_img"]
-
-            try:
-                # Get predictions
-                preds = self.model.predict(preprocessed, verbose=0)
-                if isinstance(preds, dict):
-                    disease_preds = preds["disease_output"]
-                else:
-                    disease_preds = preds
-
-                pred_idx = int(np.argmax(disease_preds[0]))
-                pred_label = self.class_names[pred_idx]
-                pred_conf = float(disease_preds[0][pred_idx])
-
-                # Generate Grad-CAM for the predicted class
-                crop_heatmap, disease_heatmap = _make_gradcam_heatmap(
-                    model=self.model,
-                    img_array=preprocessed,
-                    target_layer_name=target_layer_name,
-                    pred_index=pred_idx,
-                    backbone_name=self.backbone_name,
-                    vit_block_idx=6,
-                )
-
-                # Overlay crop and disease separately
-                overlay1 = _overlay_heatmap(
-                    original_img, crop_heatmap, alpha=0.3, colormap="viridis"
-                )
-                overlay = _overlay_heatmap(
-                    overlay1, disease_heatmap, alpha=0.5, colormap="jet"
-                )
-
-                # Display image
-                ax.imshow(overlay)
-
-                # Add title
-                lbl_pred = pred_label.lower().replace("_", "").replace(",", "")
-                lbl_true = class_name.lower().replace("_", "").replace(",", "")
-                is_correct = lbl_pred == lbl_true
-                color = "green" if is_correct else "red"
-                short_true = class_name.split("___")[-1][:12]
-                short_pred = pred_label.split("___")[-1][:12]
-                ax.set_title(
-                    f"T: {short_true}\nP: {short_pred} ({pred_conf:.2f})",
-                    fontsize=8,
-                    color=color,
-                )
-            except Exception:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "Failed",
-                    ha="center",
-                    va="center",
-                    color="red",
-                )
-                ax.set_title(f"Err: {class_name[:12]}", fontsize=8)
-
-            ax.axis("off")
-
-        # Hide any unused subplots
-        for idx in range(len(self.representative_samples), rows * cols):
-            r = idx // cols
-            c = idx % cols
-            axes[r, c].axis("off")
-
-        plt.tight_layout()
-        collage_path = os.path.join(
-            self.output_dir, f"epoch_{epoch + 1:03d}.png"
-        )
-        plt.savefig(collage_path, dpi=100, bbox_inches="tight")
-        plt.close(fig)
-
-        print(
-            f"\n[GradCamEpochCollageCallback] Saved Grad-CAM collage "
-            f"to: {collage_path}"
-        )
-
-
-_yolo_leaf_detector = None
-
-
-def _dynamic_yolo_focus(path_tensor):
-    """Load original image and extract leaf focus mask via YOLO (no background removal)."""
-    global _yolo_leaf_detector
-    if _yolo_leaf_detector is None:
-        from src.core.yolo_leaf import YOLOLeafDetector
-        _yolo_leaf_detector = YOLOLeafDetector()
-
-    path_str = path_tensor.numpy().decode("utf-8")
-    import cv2
-    img_bgr = cv2.imread(path_str)
-    if img_bgr is None:
-        return (
-            np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32),
-            np.ones((IMG_SIZE, IMG_SIZE, 1), dtype=np.float32),
-        )
-
-    # 1. Focus mask (on original image resolution, then resized)
-    focus_mask = _yolo_leaf_detector.get_focus_mask(img_bgr)
-    mask_resized = cv2.resize(
-        focus_mask, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_NEAREST
-    )
-    if len(mask_resized.shape) == 2:
-        mask_resized = np.expand_dims(mask_resized, axis=-1)
-
-    # 2. Original RGB image resized
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    img_resized = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE))
-
-    return img_resized.astype(np.float32), mask_resized.astype(np.float32)
-
-
-def dynamic_yolo_focus_tf(path):
-    """Wrap dynamic YOLO focus mask in tf.py_function."""
-    img_tensor, mask_tensor = tf.py_function(
-        func=_dynamic_yolo_focus,
-        inp=[path],
-        Tout=[tf.float32, tf.float32]
-    )
-    img_tensor.set_shape((IMG_SIZE, IMG_SIZE, 3))
-    mask_tensor.set_shape((IMG_SIZE, IMG_SIZE, 1))
-    return img_tensor, mask_tensor
-
+        return image_tensor, mask_tensor, label
 
 def collect_dataset_files(dir_path: str | Path, class_names: list[str]) -> tuple[list[str], list[int]]:
-    """Scan directory for category images."""
     dir_path = Path(dir_path)
     class_to_idx = {name: idx for idx, name in enumerate(class_names)}
     filepaths = []
@@ -1821,38 +363,50 @@ def collect_dataset_files(dir_path: str | Path, class_names: list[str]) -> tuple
             continue
         idx = class_to_idx[category_name]
         for entry in os.scandir(category_dir):
-            if entry.is_file() and entry.name.lower().endswith(('.jpg', '.jpeg', '.png')):
+            if entry.is_file() and entry.name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 filepaths.append(entry.path)
                 labels.append(idx)
     return filepaths, labels
-
 
 def build_dynamic_yolo_dataset(
     dir_path: str | Path,
     class_names: list[str],
     batch_size: int,
     shuffle: bool,
-    seed: int | None = None,
-) -> tf.data.Dataset:
-    """Build dataset with dynamic YOLOv26 leaf focus attention."""
+    seed: Optional[int] = None,
+    use_yolo: bool = True,
+    transform=None,
+    num_workers: int = 0,
+    drop_last: bool = False,
+    fraction: float = 1.0
+):
     filepaths, labels = collect_dataset_files(dir_path, class_names)
-    ds = tf.data.Dataset.from_tensor_slices((filepaths, labels))
-    if shuffle:
-        ds = ds.shuffle(
-            buffer_size=max(1, min(len(filepaths), 20000)),
-            seed=seed,
-            reshuffle_each_iteration=True,
-        )
 
-    num_classes = len(class_names)
+    if fraction < 1.0:
+        combined = list(zip(filepaths, labels))
+        rng = random.Random(seed if seed is not None else 42)
+        rng.shuffle(combined)
+        limit = max(1, int(len(combined) * fraction))
+        combined = combined[:limit]
+        if not combined:
+            filepaths, labels = [], []
+        else:
+            filepaths_t, labels_t = zip(*combined)
+            filepaths, labels = list(filepaths_t), list(labels_t)
 
-    def _decode_and_yolo_focus(path, label):
-        image_tensor, yolo_mask = dynamic_yolo_focus_tf(path)
-        one_hot = tf.one_hot(tf.cast(label, tf.int32), depth=num_classes)
-        one_hot = tf.cast(one_hot, tf.float32)
-        return (image_tensor, yolo_mask), one_hot
+    dataset = LeafYOLODataset(filepaths, labels, len(class_names), use_yolo=use_yolo, transform=transform)
 
-    ds = ds.map(_decode_and_yolo_focus, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size)
-    return ds
+    generator = None
+    if seed is not None:
+        generator = torch.Generator().manual_seed(seed)
 
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=False,
+        generator=generator,
+        drop_last=drop_last
+    )
+    return loader

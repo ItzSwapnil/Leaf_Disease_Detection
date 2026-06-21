@@ -1,0 +1,62 @@
+Traceback (most recent call last):
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/test_keras_torch.py", line 3, in <module>
+    import keras
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/__init__.py", line 7, in <module>
+    from keras import _tf_keras as _tf_keras
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/_tf_keras/__init__.py", line 1, in <module>
+    from keras._tf_keras import keras
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/_tf_keras/keras/__init__.py", line 7, in <module>
+    from keras import activations as activations
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/activations/__init__.py", line 7, in <module>
+    from keras.src.activations import deserialize as deserialize
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/src/__init__.py", line 1, in <module>
+    from keras.src import activations
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/src/activations/__init__.py", line 3, in <module>
+    from keras.src.activations.activations import celu
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/src/activations/activations.py", line 1, in <module>
+    from keras.src import backend
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/src/backend/__init__.py", line 44, in <module>
+    from keras.src.backend.torch import *  # noqa: F403
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/src/backend/torch/__init__.py", line 19, in <module>
+    from keras.src.backend.torch import image
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/keras/src/backend/torch/image.py", line 7, in <module>
+    import torch._dynamo as dynamo
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/_dynamo/__init__.py", line 13, in <module>
+    from . import (
+    ...<7 lines>...
+    )
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/_dynamo/aot_compile.py", line 17, in <module>
+    from torch._dynamo.convert_frame import GraphRuntimeEnv
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/_dynamo/convert_frame.py", line 62, in <module>
+    from torch._dynamo.symbolic_convert import TensorifyState
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/_dynamo/symbolic_convert.py", line 54, in <module>
+    from torch._dynamo.exc import ObservedException, TensorifyScalarRestartAnalysis
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/_dynamo/exc.py", line 44, in <module>
+    from .utils import counters
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/_dynamo/utils.py", line 68, in <module>
+    import torch.fx.experimental.symbolic_shapes
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/torch/fx/experimental/symbolic_shapes.py", line 3, in <module>
+    import sympy
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/sympy/__init__.py", line 77, in <module>
+    from .polys import (Poly, PurePoly, poly_from_expr, parallel_poly_from_expr,
+    ...<31 lines>...
+            Options, ring, xring, vring, sring, field, xfield, vfield, sfield)
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/sympy/polys/__init__.py", line 94, in <module>
+    from .numberfields import (minpoly, minimal_polynomial, primitive_element,
+            field_isomorphism, to_number_field, isolate, round_two, prime_decomp,
+            prime_valuation, galois_group)
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/sympy/polys/numberfields/__init__.py", line 21, in <module>
+    from .utilities import isolate
+  File "/mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/.venv/lib/python3.14/site-packages/sympy/polys/numberfields/utilities.py", line 7, in <module>
+    from sympy.polys.matrices.exceptions import DMRankError
+  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1333, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 1267, in _find_spec
+  File "<frozen importlib._bootstrap_external>", line 1292, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 1266, in _get_spec
+  File "<frozen importlib._bootstrap_external>", line 1384, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 166, in _path_isfile
+  File "<frozen importlib._bootstrap_external>", line 158, in _path_is_mode_type
+  File "<frozen importlib._bootstrap_external>", line 152, in _path_stat
+KeyboardInterrupt

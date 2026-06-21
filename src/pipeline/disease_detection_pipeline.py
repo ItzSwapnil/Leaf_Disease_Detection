@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.core.yolo_leaf import YOLOLeafDetector
 
 import cv2
 import numpy as np
-import tensorflow as tf
+import torch
 from PIL import Image
+from torchvision.transforms import v2
 
 from src.core.inference_guard import (
     compute_prediction_diagnostics,
@@ -23,7 +27,6 @@ from src.core.inference_guard import (
 )
 from src.core.leaf_detector import detect_leaf_presence
 from src.core.leaf_detector_model import create_leaf_detector
-from src.core.preprocessing import get_preprocessing_fn
 from src.utils.config import (
     CHECKPOINT_PATH,
     CLASS_INDICES_PATH,
@@ -33,7 +36,7 @@ from src.utils.config import (
     OOD_MSP_THRESHOLD,
     USE_YOLO_LEAF_DETECTION,
 )
-from src.utils.model_paths import resolve_keras_model_path
+from src.utils.model_paths import resolve_pytorch_model_path
 
 
 def _extract_disease_output(outputs):
@@ -51,11 +54,9 @@ class LeafDiseasePipeline:
     """Multi-stage pipeline for leaf disease detection."""
 
     def __init__(self, model_paths: list[str] | str | None = None):
-        """Initialize pipeline with disease classifiers and leaf detector.
-
-        Supports ensembling if multiple model paths are provided.
-        """
+        from src.pipeline.predict import _load_model_robust
         from src.utils.config import ENSEMBLE_MODEL_PATHS
+        from src.utils.hardware import get_device
 
         if not model_paths and ENSEMBLE_MODEL_PATHS:
             model_paths = ENSEMBLE_MODEL_PATHS
@@ -64,28 +65,22 @@ class LeafDiseasePipeline:
         elif not model_paths:
             model_paths = [CHECKPOINT_PATH]
 
-        from tensorflow.keras.models import load_model
-
+        self.device = get_device()
         self.models = []
         for path in model_paths:
-            resolved_path = resolve_keras_model_path([path] if path else None)
-            self.models.append(load_model(resolved_path, compile=False))
+            resolved_path = resolve_pytorch_model_path([path] if path else None)
+            model, b_name = _load_model_robust(resolved_path)
+            self.models.append(model)
 
         self._load_class_indices()
-        # Auto-detect backbone of first model to select correct preprocessing
-        detected_backbone = "EfficientNetV2B0"
-        if self.models:
-            first_model = self.models[0]
-            for layer in getattr(first_model, "layers", []):
-                layer_name = (getattr(layer, "name", "") or "").lower()
-                if any(
-                    tok in layer_name for tok in ["vit", "dino", "transformer"]
-                ):
-                    detected_backbone = "DINOv3"
-                    break
-        self.preprocessing_fn = get_preprocessing_fn(detected_backbone)
 
-        # Try to load trained leaf detector; fallback to heuristic
+        self.transform = v2.Compose([
+            v2.Resize((IMG_SIZE, IMG_SIZE)),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
         self.leaf_detector = None
         try:
             self.leaf_detector = create_leaf_detector()
@@ -96,13 +91,11 @@ class LeafDiseasePipeline:
                 "Using heuristic instead. Run: python train_leaf_detector.py"
             )
 
-        # YOLO focus detection is intentionally lazy. Importing Ultralytics can
-        # initialize Torch/Triton, which is unnecessary for classifier startup.
         self.use_yolo = USE_YOLO_LEAF_DETECTION and (
             os.getenv("LEAF_PIPELINE_YOLO_FOCUS", "0").strip().lower()
             in {"1", "true", "yes", "on"}
         )
-        self.yolo_leaf_detector = None
+        self.yolo_leaf_detector: YOLOLeafDetector | None = None
 
     def _get_yolo_leaf_detector(self):
         """Return a lazily initialized YOLO focus detector, if available."""
@@ -120,7 +113,6 @@ class LeafDiseasePipeline:
         return self.yolo_leaf_detector
 
     def _load_class_indices(self) -> None:
-        """Load class name mapping."""
         from pathlib import Path
 
         if Path(CLASS_INDICES_PATH).exists():
@@ -136,31 +128,15 @@ class LeafDiseasePipeline:
                         int(v): str(k) for k, v in indices_dict.items()
                     }
         else:
-            # Fallback: numeric class names
             self.class_names = {i: f"Class_{i}" for i in range(46)}
 
     def stage_1_detect_leaf(self, img_path: str) -> dict[str, Any]:
-        """
-        Stage 1: Detect if the image contains a valid leaf.
-
-        Uses trained model if available, otherwise falls back to heuristic.
-
-        Returns:
-            dict with is_leaf (bool), leaf_score, reason
-        """
         if self.leaf_detector is not None:
             return self.leaf_detector.predict(img_path)
 
         return detect_leaf_presence(img_path, img_size=IMG_SIZE)
 
     def stage_2_remove_background(self, img_path: str) -> dict[str, Any]:
-        """
-        Stage 2: Load original image and compute the YOLO focus bounding box.
-
-        The method name and return keys remain for compatibility with older
-        callers. ``preprocessed_image`` is the untouched resized RGB image, and
-        ``crop_bbox`` is only a focus/review bounding box.
-        """
         try:
             with Image.open(img_path) as img:
                 img_resized = img.convert("RGB").resize((IMG_SIZE, IMG_SIZE))
@@ -179,7 +155,7 @@ class LeafDiseasePipeline:
                         reason = f"YOLOv26 leaf focus detected bbox: {crop_bbox}"
 
             return {
-                "preprocessed_image": img_array,
+                "preprocessed_image": img_path, # Changed to return path for transform
                 "crop_bbox": crop_bbox,
                 "mask": None,
                 "segmentation_ratio": 1.0,
@@ -194,56 +170,23 @@ class LeafDiseasePipeline:
                 "reason": f"Failed to load image: {exc}",
             }
 
+    @torch.no_grad()
     def stage_3_classify_leaf(
-        self, img_array: np.ndarray
+        self, img_path: str
     ) -> tuple[str, float, dict[str, Any]]:
-        """
-        Stage 3: Classify leaf into one of 46 disease classes.
+        img = Image.open(img_path).convert("RGB")
+        tensor = self.transform(img).unsqueeze(0).to(self.device)
 
-        Returns:
-            tuple: (predicted_class_name, confidence, diagnostics_dict)
-        """
-        # Preprocess input
-        if img_array.dtype != np.float32:
-            img_array = img_array.astype(np.float32)
-        if img_array.max() > 1.0:
-            img_array = img_array / 255.0
-
-        # Ensure correct shape
-        if img_array.shape != (IMG_SIZE, IMG_SIZE, 3):
-            if len(img_array.shape) == 2:
-                img_array = np.repeat(img_array[:, :, None], 3, axis=2)
-            if (
-                img_array.shape[0] != IMG_SIZE
-                or img_array.shape[1] != IMG_SIZE
-            ):
-                img_array = (
-                    np.asarray(
-                        Image.fromarray(
-                            (img_array * 255).astype(np.uint8)
-                        ).resize((IMG_SIZE, IMG_SIZE)),
-                        dtype=np.float32,
-                    )
-                    / 255.0
-                )
-
-        # Apply preprocessing
-        img_processed = self.preprocessing_fn(img_array[None, ...])
-
-        # Predict
         if len(self.models) > 1:
             all_probs = []
             for m in self.models:
-                logits = m(img_processed, training=False)
-                logits = _extract_disease_output(logits)
-                all_probs.append(tf.nn.softmax(logits, axis=-1).numpy()[0])
+                logits = _extract_disease_output(m(tensor))
+                all_probs.append(torch.softmax(logits, dim=-1).cpu().numpy()[0])
             probs = np.mean(all_probs, axis=0)
         else:
-            logits = self.models[0](img_processed, training=False)
-            logits = _extract_disease_output(logits)
-            probs = tf.nn.softmax(logits, axis=-1).numpy()[0]
+            logits = _extract_disease_output(self.models[0](tensor))
+            probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
 
-        # Diagnostics
         predicted_idx = int(np.argmax(probs))
         predicted_class = self.class_names.get(
             predicted_idx, f"Class_{predicted_idx}"
@@ -255,13 +198,6 @@ class LeafDiseasePipeline:
         return predicted_class, confidence, diagnostics
 
     def stage_4_disease_analysis(self, class_name: str) -> dict[str, Any]:
-        """
-        Stage 4: Provide disease-specific insights.
-
-        Returns:
-            dict with disease_info, treatment, prevention, etc.
-        """
-        # Parse class name to extract plant and disease
         parts = class_name.split("___")
         plant = parts[0] if parts else "Unknown"
         disease = parts[1] if len(parts) > 1 else "Unknown"
@@ -277,14 +213,7 @@ class LeafDiseasePipeline:
         img_path: str,
         skip_safety_check: bool = False,
     ) -> dict[str, Any]:
-        """
-        Execute full multi-stage pipeline on an image.
-
-        Returns:
-            dict with pipeline_stages (list), final_prediction,
-            rejection details, etc.
-        """
-        pipeline_stages = []
+        pipeline_stages: list[tuple[str, Any]] = []
 
         # Stage 1: Leaf Detection
         leaf_detection = self.stage_1_detect_leaf(img_path)
@@ -326,7 +255,6 @@ class LeafDiseasePipeline:
         # Stage 4: Disease Analysis
         disease_info = self.stage_4_disease_analysis(class_name)
 
-        # Final safety check
         if not skip_safety_check:
             safety = evaluate_inference_safety(
                 diagnostics=diagnostics,
@@ -364,7 +292,5 @@ class LeafDiseasePipeline:
             "rejected": False,
         }
 
-
 def create_pipeline(model_path: str | None = None) -> LeafDiseasePipeline:
-    """Create a new pipeline instance."""
     return LeafDiseasePipeline(model_path)

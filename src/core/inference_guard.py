@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 from PIL import Image
+
+
+class SafetyEvaluation(TypedDict):
+    reject: bool
+    reasons: list[str]
+    appears_non_leaf: bool
+    weak_leaf_signal: bool
+    uncertainty_score: int
+    flags: dict[str, bool]
 
 
 def assess_leaf_likelihood(img_path: str, img_size: int) -> dict[str, Any]:
@@ -136,7 +145,7 @@ def evaluate_inference_safety(
     non_leaf_leaf_score: float = 0.18,
     weak_leaf_score: float = 0.30,
     min_vegetation_ratio: float = 0.05,
-) -> dict[str, Any]:
+) -> SafetyEvaluation:
     """Decide whether to reject an inference result as low-trust/OOD."""
     top1_prob = diagnostics.get("top1_prob", 0.0)
     margin = diagnostics.get("confidence_margin", 0.0)

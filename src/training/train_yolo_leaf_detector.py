@@ -10,6 +10,11 @@ import shutil
 import sys
 from pathlib import Path
 
+# Add project root to sys.path to support running directly as a script
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 import cv2
 
 from src.core.leaf_segmentation import segment_leaf

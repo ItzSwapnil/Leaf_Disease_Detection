@@ -1204,6 +1204,164 @@
         .work-btn.secondary:hover {
             background: rgba(255, 255, 255, 0.12);
         }
+
+        /* Advanced Settings Accordion */
+        .advanced-accordion {
+            margin-top: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            overflow: hidden;
+        }
+
+        .accordion-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px;
+            background: rgba(15, 23, 42, 0.55);
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s ease;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .accordion-header:hover {
+            background: rgba(15, 23, 42, 0.75);
+        }
+
+        .accordion-header h4 {
+            font-size: 1rem;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .accordion-header .chevron {
+            transition: transform 0.3s ease;
+            color: #94a3b8;
+            font-size: 0.85rem;
+        }
+
+        .accordion-header.open .chevron {
+            transform: rotate(180deg);
+        }
+
+        .accordion-body {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.4s ease;
+            background: rgba(15, 23, 42, 0.3);
+        }
+
+        .accordion-body.open {
+            max-height: 2000px;
+        }
+
+        .accordion-body-inner {
+            padding: 16px 20px;
+        }
+
+        .adv-section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+        }
+
+        .adv-section-header h5 {
+            font-size: 0.92rem;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .reset-section-btn {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            color: #fca5a5;
+            border-radius: 8px;
+            padding: 4px 10px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .reset-section-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.45);
+        }
+
+        .adv-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .adv-param {
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.45);
+            border-radius: 10px;
+            padding: 10px 12px;
+            display: grid;
+            gap: 5px;
+        }
+
+        .adv-param label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #cbd5e1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .adv-param .adv-value {
+            color: #86efac;
+            font-weight: 700;
+            font-size: 0.82rem;
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .adv-param input[type="range"] {
+            width: 100%;
+            accent-color: #22c55e;
+        }
+
+        .adv-param input[type="number"] {
+            width: 100%;
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            color: #e2e8f0;
+            padding: 6px 10px;
+            font-size: 0.85rem;
+            outline: none;
+        }
+
+        .adv-param .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.82rem;
+            color: #cbd5e1;
+        }
+
+        .adv-param .toggle-row input[type="checkbox"] {
+            accent-color: #10b981;
+            width: 16px;
+            height: 16px;
+        }
+
+        .adv-section-divider {
+            border: 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            margin: 14px 0;
+        }
     </style>
 </head>
 <body>
@@ -1292,6 +1450,34 @@
                         <span>Enable confidence/OOD rejection</span>
                     </label>
                     <small>Disable only if you want raw model output without rejection rules.</small>
+                </div>
+            </div>
+
+            <!-- Per-prediction inference threshold sliders -->
+            <div class="training-options-grid" id="inferenceThresholdSliders" style="margin-top: 10px;">
+                <div class="training-option">
+                    <label for="predConfidenceThreshold">
+                        <span>Confidence reject</span>
+                        <span class="train-range-value" id="predConfidenceThresholdVal">{{ '%.2f'|format(0.85) }}</span>
+                    </label>
+                    <input type="range" id="predConfidenceThreshold" class="train-range" min="0" max="1" step="0.01" value="0.85">
+                    <small>Images below this confidence are rejected by the safety gate.</small>
+                </div>
+                <div class="training-option">
+                    <label for="predEntropyThreshold">
+                        <span>Entropy reject (bits)</span>
+                        <span class="train-range-value" id="predEntropyThresholdVal">{{ '%.2f'|format(0.80) }}</span>
+                    </label>
+                    <input type="range" id="predEntropyThreshold" class="train-range" min="0" max="5" step="0.05" value="0.80">
+                    <small>Predictions with entropy above this are flagged as uncertain.</small>
+                </div>
+                <div class="training-option">
+                    <label for="predMspThreshold">
+                        <span>OOD MSP threshold</span>
+                        <span class="train-range-value" id="predMspThresholdVal">{{ '%.2f'|format(0.70) }}</span>
+                    </label>
+                    <input type="range" id="predMspThreshold" class="train-range" min="0" max="1" step="0.01" value="0.70">
+                    <small>Maximum softmax probability threshold for out-of-distribution detection.</small>
                 </div>
             </div>
 
@@ -1515,6 +1701,20 @@
 
             <p class="training-note">Training options above apply to the Train Model action only.</p>
 
+            <!-- ============= ADVANCED SETTINGS ACCORDION ============= -->
+            <div class="advanced-accordion" id="advancedAccordion">
+                <div class="accordion-header" onclick="toggleAccordion(this)">
+                    <h4><i class="fas fa-cogs"></i> Advanced Settings — Every Configurable Parameter</h4>
+                    <i class="fas fa-chevron-down chevron"></i>
+                </div>
+                <div class="accordion-body" id="advancedAccordionBody">
+                    <div class="accordion-body-inner" id="advancedSectionsContainer">
+                        <!-- Populated by JS from /config/current -->
+                        <p style="color: #94a3b8; font-size: 0.85rem;">Loading advanced configuration...</p>
+                    </div>
+                </div>
+            </div>
+
             <div id="jobsList" class="jobs-list">
                 <div class="jobs-empty">No workflow jobs yet.</div>
             </div>
@@ -1731,6 +1931,14 @@
                 safetyGateToggle && safetyGateToggle.checked ? 'true' : 'false'
             );
 
+            // Per-prediction inference threshold overrides
+            const confThresh = document.getElementById('predConfidenceThreshold');
+            const entThresh = document.getElementById('predEntropyThreshold');
+            const mspThresh = document.getElementById('predMspThreshold');
+            if (confThresh) formData.append('confidence_threshold', confThresh.value);
+            if (entThresh) formData.append('entropy_threshold', entThresh.value);
+            if (mspThresh) formData.append('msp_threshold', mspThresh.value);
+
             try {
                 const response = await fetch('/predict', {
                     method: 'POST',
@@ -1836,6 +2044,10 @@
                     requestBody.class_equalizer = !!(classEqualizerToggle && classEqualizerToggle.checked);
                     requestBody.must_review = !!(mustReviewToggle && mustReviewToggle.checked);
                 }
+
+                // Collect ALL advanced config from the accordion
+                requestBody.advanced_config = collectAdvancedConfig();
+
                 const response = await fetch(`/control/run/${actionKey}`, {
                     method: 'POST',
                     headers: {
@@ -2400,6 +2612,169 @@
             loadComputeInfo();
         }
 
+        // ==========================================
+        // Advanced Settings Accordion
+        // ==========================================
+
+        const SECTION_META = {
+            training: { icon: 'fas fa-graduation-cap', title: 'Training Hyperparameters' },
+            augmentation: { icon: 'fas fa-palette', title: 'Augmentation Pipeline' },
+            attention: { icon: 'fas fa-brain', title: 'Attention Guidance' },
+            overfitting: { icon: 'fas fa-shield-alt', title: 'Overfitting Protection' },
+            inference: { icon: 'fas fa-crosshairs', title: 'Inference Thresholds' },
+            fine_tuning: { icon: 'fas fa-wrench', title: 'Fine-Tuning Settings' },
+        };
+
+        let advancedConfigData = {};  // section -> [{key, label, type, default, value, min, max, step}]
+
+        function toggleAccordion(header) {
+            header.classList.toggle('open');
+            const body = header.nextElementSibling;
+            body.classList.toggle('open');
+            // Persist state
+            try {
+                localStorage.setItem('adv_accordion_open', body.classList.contains('open') ? '1' : '0');
+            } catch(e) {}
+        }
+
+        function renderAdvancedParam(param) {
+            const id = `adv_${param.key}`;
+            if (param.type === 'bool') {
+                return `
+                    <div class="adv-param">
+                        <div class="toggle-row">
+                            <input type="checkbox" id="${id}" data-adv-key="${param.key}" data-adv-type="bool"
+                                   data-adv-default="${param.default}" ${param.value ? 'checked' : ''}>
+                            <span>${param.label}</span>
+                        </div>
+                    </div>`;
+            }
+            const min = param.min != null ? param.min : 0;
+            const max = param.max != null ? param.max : 100;
+            const step = param.step != null ? param.step : 1;
+            const displayVal = param.type === 'float'
+                ? Number(param.value).toFixed(String(step).split('.')[1]?.length || 2)
+                : param.value;
+            // Use number input for learning rates (very small values), range for everything else.
+            const useLrInput = (param.key.includes('learning_rate'));
+            if (useLrInput) {
+                return `
+                    <div class="adv-param">
+                        <label for="${id}">
+                            <span>${param.label}</span>
+                        </label>
+                        <input type="number" id="${id}" data-adv-key="${param.key}" data-adv-type="${param.type}"
+                               data-adv-default="${param.default}"
+                               min="${min}" max="${max}" step="${step}" value="${param.value}">
+                    </div>`;
+            }
+            return `
+                <div class="adv-param">
+                    <label for="${id}">
+                        <span>${param.label}</span>
+                        <span class="adv-value" id="${id}_val">${displayVal}</span>
+                    </label>
+                    <input type="range" id="${id}" data-adv-key="${param.key}" data-adv-type="${param.type}"
+                           data-adv-default="${param.default}"
+                           min="${min}" max="${max}" step="${step}" value="${param.value}"
+                           oninput="updateAdvLabel(this)">
+                </div>`;
+        }
+
+        function updateAdvLabel(input) {
+            const valEl = document.getElementById(input.id + '_val');
+            if (!valEl) return;
+            const pType = input.getAttribute('data-adv-type');
+            const step = parseFloat(input.step) || 1;
+            if (pType === 'float') {
+                const decimals = String(step).split('.')[1]?.length || 2;
+                valEl.textContent = Number(input.value).toFixed(decimals);
+            } else {
+                valEl.textContent = input.value;
+            }
+        }
+
+        function resetSection(sectionKey) {
+            const params = advancedConfigData[sectionKey] || [];
+            params.forEach(param => {
+                const el = document.getElementById(`adv_${param.key}`);
+                if (!el) return;
+                if (param.type === 'bool') {
+                    el.checked = !!param.default;
+                } else {
+                    el.value = param.default;
+                    updateAdvLabel(el);
+                }
+            });
+        }
+
+        function renderAdvancedSections(data) {
+            advancedConfigData = data;
+            const container = document.getElementById('advancedSectionsContainer');
+            if (!container) return;
+
+            const sectionOrder = ['training', 'augmentation', 'attention', 'overfitting', 'inference', 'fine_tuning'];
+            let html = '';
+            sectionOrder.forEach((sKey, idx) => {
+                const params = data[sKey];
+                if (!params || !params.length) return;
+                const meta = SECTION_META[sKey] || { icon: 'fas fa-cog', title: sKey };
+                if (idx > 0) html += '<hr class="adv-section-divider">';
+                html += `
+                    <div class="adv-section-header">
+                        <h5><i class="${meta.icon}"></i> ${meta.title}</h5>
+                        <button class="reset-section-btn" onclick="resetSection('${sKey}')">
+                            <i class="fas fa-undo"></i> Reset Defaults
+                        </button>
+                    </div>
+                    <div class="adv-grid">
+                        ${params.map(renderAdvancedParam).join('')}
+                    </div>`;
+            });
+            container.innerHTML = html || '<p style="color: #94a3b8;">No advanced configuration available.</p>';
+        }
+
+        function collectAdvancedConfig() {
+            const config = {};
+            document.querySelectorAll('[data-adv-key]').forEach(el => {
+                const key = el.getAttribute('data-adv-key');
+                const pType = el.getAttribute('data-adv-type');
+                if (pType === 'bool') {
+                    config[key] = el.checked;
+                } else if (pType === 'int') {
+                    config[key] = parseInt(el.value, 10);
+                } else if (pType === 'float') {
+                    config[key] = parseFloat(el.value);
+                } else {
+                    config[key] = el.value;
+                }
+            });
+            return config;
+        }
+
+        async function loadAdvancedConfig() {
+            try {
+                const response = await fetch('/config/current');
+                const data = await response.json();
+                renderAdvancedSections(data);
+            } catch(e) {
+                console.warn('Failed to load advanced config:', e);
+            }
+        }
+
+        // Inference threshold slider live labels
+        function initInferenceThresholdSliders() {
+            ['predConfidenceThreshold', 'predEntropyThreshold', 'predMspThreshold'].forEach(id => {
+                const el = document.getElementById(id);
+                const valEl = document.getElementById(id + 'Val');
+                if (el && valEl) {
+                    el.addEventListener('input', () => {
+                        valEl.textContent = Number(el.value).toFixed(2);
+                    });
+                }
+            });
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             const trainDataPercentRange = document.getElementById('trainDataPercentRange');
             if (trainDataPercentRange) {
@@ -2411,6 +2786,25 @@
             jobsPollHandle = setInterval(() => {
                 refreshControlPanel();
             }, 1000);
+
+            // Load advanced settings accordion
+            loadAdvancedConfig();
+
+            // Restore accordion open/closed state
+            try {
+                const wasOpen = localStorage.getItem('adv_accordion_open');
+                if (wasOpen === '1') {
+                    const hdr = document.querySelector('#advancedAccordion .accordion-header');
+                    const body = document.getElementById('advancedAccordionBody');
+                    if (hdr && body) {
+                        hdr.classList.add('open');
+                        body.classList.add('open');
+                    }
+                }
+            } catch(e) {}
+
+            // Init inference threshold slider labels
+            initInferenceThresholdSliders();
         });
     </script>
 </body>

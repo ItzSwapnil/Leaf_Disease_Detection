@@ -8,15 +8,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-import tensorflow as tf
+import torch
 from PIL import Image
+from torchvision.transforms import v2
 
 from src.utils.config import IMG_SIZE, MODELS_DIR
+from src.utils.hardware import get_device
 
-LEAF_DETECTOR_MODEL_PATH = Path(MODELS_DIR) / "leaf_detector_final.keras"
+LEAF_DETECTOR_MODEL_PATH = Path(MODELS_DIR) / "leaf_detector_final.pt"
 LEAF_DETECTOR_CHECKPOINT_PATH = (
-    Path(MODELS_DIR) / "leaf_detector_checkpoint.keras"
+    Path(MODELS_DIR) / "leaf_detector_checkpoint.pt"
 )
 
 
@@ -37,8 +38,18 @@ class LeafDetectorModel:
                     f"Run: python train_leaf_detector.py"
                 )
 
-        self.model = tf.keras.models.load_model(str(model_path), compile=False)
+        self.device = get_device()
+        self.model = torch.load(str(model_path), map_location=self.device)
+        self.model.eval()
         self.model_path = model_path
+
+        self.transform = v2.Compose([
+            v2.Resize((IMG_SIZE, IMG_SIZE)),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            # Standard ImageNet normalization commonly used with Torchvision models
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
     def predict(self, img_path: str) -> dict:
         """
@@ -53,26 +64,22 @@ class LeafDetectorModel:
         """
         try:
             with Image.open(img_path) as img:
-                img_array = np.asarray(
-                    img.convert("RGB").resize((IMG_SIZE, IMG_SIZE)),
-                    dtype=np.float32,
-                )
+                img_rgb = img.convert("RGB")
 
-            if img_array.size == 0:
-                return {
-                    "is_leaf": False,
-                    "leaf_score": 0.0,
-                    "non_leaf_score": 1.0,
-                    "reason": "Image could not be loaded.",
-                }
-
-            # Normalize
-            img_array = img_array / 255.0
+            # Apply transforms
+            input_tensor = self.transform(img_rgb).unsqueeze(0).to(self.device)
 
             # Predict
-            leaf_prob = float(
-                self.model.predict(img_array[None, ...], verbose=0)[0, 0]
-            )
+            with torch.no_grad():
+                output = self.model(input_tensor)
+                # Assuming model outputs logits for binary classification (1 output node)
+                # or 2 output nodes. If 1 node:
+                if output.shape[-1] == 1:
+                    leaf_prob = torch.sigmoid(output).item()
+                else:
+                    # If 2 nodes (softmax)
+                    leaf_prob = torch.softmax(output, dim=-1)[0, 1].item()
+
             non_leaf_prob = 1.0 - leaf_prob
 
             # Decision threshold: 0.5
