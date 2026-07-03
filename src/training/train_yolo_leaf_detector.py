@@ -142,7 +142,7 @@ def main():
     print("[*] Initializing YOLO26n pre-trained model...")
     from ultralytics import YOLO
 
-    model = YOLO("yolo26n.pt")
+    model = YOLO(os.path.join(MODELS_DIR, "yolo26n.pt"))
 
     print("[*] Fine-tuning YOLO26n on leaf detection...")
     model.train(

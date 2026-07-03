@@ -152,3 +152,89 @@ def segment_leaf(
         "leaf_count": len(valid_contours),
         "success": len(valid_contours) > 0,
     }
+
+
+def segment_leaf_grabcut(
+    image: np.ndarray,
+    bbox: tuple[int, int, int, int] | None = None,
+    iter_count: int = 5,
+) -> dict[str, Any]:
+    """Segment the main leaf precisely using the GrabCut algorithm.
+
+    If a YOLO bounding box (bbox) is provided, we run GrabCut initialized with
+    that bounding box. Otherwise, we run GrabCut initialized with a rectangle
+    slightly inset from the image borders.
+    """
+    try:
+        # Convert TensorFlow EagerTensors to NumPy arrays if called during training.
+        if hasattr(image, "numpy"):
+            image = image.numpy()
+
+        h, w = image.shape[:2]
+        if h < 10 or w < 10:
+            return {
+                "masked_image": image,
+                "mask": np.ones((h, w), dtype=np.uint8) * 255,
+                "success": False,
+            }
+
+        # Normalize image to uint8.
+        if image.dtype == np.float32 or image.max() <= 1.0:
+            img_uint8 = (image * 255.0).astype(np.uint8)
+        else:
+            img_uint8 = image.astype(np.uint8)
+
+        mask = np.zeros((h, w), dtype=np.uint8)
+        bgdModel = np.zeros((1, 65), dtype=np.float64)
+        fgdModel = np.zeros((1, 65), dtype=np.float64)
+
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            # Ensure coordinates are within bounds
+            x1 = max(0, min(x1, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            x2 = max(0, min(x2, w))
+            y2 = max(0, min(y2, h))
+
+            # Bounding box width and height
+            bw = x2 - x1
+            bh = y2 - y1
+            if bw > 5 and bh > 5:
+                rect = (x1, y1, bw, bh)
+            else:
+                rect = (2, 2, w - 4, h - 4)
+        else:
+            # Default to inset rectangle
+            rect = (5, 5, w - 10, h - 10)
+
+        # Run GrabCut
+        cv2.grabCut(img_uint8, mask, rect, bgdModel, fgdModel, iter_count, cv2.GC_INIT_WITH_RECT)
+
+        # 0 = cv2.GC_BGD, 2 = cv2.GC_PR_BGD
+        binary_mask = np.where((mask == 2) | (mask == 0), 0, 255).astype(np.uint8)
+
+        # Apply morphology to smooth boundaries
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
+
+        # Apply mask
+        masked_image = np.zeros_like(image)
+        masked_image[binary_mask == 255] = image[binary_mask == 255]
+
+        # Calculate segmentation ratio
+        seg_ratio = float(np.mean(binary_mask == 255))
+
+        return {
+            "masked_image": masked_image,
+            "mask": binary_mask,
+            "segmentation_ratio": seg_ratio,
+            "success": seg_ratio > 0.01,  # Successful if at least 1% of pixels are foreground
+        }
+    except Exception as e:
+        print(f"[!] GrabCut segmentation failed: {e}")
+        return {
+            "masked_image": image,
+            "mask": np.ones((image.shape[0], image.shape[1]), dtype=np.uint8) * 255,
+            "success": False,
+        }
+

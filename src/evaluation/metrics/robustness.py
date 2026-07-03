@@ -126,7 +126,9 @@ def add_occlusion(
     return _from_unit_range(occluded)
 
 
-def _metrics_from_probs(labels: np.ndarray, probs: np.ndarray) -> dict:
+def _metrics_from_probs(
+    labels: np.ndarray, probs: np.ndarray
+) -> dict[str, float]:
     """Compute accuracy, precision, recall, F1 from probability predictions."""
     preds = np.argmax(probs, axis=1)
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -143,7 +145,9 @@ def _metrics_from_probs(labels: np.ndarray, probs: np.ndarray) -> dict:
     }
 
 
-def _with_drop(base: dict, metrics: dict) -> dict:
+def _with_drop(
+    base: dict[str, float], metrics: dict[str, float]
+) -> dict[str, float]:
     """Augment metrics dict with accuracy and F1 drop relative to baseline."""
     return {
         **metrics,
@@ -162,7 +166,7 @@ def evaluate_robustness_suite(
     fog_levels: Sequence[float],
     occlusion_fracs: Sequence[float],
     seed: int = 42,
-) -> dict:
+) -> dict[str, object]:
     """Evaluate degradation under synthetic adverse conditions.
 
     Args:

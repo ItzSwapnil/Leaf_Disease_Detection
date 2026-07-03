@@ -29,6 +29,8 @@ from src.training.training_utils import (
     get_mixup_cutmix_transforms,
     parse_class_structure,
     resolve_augmentation_probabilities,
+    unfreeze_backbone_layers,
+    OverfittingStopper,
 )
 from src.utils.config import (
     BASE_MODEL,
@@ -51,6 +53,13 @@ from src.utils.config import (
     USE_OPTIMIZER_EMA,
     USE_RANDAUGMENT,
     VAL_DIR,
+    NUM_WORKERS,
+    INTRA_OP_THREADS,
+    INTER_OP_THREADS,
+    UNFREEZE_LAYERS,
+    OVERFITTING_STOP_ENABLED,
+    OVERFITTING_STOP_MIN_GAP,
+    OVERFITTING_STOP_PATIENCE,
 )
 
 try:
@@ -136,6 +145,10 @@ class LeafDiseaseModel(nn.Module):
 
         self.crop_logits = nn.Linear(DENSE_UNITS // 2, num_crops)
         self.disease_logits = FamilyDeviationClassifier(DENSE_UNITS // 2, num_classes, healthy_partners)
+        self.register_buffer("class_to_crop_idx", torch.zeros(num_classes, dtype=torch.long))
+
+    def set_class_to_crop_mapping(self, mapping_list):
+        self.class_to_crop_idx.copy_(torch.tensor(mapping_list, dtype=torch.long))
 
     def forward(self, x):
         features = self.backbone(x)
@@ -172,7 +185,7 @@ def train_one_epoch(
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1} Train", leave=False)
     for batch_idx, (images, masks, labels) in enumerate(pbar):
-        images, masks, labels = images.to(device), masks.to(device), labels.to(device)
+        images, masks, labels = images.to(device, non_blocking=True), masks.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
         if heavy_augment_fn:
             images = heavy_augment_fn(images)
@@ -184,20 +197,50 @@ def train_one_epoch(
         elif route < mixup_prob + cutmix_prob and cutmix_fn:
             images, mixed_labels = cutmix_fn(images, labels)
 
+        # Determine bf16 support dynamically
+        use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
+        dtype = torch.bfloat16 if use_bf16 else torch.float16
+
         optimizer.zero_grad()
-        with autocast(device_type=device.type):
+        with autocast(device_type=device.type, dtype=dtype):
             outputs = model(images)
             disease_out = outputs["disease_output"]
+            crop_out = outputs["crop_output"]
 
             if mixed_labels is not None:
                 mixed_labels = mixed_labels.squeeze(1)
-                loss = -torch.sum(mixed_labels * torch.log_softmax(disease_out, dim=-1), dim=-1).mean()
+                loss_disease = -torch.sum(mixed_labels * torch.log_softmax(disease_out, dim=-1), dim=-1).mean()
+                
+                active_model = ema_model.module if ema_model is not None else model
+                if hasattr(active_model, "module"):
+                    active_model = getattr(active_model, "module")
+                class_to_crop = getattr(active_model, "class_to_crop_idx")
+                num_crops = getattr(active_model, "crop_logits").out_features
+                
+                mixed_crop_labels = torch.zeros((mixed_labels.size(0), num_crops), device=mixed_labels.device)
+                mixed_crop_labels.scatter_add_(1, class_to_crop.unsqueeze(0).expand(mixed_labels.size(0), -1).to(mixed_labels.device), mixed_labels)
+                
+                loss_crop = -torch.sum(mixed_crop_labels * torch.log_softmax(crop_out, dim=-1), dim=-1).mean()
             else:
-                loss = criterion(disease_out, labels)
+                loss_disease = criterion(disease_out, labels)
+                
+                active_model = ema_model.module if ema_model is not None else model
+                if hasattr(active_model, "module"):
+                    active_model = getattr(active_model, "module")
+                class_to_crop = getattr(active_model, "class_to_crop_idx")
+                
+                crop_labels = class_to_crop[labels]
+                loss_crop = nn.CrossEntropyLoss()(crop_out, crop_labels)
+                
+            loss = loss_disease + 0.5 * loss_crop
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if scaler is not None and not use_bf16:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         if ema_model is not None:
             ema_model.update_parameters(model)
@@ -228,13 +271,26 @@ def validate(model, dataloader, criterion, device):
     total = 0
 
     pbar = tqdm(dataloader, desc="Validate", leave=False)
-    for images, masks, labels in pbar:
-        images, masks, labels = images.to(device), masks.to(device), labels.to(device)
+    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
+    dtype = torch.bfloat16 if use_bf16 else torch.float16
 
-        with autocast(device_type=device.type):
+    for images, masks, labels in pbar:
+        images, masks, labels = images.to(device, non_blocking=True), masks.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+
+        with autocast(device_type=device.type, dtype=dtype):
             outputs = model(images)
             disease_out = outputs["disease_output"]
-            loss = criterion(disease_out, labels)
+            crop_out = outputs["crop_output"]
+            
+            loss_disease = criterion(disease_out, labels)
+            
+            active_model = getattr(model, "module") if hasattr(model, "module") else model
+            class_to_crop = getattr(active_model, "class_to_crop_idx")
+            
+            crop_labels = class_to_crop[labels]
+            loss_crop = nn.CrossEntropyLoss()(crop_out, crop_labels)
+            
+            loss = loss_disease + 0.5 * loss_crop
 
         running_loss += loss.item() * images.size(0)
         _, predicted = torch.max(disease_out, 1)
@@ -251,7 +307,25 @@ def main():
     parser.add_argument("--save-mode", default=None)
     parser.add_argument("--class-equalizer", choices=["on", "off"], default=None)
     parser.add_argument("--must-review", choices=["on", "off"], default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
     args = parser.parse_args()
+
+    # CPU Thread optimization
+    torch.set_num_threads(INTRA_OP_THREADS)
+    try:
+        torch.set_num_interop_threads(INTER_OP_THREADS)
+    except RuntimeError:
+        pass
+
+    # CUDA benchmark & TF32 optimizations for RTX GPUs
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
 
     backbone_name = resolve_backbone_name(args.base_model or os.getenv("LEAF_BASE_MODEL"), default=BASE_MODEL)
     optimizer_name = _normalize_optimizer_name(args.optimizer or os.getenv("LEAF_TRAIN_OPTIMIZER") or OPTIMIZER)
@@ -275,12 +349,21 @@ def main():
 
     _skip_yolo = backbone_name == "DINOv3"
 
-    train_loader = build_dynamic_yolo_dataset(TRAIN_DIR, train_class_names, batch_size, shuffle=True, seed=seed, use_yolo=not _skip_yolo, fraction=train_fraction)
-    val_loader = build_dynamic_yolo_dataset(VAL_DIR, val_class_names, batch_size, shuffle=False, seed=seed, use_yolo=not _skip_yolo, fraction=1.0)
+    num_workers = args.num_workers if args.num_workers is not None else NUM_WORKERS
+    train_loader = build_dynamic_yolo_dataset(TRAIN_DIR, train_class_names, batch_size, shuffle=True, seed=seed, use_yolo=not _skip_yolo, fraction=train_fraction, num_workers=num_workers)
+    val_loader = build_dynamic_yolo_dataset(VAL_DIR, train_class_names, batch_size, shuffle=False, seed=seed, use_yolo=not _skip_yolo, fraction=1.0, num_workers=num_workers)
 
     # Model Setup
     healthy_partners = parse_class_structure(train_class_names)
     model = LeafDiseaseModel(backbone_name, len(train_class_names), len(crop_names), healthy_partners).to(device)
+
+    # Map class to crop index
+    class_to_crop_idx = []
+    for name in train_class_names:
+        crop_family = name.split("___")[0]
+        crop_idx = crop_names.index(crop_family)
+        class_to_crop_idx.append(crop_idx)
+    model.set_class_to_crop_mapping(class_to_crop_idx)
 
     # Phase 1: Freeze backbone
     for param in model.backbone.parameters():
@@ -326,12 +409,20 @@ def main():
     # Phase 2: Unfreeze Backbone for Fine-Tuning
     print("\nStarting Phase 2 (Fine-Tuning Backbone)")
     progress_emitter.stage = "training_phase2"
-    for param in model.backbone.parameters():
-        param.requires_grad = True
+    unfreeze_layers = int(os.getenv("LEAF_UNFREEZE_LAYERS", UNFREEZE_LAYERS))
+    unfreeze_backbone_layers(model.backbone.backbone, unfreeze_layers)
 
     # Note: Define optimizer_ft, scheduler_ft here as per logic requirements
     optimizer_ft = build_optimizer(model, LEARNING_RATE_PHASE2, optimizer_name)
     scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_ft, int(EPOCHS_PHASE2))
+
+    stopper = None
+    if OVERFITTING_STOP_ENABLED:
+        stopper = OverfittingStopper(
+            min_gap=OVERFITTING_STOP_MIN_GAP,
+            patience=OVERFITTING_STOP_PATIENCE,
+            verbose=1
+        )
 
     for epoch in range(int(EPOCHS_PHASE2)):
         epoch_idx = int(EPOCHS_PHASE1) + epoch
@@ -347,6 +438,12 @@ def main():
         saver.step(epoch_idx, ema_model.module if ema_model is not None else model, optimizer_ft, val_acc)
         progress_emitter.on_epoch_end(epoch_idx)
         scheduler_ft.step()
+
+        if stopper is not None:
+            stopper.step(epoch_idx, train_loss, val_loss, train_acc, val_acc)
+            if stopper.stop_training:
+                print(f"Early stopping triggered at epoch {epoch_idx+1} due to overfitting.")
+                break
 
 if __name__ == "__main__":
     main()

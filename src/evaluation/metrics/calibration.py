@@ -29,7 +29,7 @@ def expected_calibration_error(
     probs: np.ndarray,
     labels: np.ndarray,
     n_bins: int = 10,
-) -> dict:
+) -> dict[str, object]:
     """Compute ECE/MCE/Brier and per-bin reliability statistics.
 
     Args:
@@ -117,7 +117,7 @@ def confidence_rejection_metrics(
     probs: np.ndarray,
     labels: np.ndarray,
     threshold: float,
-) -> dict:
+) -> dict[str, object]:
     """Compute coverage and accepted-set accuracy for confidence thresholding."""
     probs = np.asarray(probs, dtype=np.float64)
     y_true = _to_label_indices(labels)
@@ -149,7 +149,7 @@ def entropy_rejection_metrics(
     probs: np.ndarray,
     labels: np.ndarray,
     threshold: float,
-) -> dict:
+) -> dict[str, object]:
     """Compute rejection metrics using entropy thresholding (reject high-entropy)."""
     probs = np.asarray(probs, dtype=np.float64)
     y_true = _to_label_indices(labels)
@@ -213,7 +213,7 @@ def optimize_temperature(
     labels: np.ndarray,
     steps: int = 400,
     learning_rate: float = 0.01,
-) -> dict:
+) -> dict[str, float]:
     """Fit a scalar temperature parameter on validation logits using PyTorch.
 
     Minimizes the negative log-likelihood (NLL) of the temperature-scaled
@@ -274,7 +274,7 @@ def bootstrap_ci(
     y_pred: np.ndarray,
     n_boot: int = 2000,
     seed: int = 42,
-) -> dict:
+) -> dict[str, float | int]:
     """Bootstrap confidence interval with percentile bounds."""
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -303,7 +303,7 @@ def bootstrap_ci(
 
 def mcnemar_test(
     y_true: np.ndarray, pred_a: np.ndarray, pred_b: np.ndarray
-) -> dict:
+) -> dict[str, object]:
     """McNemar test comparing two classifiers on paired predictions.
 
     Model A is treated as the proposed model and Model B as the baseline.

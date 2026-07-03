@@ -44,6 +44,9 @@ from src.utils.config import (
     MODELS_DIR,
     OOD_MSP_THRESHOLD,
     USE_YOLO_LEAF_DETECTION,
+    INTRA_OP_THREADS,
+    INTER_OP_THREADS,
+    BASE_MODEL,
 )
 from src.utils.hardware import get_compute_info, get_device
 from src.utils.model_paths import resolve_pytorch_model_path
@@ -73,8 +76,25 @@ def _extract_disease_predictions(predictions):
     return np.asarray(predictions)
 
 
-get_device()
+device = get_device()
 _log_torch_runtime_info()
+
+# CPU Thread optimization
+torch.set_num_threads(INTRA_OP_THREADS)
+try:
+    torch.set_num_interop_threads(INTER_OP_THREADS)
+except RuntimeError:
+    pass
+
+# CUDA benchmark & TF32 optimizations for RTX GPUs
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
@@ -123,6 +143,24 @@ TRAIN_SAVE_MODES = [
 # ---------------------------------------------------------------------------
 ADVANCED_ENV_KEYS: dict[str, dict[str, Any]] = {
     # -- Training Hyperparameters --
+    "num_workers": {
+        "env": "LEAF_NUM_WORKERS", "type": "int",
+        "default": 8, "min": 0, "max": 16, "step": 1,
+        "label": "DataLoader CPU workers",
+        "section": "training",
+    },
+    "intra_op_threads": {
+        "env": "LEAF_INTRA_OP_THREADS", "type": "int",
+        "default": 8, "min": 1, "max": 16, "step": 1,
+        "label": "PyTorch intra-op threads",
+        "section": "training",
+    },
+    "inter_op_threads": {
+        "env": "LEAF_INTER_OP_THREADS", "type": "int",
+        "default": 4, "min": 1, "max": 16, "step": 1,
+        "label": "PyTorch inter-op threads",
+        "section": "training",
+    },
     "epochs_phase1": {
         "env": "LEAF_EPOCHS_PHASE1", "type": "int",
         "default": 5, "min": 1, "max": 200, "step": 1,
@@ -131,8 +169,14 @@ ADVANCED_ENV_KEYS: dict[str, dict[str, Any]] = {
     },
     "epochs_phase2": {
         "env": "LEAF_EPOCHS_PHASE2", "type": "int",
-        "default": 10, "min": 1, "max": 200, "step": 1,
+        "default": 15, "min": 1, "max": 200, "step": 1,
         "label": "Phase 2 epochs (fine-tune backbone)",
+        "section": "training",
+    },
+    "unfreeze_layers": {
+        "env": "LEAF_UNFREEZE_LAYERS", "type": "int",
+        "default": -1, "min": -1, "max": 24, "step": 1,
+        "label": "Backbone blocks/stages to unfreeze (-1 = all)",
         "section": "training",
     },
     "batch_size": {
@@ -387,17 +431,17 @@ CONTROL_ACTIONS = {
     },
     "generate_figures": {
         "label": "Generate Figures",
-        "script": "scripts/generate_figures.py",
+        "script": "src/visualization/generate_figures.py",
         "description": "build plots and analysis artifacts",
     },
     "train_leaf_detector": {
         "label": "Train Leaf Detector",
-        "script": "src/training/train_leaf_detector.py",
+        "script": "src/training/train_yolo_leaf_detector.py",
         "description": "train binary leaf/non-leaf detector used in stage-1 inference",
     },
     "gradcam_check": {
         "label": "Grad-CAM Check",
-        "script": "scripts/gradcam_check.py",
+        "script": "src/visualization/gradcam_check.py",
         "description": "generate Grad-CAM heatmaps to verify model focuses on leaf, not background",
     },
 }
@@ -426,6 +470,9 @@ def _list_available_model_paths():
     for root, _, files in os.walk(models_root):
         for filename in files:
             if filename.lower().endswith((".pt", ".pth")):
+                # Exclude auxiliary leaf detectors or YOLO models from classification models dropdown
+                if "leaf_detector" in filename.lower() or "yolo" in filename.lower():
+                    continue
                 candidates.append(os.path.abspath(os.path.join(root, filename)))
 
     return sorted(candidates)
@@ -446,17 +493,15 @@ def _resolve_requested_model_path(model_name=None):
     except Exception:
         default_path = None
 
-    if not model_name:
-        if default_path and os.path.exists(default_path):
-            return default_path
-        if available_paths:
-            return available_paths[0]
-        raise ValueError(
-            "No model files were found under models/. Add at least one .pt model."
-        )
+    if model_name:
+        model_name = str(model_name).strip().replace("\\", "/")
 
-    model_name = str(model_name).strip().replace("\\", "/")
     if not model_name:
+        # Prioritize DINO models
+        for path in available_paths:
+            if "dino" in os.path.basename(path).lower():
+                return path
+
         if default_path and os.path.exists(default_path):
             return default_path
         if available_paths:
@@ -679,7 +724,7 @@ def _get_yolo_leaf_detector():
     return YOLO_FOCUS_DETECTOR
 
 
-def _parse_pipeline_options(payload):
+def _parse_pipeline_options(payload, active_model=None):
     source = payload or {}
     options = {
         "leaf_detection_mode": _normalize_leaf_detection_mode(
@@ -691,7 +736,10 @@ def _parse_pipeline_options(payload):
         "use_safety_gate": _to_bool(source.get("use_safety_gate")),
     }
     if "use_background_removal" not in source:
-        options["use_background_removal"] = True
+        backbone = "DINOv3"
+        if active_model is not None:
+            backbone = _infer_backbone_name(active_model)
+        options["use_background_removal"] = (backbone != "DINOv3")
     if "use_safety_gate" not in source:
         options["use_safety_gate"] = True
 
@@ -950,6 +998,14 @@ def _run_job(job):
             job["progress_pct"] = 100.0
             job["eta_seconds"] = 0.0
             _append_job_log(job, "Completed successfully.")
+            if job["action"] in {"train", "fine_tune", "refine"}:
+                _append_job_log(job, "Reloading model and classes to apply new weights...")
+                try:
+                    MODEL_CACHE.clear()
+                    load_model_and_classes()
+                    _append_job_log(job, "Model and classes reloaded successfully.")
+                except Exception as e:
+                    _append_job_log(job, f"Failed to reload model: {e}")
         else:
             job["status"] = "failed"
             _append_job_log(job, f"Exited with code {return_code}.")
@@ -1173,7 +1229,23 @@ DISEASE_INFO = {
         "treatment": "Apply copper-based sprays. Remove infected plants.",
         "prevention": "Use disease-free seeds. Rotate crops. Avoid overhead watering.",
     },
+    "Pepper_bell___Bacterial_spot": {
+        "plant": "Bell Pepper",
+        "disease": "Bacterial Spot",
+        "description": "A bacterial disease affecting pepper plants.",
+        "symptoms": "Small, dark, water-soaked spots on leaves. Raised spots on fruit.",
+        "treatment": "Apply copper-based sprays. Remove infected plants.",
+        "prevention": "Use disease-free seeds. Rotate crops. Avoid overhead watering.",
+    },
     "Pepper,_bell___healthy": {
+        "plant": "Bell Pepper",
+        "disease": "Healthy",
+        "description": "This pepper leaf shows no signs of disease.",
+        "symptoms": "No disease symptoms present.",
+        "treatment": "No treatment needed.",
+        "prevention": "Maintain good growing conditions.",
+    },
+    "Pepper_bell___healthy": {
         "plant": "Bell Pepper",
         "disease": "Healthy",
         "description": "This pepper leaf shows no signs of disease.",
@@ -1400,13 +1472,39 @@ def load_model_and_classes():
     return model, class_indices, ACTIVE_MODEL_PATH
 
 
+def _get_plant_display_name(plant_name: str) -> str:
+    """Map raw crop/plant name to a botanically correct display name."""
+    mapping = {
+        "Apple": "Apple Tree",
+        "Cherry": "Cherry Tree",
+        "Peach": "Peach Tree",
+        "Orange": "Orange Tree",
+        "Grape": "Grapevine",
+        "Blueberry": "Blueberry Bush",
+        "Raspberry": "Raspberry Bush",
+        "Corn": "Corn Plant",
+        "Potato": "Potato Plant",
+        "Tomato": "Tomato Plant",
+        "Squash": "Squash Plant",
+        "Strawberry": "Strawberry Plant",
+        "Bell Pepper": "Bell Pepper Plant",
+        "Rice": "Rice Plant",
+        "Soybean": "Soybean Plant",
+        "Wheat": "Wheat Plant",
+        "Leaf Validation": "Leaf Validation"
+    }
+    # Clean the input to match keys
+    clean_name = plant_name.replace("_", " ").replace("Pepper, bell", "Bell Pepper").strip()
+    return mapping.get(clean_name, f"{clean_name} Plant")
+
+
 def predict_disease(img_path, inference_model=None, pipeline_options=None):
     """Predict disease from image"""
     active_model = inference_model or model
     if active_model is None or class_indices is None:
         raise RuntimeError("Model or class indices are not loaded.")
 
-    options = _parse_pipeline_options(pipeline_options)
+    options = _parse_pipeline_options(pipeline_options, active_model=active_model)
     stage_details = []
 
     leaf_validation = assess_leaf_likelihood(img_path, IMG_SIZE)
@@ -1479,77 +1577,103 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
     )
 
     try:
-        img_pil = Image.open(img_path).convert("RGB")
+        from PIL import ImageOps
+        img_pil = Image.open(img_path)
+        img_pil = ImageOps.exif_transpose(img_pil).convert("RGB")
+
+        # If background removal is enabled, run YOLO and crop
+        if focus_overlay_enabled:
+            detector = _get_yolo_leaf_detector()
+            if detector is not None:
+                img_bgr = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+                detection = detector.detect(img_bgr)
+                if detection["found"]:
+                    x1, y1, x2, y2 = detection["bbox"]
+
+                    # For visual box overlay, draw on BGR and encode
+                    img_boxed = img_bgr.copy()
+                    cv2.rectangle(
+                        img_boxed,
+                        (x1, y1),
+                        (x2, y2),
+                        (34, 197, 94),
+                        3,
+                    )
+                    cv2.putText(
+                        img_boxed,
+                        f"Leaf Focus ({int(detection['confidence'] * 100)}%)",
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (34, 197, 94),
+                        2,
+                    )
+                    img_boxed_rgb = cv2.cvtColor(
+                        img_boxed, cv2.COLOR_BGR2RGB
+                    )
+                    img_pil_b = Image.fromarray(img_boxed_rgb)
+                    buffered = io.BytesIO()
+                    img_pil_b.save(buffered, format="JPEG")
+                    focus_overlay_b64 = base64.b64encode(
+                        buffered.getvalue()
+                    ).decode("utf-8")
+
+                    # Actually crop the image before classification
+                    img_cropped = img_pil.crop((x1, y1, x2, y2))
+
+                    # Precise GrabCut segmentation inside the cropped bbox to mask out backgrounds/shadows
+                    from src.core.leaf_segmentation import segment_leaf_grabcut
+                    img_cropped_rgb = np.array(img_cropped)
+                    seg_res = segment_leaf_grabcut(img_cropped_rgb)
+                    if seg_res["success"]:
+                        img_pil = Image.fromarray(seg_res["masked_image"])
+                    else:
+                        img_pil = img_cropped
+            else:
+                print("YOLOLeafDetector unavailable — falling back to full image precise GrabCut segmentation.")
+                from src.core.leaf_segmentation import segment_leaf_grabcut
+                img_rgb = np.array(img_pil)
+                seg_res = segment_leaf_grabcut(img_rgb)
+                if seg_res["success"]:
+                    img_pil = Image.fromarray(seg_res["masked_image"])
 
         transform = v2.Compose([
             v2.Resize((IMG_SIZE, IMG_SIZE)),
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
-        model_input_tensor = transform(img_pil).unsqueeze(0).to(get_device())
+        model_input_tensor = transform(img_pil).unsqueeze(0).to(get_device(), non_blocking=True)
     except Exception as exc:
-        print(f"Failed to load image for classification: {exc}")
+        print(f"Failed to load/preprocess image for classification: {exc}")
         model_input_tensor = None
-
-    if focus_overlay_enabled:
-        detector = _get_yolo_leaf_detector()
-        if detector is not None:
-            try:
-                img_bgr = cv2.imread(img_path)
-                if img_bgr is not None:
-                    detection = detector.detect(img_bgr)
-                    if detection["found"]:
-                        x1, y1, x2, y2 = detection["bbox"]
-                        img_boxed = img_bgr.copy()
-                        cv2.rectangle(
-                            img_boxed,
-                            (x1, y1),
-                            (x2, y2),
-                            (34, 197, 94),
-                            3,
-                        )
-                        cv2.putText(
-                            img_boxed,
-                            f"Leaf Focus ({int(detection['confidence'] * 100)}%)",
-                            (x1, max(y1 - 10, 20)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (34, 197, 94),
-                            2,
-                        )
-                        img_boxed_rgb = cv2.cvtColor(
-                            img_boxed, cv2.COLOR_BGR2RGB
-                        )
-                        img_pil_b = Image.fromarray(img_boxed_rgb)
-                        buffered = io.BytesIO()
-                        img_pil_b.save(buffered, format="JPEG")
-                        focus_overlay_b64 = base64.b64encode(
-                            buffered.getvalue()
-                        ).decode("utf-8")
-            except Exception as exc:
-                print(f"YOLOv26 focus visualization failed: {exc}")
 
     if model_input_tensor is None:
         raise ValueError("Failed to load image for classification; tensor is empty.")
 
     # Make prediction
+    device = get_device()
+    device_type = device.type if device.type in ("cuda", "cpu") else "cuda"
+    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
+    dtype = torch.bfloat16 if use_bf16 else torch.float16
+
     with torch.no_grad():
-        if isinstance(active_model, list):
-            all_preds = []
-            for m in active_model:
-                out = m(model_input_tensor)
+        with torch.amp.autocast(device_type=device_type, dtype=dtype):
+            if isinstance(active_model, list):
+                all_preds = []
+                for m in active_model:
+                    out = m(model_input_tensor)
+                    logits = out["disease_output"] if isinstance(out, dict) and "disease_output" in out else out
+                    probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+                    all_preds.append(_extract_disease_predictions(probs))
+                prediction_probs = np.mean(all_preds, axis=0)
+                diagnostics = compute_prediction_diagnostics(prediction_probs)
+            else:
+                out = active_model(model_input_tensor)
                 logits = out["disease_output"] if isinstance(out, dict) and "disease_output" in out else out
                 probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
-                all_preds.append(_extract_disease_predictions(probs))
-            prediction_probs = np.mean(all_preds, axis=0)
-            diagnostics = compute_prediction_diagnostics(prediction_probs)
-        else:
-            out = active_model(model_input_tensor)
-            logits = out["disease_output"] if isinstance(out, dict) and "disease_output" in out else out
-            probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
-            predictions = _extract_disease_predictions(probs)
-            diagnostics = compute_prediction_diagnostics(predictions)
+                predictions = _extract_disease_predictions(probs)
+                diagnostics = compute_prediction_diagnostics(predictions)
     predicted_class_idx = int(diagnostics["top1_index"])
     confidence = float(diagnostics["top1_prob"]) * 100.0
     confidence_margin = float(diagnostics["confidence_margin"]) * 100.0
@@ -1615,7 +1739,8 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
             )
 
         parts = class_name.split("___")
-        plant = parts[0].replace("_", " ") if len(parts) > 0 else "Unknown"
+        plant_raw = parts[0].replace("_", " ") if len(parts) > 0 else "Unknown"
+        plant = _get_plant_display_name(plant_raw)
         disease = parts[1].replace("_", " ") if len(parts) > 1 else class_name
 
         ret = {
@@ -1667,7 +1792,7 @@ def predict_disease(img_path, inference_model=None, pipeline_options=None):
     ret = {
         "class_name": class_name,
         "confidence": round(confidence, 2),
-        "plant": info["plant"],
+        "plant": _get_plant_display_name(info["plant"]),
         "disease": info["disease"],
         "description": info["description"],
         "symptoms": info["symptoms"],
@@ -1956,6 +2081,9 @@ def index():
     if class_equalizer_env is not None:
         default_class_equalizer = _to_bool(class_equalizer_env)
 
+    active_backbone = _infer_backbone_name(model, ACTIVE_MODEL_PATH)
+    default_use_bg = (active_backbone != "DINOv3")
+
     return render_template(
         "index.html",
         control_actions=CONTROL_ACTIONS,
@@ -1963,6 +2091,7 @@ def index():
         available_models=available_model_names,
         active_model_name=active_name,
         training_backbones=sorted(TRAIN_BACKBONES, key=lambda s: s.lower()),
+        default_training_backbone=BASE_MODEL,
         training_optimizer_options=TRAIN_OPTIMIZER_OPTIONS,
         training_save_modes=TRAIN_SAVE_MODES,
         default_train_fraction_pct=round(default_fraction_pct, 2),
@@ -1970,7 +2099,7 @@ def index():
         default_training_save_mode=default_save_mode,
         default_class_equalizer=default_class_equalizer,
         default_leaf_detection_mode="auto",
-        default_use_background_removal=True,
+        default_use_background_removal=default_use_bg,
         default_use_safety_gate=True,
         advanced_env_keys=ADVANCED_ENV_KEYS,
     )
@@ -2002,10 +2131,8 @@ def predict():
     selected_model_name = (request.form.get("model_name") or "").strip()
     pipeline_options = {
         "leaf_detection_mode": request.form.get("leaf_detection_mode", "auto"),
-        "use_background_removal": request.form.get(
-            "use_background_removal", "on"
-        ),
-        "use_safety_gate": request.form.get("use_safety_gate", "on"),
+        "use_background_removal": "on" if str(request.form.get("use_background_removal")).strip().lower() in {"true", "on", "1", "yes"} else "off",
+        "use_safety_gate": "on" if str(request.form.get("use_safety_gate")).strip().lower() in {"true", "on", "1", "yes"} else "off",
         "confidence_threshold": request.form.get("confidence_threshold"),
         "entropy_threshold": request.form.get("entropy_threshold"),
         "msp_threshold": request.form.get("msp_threshold"),
@@ -2031,6 +2158,10 @@ def predict():
                 pipeline_options=pipeline_options,
             )
             result["model_name"] = _model_option_name(active_model_path)
+
+            # LOG PREDICTION FOR DEBUGGING
+            print(f"[DEBUG] Uploaded file: {filepath}")
+            print(f"[DEBUG] Predicted class: {result.get('class_name')} | confidence: {result.get('confidence')}%")
 
             if "cropped_image" in result:
                 result["image"] = result["cropped_image"]
@@ -2139,7 +2270,7 @@ def control_run(action_key):
 
     if action_key == "train":
         if not base_model:
-            base_model = TRAIN_BACKBONES[0] if TRAIN_BACKBONES else None
+            base_model = BASE_MODEL or (TRAIN_BACKBONES[0] if TRAIN_BACKBONES else None)
         if base_model and base_model not in TRAIN_BACKBONES:
             return jsonify(
                 {

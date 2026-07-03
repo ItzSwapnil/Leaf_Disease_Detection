@@ -4,7 +4,7 @@ import math
 from typing import Any, TypedDict
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class SafetyEvaluation(TypedDict):
@@ -20,6 +20,7 @@ def assess_leaf_likelihood(img_path: str, img_size: int) -> dict[str, Any]:
     """Heuristic leaf plausibility check to reject obvious non-leaf uploads."""
     try:
         with Image.open(img_path) as img:
+            img = ImageOps.exif_transpose(img)
             arr = np.asarray(
                 img.convert("RGB").resize((img_size, img_size)),
                 dtype=np.float32,

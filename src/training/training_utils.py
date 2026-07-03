@@ -31,6 +31,7 @@ from src.utils.config import (
     USE_RANDOM_ERASING,
     USE_RANDOM_RESIZED_CROP,
     WEIGHT_DECAY,
+    NUM_WORKERS,
 )
 
 # -----------------------------------------------------------------------------
@@ -167,6 +168,64 @@ class BestModelSaver:
 
             if self.verbose:
                 print(f"Saved improved model at epoch {epoch + 1}: acc={acc:.6f}")
+
+def unfreeze_backbone_layers(backbone: nn.Module, num_layers_to_unfreeze: int) -> None:
+    """
+    Unfreezes the last N layers/blocks of the backbone for fine-tuning.
+    If num_layers_to_unfreeze is -1, unfreezes all layers.
+    """
+    # First, freeze everything
+    for param in backbone.parameters():
+        param.requires_grad = False
+
+    if num_layers_to_unfreeze == -1:
+        for param in backbone.parameters():
+            param.requires_grad = True
+        print("Unfrozen ALL layers of the backbone.")
+        return
+
+    # Check if it is a ViT model
+    if hasattr(backbone, "encoder") and hasattr(backbone.encoder, "layers"):
+        encoder_layers = getattr(backbone.encoder, "layers")
+        layers = list(encoder_layers.children()) if hasattr(encoder_layers, "children") else []
+        if layers:
+            num_layers = len(layers)
+            unfreeze_start_idx = max(0, num_layers - num_layers_to_unfreeze)
+
+            # Unfreeze the last N blocks
+            for i in range(unfreeze_start_idx, num_layers):
+                for param in layers[i].parameters():
+                    param.requires_grad = True
+
+            # Also unfreeze the final normalization layer
+            if hasattr(backbone.encoder, "ln"):
+                for param in backbone.encoder.ln.parameters():
+                    param.requires_grad = True
+
+            print(f"Unfrozen final {num_layers_to_unfreeze} blocks of ViT encoder (blocks {unfreeze_start_idx} to {num_layers - 1}) and ln.")
+            return
+
+    # Check if it is an EfficientNet model
+    if hasattr(backbone, "features"):
+        features_module = getattr(backbone, "features")
+        features = list(features_module.children()) if hasattr(features_module, "children") else []
+        if features:
+            num_blocks = len(features)
+            unfreeze_start_idx = max(0, num_blocks - num_layers_to_unfreeze)
+
+            # Unfreeze the last N features blocks
+            for i in range(unfreeze_start_idx, num_blocks):
+                for param in features[i].parameters():
+                    param.requires_grad = True
+
+            print(f"Unfrozen final {num_layers_to_unfreeze} stages of EfficientNet backbone (stages {unfreeze_start_idx} to {num_blocks - 1}).")
+            return
+
+    # Fallback: unfreeze everything if structure not recognized
+    for param in backbone.parameters():
+        param.requires_grad = True
+    print("Backbone architecture not standard; unfrozen ALL layers.")
+
 
 class OverfittingStopper:
     def __init__(self, min_gap: float = 0.05, patience: int = 2, verbose: int = 1):
@@ -315,6 +374,7 @@ class LeafYOLODataset(torch.utils.data.Dataset):
         self.use_yolo = use_yolo
         self.transform = transform
         self.detector = None
+        self.normalize = v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     def __len__(self):
         return len(self.filepaths)
@@ -350,6 +410,8 @@ class LeafYOLODataset(torch.utils.data.Dataset):
         if self.transform:
             image_tensor = self.transform(image_tensor)
 
+        image_tensor = self.normalize(image_tensor)
+
         return image_tensor, mask_tensor, label
 
 def collect_dataset_files(dir_path: str | Path, class_names: list[str]) -> tuple[list[str], list[int]]:
@@ -376,7 +438,7 @@ def build_dynamic_yolo_dataset(
     seed: Optional[int] = None,
     use_yolo: bool = True,
     transform=None,
-    num_workers: int = 0,
+    num_workers: int = NUM_WORKERS,
     drop_last: bool = False,
     fraction: float = 1.0
 ):
@@ -405,8 +467,10 @@ def build_dynamic_yolo_dataset(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=False,
+        pin_memory=torch.cuda.is_available(),
         generator=generator,
-        drop_last=drop_last
+        drop_last=drop_last,
+        prefetch_factor=4 if num_workers > 0 else None,
+        persistent_workers=True if num_workers > 0 else False
     )
     return loader

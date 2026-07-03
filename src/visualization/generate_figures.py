@@ -6,26 +6,23 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import matplotlib
-import tensorflow.keras as keras
+import torch
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
-from tensorflow.keras.models import load_model
 
-from src.core.preprocessing import preprocess_batch_for_model_tf
+from src.pipeline.predict import _load_model_robust
 from src.training.learning_curve_utils import (
     best_epoch_from_values,
 )
-from src.training.training_utils import WarmupCosineSchedule
 from src.utils.config import (
     BATCH_SIZE,
     CLASS_INDICES_PATH,
@@ -35,85 +32,18 @@ from src.utils.config import (
     TRAIN_DIR,
     WARMUP_EPOCHS,
 )
-from src.utils.model_paths import resolve_keras_model_path
+from src.utils.model_paths import resolve_pytorch_model_path
 from src.visualization.figure_paths import (
     OTHERS_PLOTS_DIR,
     backbone_plot_dir,
     prepare_plot_directories,
 )
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 # Module-level model cache to avoid reloading
 _MODEL_PATH = None
 MODEL_PATH_OVERRIDE = None
 FIGURE_OUTPUT_DIR = OTHERS_PLOTS_DIR
 prepare_plot_directories()
-
-
-def _patch_vit_layer_init_for_compat():
-
-    try:
-        from keras_hub.src.models.vit import vit_layers
-
-        layer_cls = vit_layers.ViTPatchingAndEmbedding
-    except Exception:
-        return False
-
-    if getattr(layer_cls, "_leaf_compat_patched", False):
-        return True
-
-    original_init = layer_cls.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        kwargs.pop("num_patches", None)
-        kwargs.pop("num_positions", None)
-        return original_init(self, *args, **kwargs)
-
-    layer_cls.__init__ = _patched_init
-    layer_cls._leaf_compat_patched = True
-    return True
-
-
-def _load_model_robust(model_path: str):
-
-    custom_objects = {"WarmupCosineSchedule": WarmupCosineSchedule}
-    try:
-        return load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
-    except Exception as exc:
-        message = str(exc)
-        vit_compat_error = (
-            "ViTPatchingAndEmbedding" in message
-            or "num_patches" in message
-            or "num_positions" in message
-        )
-        if not vit_compat_error:
-            raise
-        if not _patch_vit_layer_init_for_compat():
-            raise
-        print("Applied ViT compatibility shim while loading model.")
-        return load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
-
-
-def _infer_backbone_from_model(model) -> str:
-
-    name = str(getattr(model, "name", "") or "").lower()
-    if "dino" in name or "vit" in name:
-        return "DINOv3"
-
-    for layer in model.layers:
-        layer_name = str(getattr(layer, "name", "") or "").lower()
-        class_name = layer.__class__.__name__.lower()
-        if "dino" in layer_name or "vit" in layer_name:
-            return "DINOv3"
-        if "vit" in class_name:
-            return "DINOv3"
-
-    return "EfficientNetV2B0"
 
 
 # Class distribution
@@ -187,40 +117,61 @@ def generate_confusion_matrix():
             if MODEL_PATH_OVERRIDE
             else [FINAL_MODEL_PATH]
         )
-        _MODEL_PATH = resolve_keras_model_path(path_candidates)
-    model = _load_model_robust(_MODEL_PATH)
-    backbone_name = _infer_backbone_from_model(model)
+        _MODEL_PATH = resolve_pytorch_model_path(path_candidates)
+    
+    from src.utils.hardware import get_device
+    device = get_device()
+    
+    model, backbone_name = _load_model_robust(_MODEL_PATH)
+    model.to(device)
+    model.eval()
+    
     global FIGURE_OUTPUT_DIR
     FIGURE_OUTPUT_DIR = backbone_plot_dir(backbone_name)
 
-    test_ds = keras.utils.image_dataset_from_directory(
-        TEST_DIR,
-        labels="inferred",
-        label_mode="int",
-        image_size=(IMG_SIZE, IMG_SIZE),
-        batch_size=BATCH_SIZE,
-        shuffle=False,
+    # Load classes and dataset
+    class_names = sorted(
+        entry.name for entry in os.scandir(TEST_DIR) if entry.is_dir()
     )
-    prep_test = test_ds.map(
-        lambda x, y: (
-            preprocess_batch_for_model_tf(x, backbone_name=backbone_name),
-            y,
-        ),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    ).prefetch(tf.data.AUTOTUNE)
+    _skip_yolo = "dinov3" in backbone_name.lower()
+
+    from src.training.training_utils import build_dynamic_yolo_dataset
+    test_loader = build_dynamic_yolo_dataset(
+        TEST_DIR,
+        class_names,
+        int(BATCH_SIZE),
+        shuffle=False,
+        use_yolo=not _skip_yolo,
+    )
+
+    y_true_list = []
+    y_pred_list = []
 
     print("  Computing predictions on test set...")
-    predictions = model.predict(prep_test, verbose=1)
-    if isinstance(predictions, (list, tuple)):
-        disease_preds = predictions[1]
-    elif isinstance(predictions, dict):
-        disease_preds = predictions["disease_output"]
-    else:
-        disease_preds = predictions
-    y_pred = np.argmax(disease_preds, axis=1)
-    y_true = np.concatenate([labels.numpy() for _, labels in test_ds], axis=0)
+    device_type = device.type if device.type in ("cuda", "cpu") else "cuda"
+    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
+    dtype = torch.bfloat16 if use_bf16 else torch.float16
 
-    class_names = [name.split("___")[-1][:15] for name in test_ds.class_names]
+    with torch.no_grad():
+        with torch.amp.autocast(device_type=device_type, dtype=dtype):
+            for images, _, labels in test_loader:
+                images = images.to(device, non_blocking=True)
+                outputs = model(images)
+                
+                disease_out = (
+                    outputs["disease_output"]
+                    if isinstance(outputs, dict)
+                    else outputs
+                )
+                _, predicted = torch.max(disease_out, 1)
+
+                y_true_list.extend(labels.numpy())
+                y_pred_list.extend(predicted.cpu().numpy())
+
+    y_true = np.array(y_true_list)
+    y_pred = np.array(y_pred_list)
+
+    display_class_names = [name.split("___")[-1][:15] for name in class_names]
     cm = confusion_matrix(y_true, y_pred)
     cm_norm = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
 
@@ -230,8 +181,8 @@ def generate_confusion_matrix():
         annot=False,
         fmt=".1f",
         cmap="Blues",
-        xticklabels=class_names,
-        yticklabels=class_names,
+        xticklabels=display_class_names,
+        yticklabels=display_class_names,
     )
     plt.xlabel("Predicted Label", fontsize=12)
     plt.ylabel("True Label", fontsize=12)
@@ -253,7 +204,7 @@ def generate_confusion_matrix():
     print(f"Saved: {FIGURE_OUTPUT_DIR}/confusion_matrix.png")
 
     # Persist class indices
-    class_indices = {name: idx for idx, name in enumerate(test_ds.class_names)}
+    class_indices = {name: idx for idx, name in enumerate(class_names)}
     with open(CLASS_INDICES_PATH, "w", encoding="utf-8") as f:
         json.dump(class_indices, f, indent=2)
     print(f"Saved: {CLASS_INDICES_PATH}")
@@ -262,7 +213,7 @@ def generate_confusion_matrix():
     report = classification_report(
         y_true,
         y_pred,
-        target_names=test_ds.class_names,
+        target_names=class_names,
         output_dict=True,
     )
     print("\nClassification Report Summary:")
@@ -1110,7 +1061,7 @@ def generate_model_architecture_diagram():
             if MODEL_PATH_OVERRIDE
             else [FINAL_MODEL_PATH]
         )
-        _MODEL_PATH = resolve_keras_model_path(path_candidates)
+        _MODEL_PATH = resolve_pytorch_model_path(path_candidates)
 
     model_path_lower = str(_MODEL_PATH).lower()
 
@@ -1343,55 +1294,74 @@ def generate_sample_predictions():
             if MODEL_PATH_OVERRIDE
             else [FINAL_MODEL_PATH]
         )
-        _MODEL_PATH = resolve_keras_model_path(path_candidates)
-    model = _load_model_robust(_MODEL_PATH)
-    backbone_name = _infer_backbone_from_model(model)
+        _MODEL_PATH = resolve_pytorch_model_path(path_candidates)
+    
+    from src.utils.hardware import get_device
+    device = get_device()
+    
+    model, backbone_name = _load_model_robust(_MODEL_PATH)
+    model.to(device)
+    model.eval()
 
-    sample_ds = keras.utils.image_dataset_from_directory(
+    class_names = sorted(
+        entry.name for entry in os.scandir(TEST_DIR) if entry.is_dir()
+    )
+    _skip_yolo = "dinov3" in backbone_name.lower()
+
+    from src.training.training_utils import build_dynamic_yolo_dataset
+    sample_loader = build_dynamic_yolo_dataset(
         TEST_DIR,
-        labels="inferred",
-        label_mode="int",
-        image_size=(IMG_SIZE, IMG_SIZE),
+        class_names,
         batch_size=1,
         shuffle=True,
         seed=42,
+        use_yolo=not _skip_yolo,
     )
 
     idx_to_class = {
-        idx: name for idx, name in enumerate(sample_ds.class_names)
+        idx: name for idx, name in enumerate(class_names)
     }
 
     fig, axes = plt.subplots(3, 4, figsize=(16, 12))
     axes = axes.flatten()
 
-    for i, (img_batch, label_batch) in enumerate(sample_ds.take(12)):
-        pred = model.predict(
-            preprocess_batch_for_model_tf(
-                img_batch, backbone_name=backbone_name
-            ),
-            verbose=0,
-        )
-        if isinstance(pred, (list, tuple)):
-            disease_pred = pred[1]
-        elif isinstance(pred, dict):
-            disease_pred = pred["disease_output"]
-        else:
-            disease_pred = pred
-        pred_class = int(np.argmax(disease_pred[0]))
-        confidence = float(np.max(disease_pred[0])) * 100
-        true_class = int(label_batch.numpy()[0])
+    device_type = device.type if device.type in ("cuda", "cpu") else "cuda"
+    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
+    dtype = torch.bfloat16 if use_bf16 else torch.float16
 
-        display_img = img_batch.numpy()[0].astype(np.uint8)
-        axes[i].imshow(display_img)
+    with torch.no_grad():
+        with torch.amp.autocast(device_type=device_type, dtype=dtype):
+            for i, (img_batch, mask_batch, label_batch) in enumerate(sample_loader):
+                if i >= 12:
+                    break
+                
+                img_batch = img_batch.to(device, non_blocking=True)
+                outputs = model(img_batch)
+                
+                disease_pred = (
+                    outputs["disease_output"]
+                    if isinstance(outputs, dict)
+                    else outputs
+                )
+                
+                import torch.nn.functional as F
+                probs = F.softmax(disease_pred, dim=1).cpu().numpy()[0]
+                
+                pred_class = int(np.argmax(probs))
+                confidence = float(np.max(probs)) * 100
+                true_class = int(label_batch.numpy()[0])
 
-        pred_name = (
-            idx_to_class[pred_class].replace("___", "\n").replace("_", " ")
-        )
-        color = "green" if pred_class == true_class else "red"
-        axes[i].set_title(
-            f"Pred: {pred_name}\n({confidence:.1f}%)", fontsize=8, color=color
-        )
-        axes[i].axis("off")
+                display_img = (img_batch[0].cpu().numpy().transpose((1, 2, 0)) * 255.0).astype(np.uint8)
+                axes[i].imshow(display_img)
+
+                pred_name = (
+                    idx_to_class[pred_class].replace("___", "\n").replace("_", " ")
+                )
+                color = "green" if pred_class == true_class else "red"
+                axes[i].set_title(
+                    f"Pred: {pred_name}\n({confidence:.1f}%)", fontsize=8, color=color
+                )
+                axes[i].axis("off")
 
     plt.suptitle(
         "Sample Predictions (Green = Correct, Red = Incorrect)",
@@ -1432,7 +1402,7 @@ def main():
     path_candidates = (
         [MODEL_PATH_OVERRIDE] if MODEL_PATH_OVERRIDE else [FINAL_MODEL_PATH]
     )
-    _MODEL_PATH = resolve_keras_model_path(path_candidates)
+    _MODEL_PATH = resolve_pytorch_model_path(path_candidates)
 
     # If explicit output-dir provided, use it; otherwise infer from model path
     if args.output_dir:

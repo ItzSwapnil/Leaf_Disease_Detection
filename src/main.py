@@ -81,7 +81,7 @@ def main():
         "fine_tune": PROJECT_ROOT / "training" / "fine_tune_model.py",
         "refine": PROJECT_ROOT / "training" / "refine_model.py",
         "evaluate": PROJECT_ROOT / "evaluation" / "evaluate_model.py",
-        "visualize": PROJECT_ROOT.parent / "scripts" / "generate_figures.py",
+        "visualize": PROJECT_ROOT / "visualization" / "generate_figures.py",
         "resume": PROJECT_ROOT / "training" / "fine_tune_model.py",
         "validate": PROJECT_ROOT / "evaluation" / "evaluate_model.py",
     }

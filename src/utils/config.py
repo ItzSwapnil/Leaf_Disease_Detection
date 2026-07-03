@@ -117,8 +117,8 @@ def _env_float_list(name: str, default_csv: str) -> tuple[float, ...]:
 # ============================================================
 
 IMG_SIZE = 224  # EfficientNetV2-B0 native resolution
-NUM_CLASSES = 40  # Total classes after removing 6 incomplete families
-NUM_CROPS = 10  # Total unique plant families
+NUM_CLASSES = 29  # Total classes in PlantDoc
+NUM_CROPS = 13  # Total unique plant crop families in PlantDoc
 
 # ============================================================
 #           HEAVY AUGMENTATION (background invariance)
@@ -183,7 +183,7 @@ ATTENTION_VIT_BLOCK_IDX = _env_int("LEAF_ATTENTION_VIT_BLOCK_IDX", 10)
 
 BATCH_SIZE = _env_int("LEAF_BATCH_SIZE", 32)  # Safer default for 8 GB GPUs
 EPOCHS_PHASE1 = _env_int("LEAF_EPOCHS_PHASE1", 5)
-EPOCHS_PHASE2 = _env_int("LEAF_EPOCHS_PHASE2", 10)
+EPOCHS_PHASE2 = _env_int("LEAF_EPOCHS_PHASE2", 15)
 LEARNING_RATE_PHASE1 = 2e-4  # Safe LR for head-only + class equalizer
 LEARNING_RATE_PHASE2 = (
     5e-5  # Lower LR for backbone fine-tuning (reduced to limit overfitting)
@@ -314,11 +314,12 @@ PLOTS_DIR = str(BASE_DIR / "plots")
 LOGS_DIR = str(BASE_DIR / "logs")
 
 # ============================================================
-#                     CPU OPTIMISATION
+#                     CPU & DATALOADER OPTIMISATION
 # ============================================================
 
-INTRA_OP_THREADS = 4
-INTER_OP_THREADS = 4
+INTRA_OP_THREADS = _env_int("LEAF_INTRA_OP_THREADS", 8)
+INTER_OP_THREADS = _env_int("LEAF_INTER_OP_THREADS", 4)
+NUM_WORKERS = _env_int("LEAF_NUM_WORKERS", 8)
 
 # ============================================================
 #                    MODEL ARCHITECTURE
@@ -331,8 +332,8 @@ BASE_MODEL = "DINOv3"
 # Classification head
 DENSE_UNITS = 512
 
-# Layer unfreezing for Phase 2 (-1 = unfreeze all layers)
-UNFREEZE_LAYERS = -1
+# Layer unfreezing for Phase 2 (-1 = unfreeze all layers, default to -1 for best ViT fine-tuning)
+UNFREEZE_LAYERS = _env_int("LEAF_UNFREEZE_LAYERS", -1)
 
 
 # Fine-tuning strategy

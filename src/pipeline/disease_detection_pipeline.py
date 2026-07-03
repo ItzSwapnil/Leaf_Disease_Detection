@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from torchvision.transforms import v2
 
 from src.core.inference_guard import (
@@ -78,7 +78,6 @@ class LeafDiseasePipeline:
             v2.Resize((IMG_SIZE, IMG_SIZE)),
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         self.leaf_detector = None
@@ -138,24 +137,71 @@ class LeafDiseasePipeline:
 
     def stage_2_remove_background(self, img_path: str) -> dict[str, Any]:
         try:
-            with Image.open(img_path) as img:
-                img_resized = img.convert("RGB").resize((IMG_SIZE, IMG_SIZE))
-                img_array = np.asarray(img_resized, dtype=np.float32)
+            import tempfile
 
-            crop_bbox = (0, 0, img_array.shape[1], img_array.shape[0])
+            with Image.open(img_path) as img:
+                img_transposed = ImageOps.exif_transpose(img)
+                w, h = img_transposed.size
+
+            crop_bbox = (0, 0, w, h)
             reason = "Bypassed masking (kept original image)"
+            preprocessed_image_path = img_path
 
             yolo_leaf_detector = self._get_yolo_leaf_detector()
             if yolo_leaf_detector is not None:
-                img_bgr = cv2.imread(img_path)
-                if img_bgr is not None:
-                    detection = yolo_leaf_detector.detect(img_bgr)
-                    if detection["found"]:
-                        crop_bbox = detection["bbox"]
-                        reason = f"YOLOv26 leaf focus detected bbox: {crop_bbox}"
+                with Image.open(img_path) as img:
+                    img_transposed = ImageOps.exif_transpose(img).convert("RGB")
+                    img_bgr = cv2.cvtColor(np.array(img_transposed), cv2.COLOR_RGB2BGR)
+
+                detection = yolo_leaf_detector.detect(img_bgr)
+                if detection["found"]:
+                    x1, y1, x2, y2 = detection["bbox"]
+                    crop_bbox = (x1, y1, x2, y2)
+
+                    img_cropped = img_transposed.crop((x1, y1, x2, y2))
+                    
+                    # Precise GrabCut segmentation inside the cropped bbox to mask out backgrounds/shadows
+                    from src.core.leaf_segmentation import segment_leaf_grabcut
+                    img_cropped_rgb = np.array(img_cropped)
+                    seg_res = segment_leaf_grabcut(img_cropped_rgb)
+                    if seg_res["success"]:
+                        img_cropped = Image.fromarray(seg_res["masked_image"])
+                        reason = f"YOLOv26 leaf focus detected bbox: {crop_bbox} with precise GrabCut mask"
+                    else:
+                        reason = f"YOLOv26 leaf focus detected bbox: {crop_bbox} (GrabCut segmentation failed)"
+
+                    temp_dir = os.path.dirname(img_path) or "."
+                    _, ext = os.path.splitext(img_path)
+                    temp_file = tempfile.NamedTemporaryFile(
+                        suffix=ext.lower() or ".jpg", dir=temp_dir, delete=False
+                    )
+                    temp_file_name = temp_file.name
+                    temp_file.close()
+                    img_cropped.save(temp_file_name)
+
+                    preprocessed_image_path = temp_file_name
+            else:
+                # Fallback: precise GrabCut segmentation on the entire image
+                from src.core.leaf_segmentation import segment_leaf_grabcut
+                with Image.open(img_path) as img:
+                    img_transposed = ImageOps.exif_transpose(img).convert("RGB")
+                img_rgb = np.array(img_transposed)
+                seg_res = segment_leaf_grabcut(img_rgb)
+                if seg_res["success"]:
+                    img_segmented = Image.fromarray(seg_res["masked_image"])
+                    temp_dir = os.path.dirname(img_path) or "."
+                    _, ext = os.path.splitext(img_path)
+                    temp_file = tempfile.NamedTemporaryFile(
+                        suffix=ext.lower() or ".jpg", dir=temp_dir, delete=False
+                    )
+                    temp_file_name = temp_file.name
+                    temp_file.close()
+                    img_segmented.save(temp_file_name)
+                    preprocessed_image_path = temp_file_name
+                    reason = "Applied precise contour segmentation on the full image"
 
             return {
-                "preprocessed_image": img_path, # Changed to return path for transform
+                "preprocessed_image": preprocessed_image_path,
                 "crop_bbox": crop_bbox,
                 "mask": None,
                 "segmentation_ratio": 1.0,
@@ -167,14 +213,15 @@ class LeafDiseasePipeline:
                 "crop_bbox": None,
                 "mask": None,
                 "segmentation_ratio": 0.0,
-                "reason": f"Failed to load image: {exc}",
+                "reason": f"Failed to load/crop image: {exc}",
             }
 
     @torch.no_grad()
     def stage_3_classify_leaf(
         self, img_path: str
     ) -> tuple[str, float, dict[str, Any]]:
-        img = Image.open(img_path).convert("RGB")
+        img = Image.open(img_path)
+        img = ImageOps.exif_transpose(img).convert("RGB")
         tensor = self.transform(img).unsqueeze(0).to(self.device)
 
         if len(self.models) > 1:
@@ -265,6 +312,13 @@ class LeafDiseasePipeline:
             )
             pipeline_stages.append(("safety_check", safety))
 
+            # Clean up temp file
+            if bg_removal["preprocessed_image"] != img_path:
+                try:
+                    os.remove(bg_removal["preprocessed_image"])
+                except Exception as e:
+                    print(f"[WARNING] Failed to remove temp file: {e}")
+
             if safety["reject"]:
                 return {
                     "success": False,
@@ -279,6 +333,13 @@ class LeafDiseasePipeline:
                         "reason", "Inference safety check failed"
                     ),
                 }
+
+        # Clean up temp file for success prediction
+        if bg_removal["preprocessed_image"] != img_path:
+            try:
+                os.remove(bg_removal["preprocessed_image"])
+            except Exception as e:
+                print(f"[WARNING] Failed to remove temp file: {e}")
 
         return {
             "success": True,

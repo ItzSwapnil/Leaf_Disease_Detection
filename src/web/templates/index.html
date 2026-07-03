@@ -362,10 +362,30 @@
             border: 1px solid rgba(251, 146, 60, 0.3);
         }
 
-        .plant-name {
-            font-size: 1.2rem;
-            color: #94a3b8;
-            margin-bottom: 5px;
+        .badges-container {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+            align-items: center;
+        }
+
+        .badges-container .status-badge {
+            margin-bottom: 0;
+        }
+
+        .plant-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            background: rgba(14, 165, 233, 0.15);
+            color: #38bdf8;
+            border: 1px solid rgba(14, 165, 233, 0.25);
+            transition: all 0.3s ease;
         }
 
         .disease-name {
@@ -1509,11 +1529,16 @@
                 <div class="result-header">
                     <img src="" alt="Analyzed Image" class="result-image" id="resultImage">
                     <div class="result-main">
-                        <div class="status-badge" id="statusBadge">
-                            <i class="fas fa-check-circle"></i>
-                            <span id="statusText">Healthy</span>
+                        <div class="badges-container">
+                            <div class="status-badge" id="statusBadge">
+                                <i class="fas fa-check-circle"></i>
+                                <span id="statusText">Healthy</span>
+                            </div>
+                            <div class="plant-badge" id="plantBadge">
+                                <i class="fas fa-seedling"></i>
+                                <span id="plantName">Tomato Plant</span>
+                            </div>
                         </div>
-                        <p class="plant-name" id="plantName">Tomato Plant</p>
                         <h2 class="disease-name" id="diseaseName">Healthy Leaf</h2>
                         <div class="confidence-bar">
                             <div class="confidence-fill" id="confidenceFill" style="width: 0%"></div>
@@ -1648,7 +1673,7 @@
                 <label for="trainBackboneSelect">Training backbone</label>
                 <select id="trainBackboneSelect" class="model-select">
                     {% for backbone_name in training_backbones %}
-                    <option value="{{ backbone_name }}" {% if backbone_name == 'EfficientNetV2B0' %}selected{% endif %}>{{ backbone_name }}</option>
+                    <option value="{{ backbone_name }}" {% if backbone_name == default_training_backbone %}selected{% endif %}>{{ backbone_name }}</option>
                     {% endfor %}
                 </select>
                 <small>Used by the Train Model action (sent as --base-model).</small>
@@ -1989,7 +2014,7 @@
 
             // Update text content
             document.getElementById('plantName').textContent =
-                result.is_valid_leaf === false ? 'Leaf Validation' : (result.plant + ' Plant');
+                result.is_valid_leaf === false ? 'Leaf Validation' : result.plant;
             document.getElementById('diseaseName').textContent = result.disease;
             document.getElementById('confidenceValue').textContent = result.confidence + '%';
             

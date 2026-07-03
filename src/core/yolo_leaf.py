@@ -13,7 +13,7 @@ from typing import TypedDict
 import cv2
 import numpy as np
 
-from src.utils.config import BASE_DIR, MODELS_DIR
+from src.utils.config import MODELS_DIR
 
 YOLO_MODEL_PATH = Path(MODELS_DIR) / "yolo26_leaf_detector.pt"
 
@@ -40,7 +40,7 @@ class YOLOLeafDetector:
             model_path = (
                 YOLO_MODEL_PATH
                 if YOLO_MODEL_PATH.exists()
-                else Path(BASE_DIR) / "yolo26n.pt"
+                else Path(MODELS_DIR) / "yolo26n.pt"
             )
         self.model = _create_yolo_model(model_path)
         self.model_path = model_path

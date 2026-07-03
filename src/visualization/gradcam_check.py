@@ -14,6 +14,8 @@ Usage:
 
 from __future__ import annotations
 
+from typing import Any
+
 import argparse
 import json
 import os
@@ -23,12 +25,13 @@ import sys
 import numpy as np
 
 # Ensure project root is on path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import keras
-import tensorflow as tf
+import torch
+import torch.nn as nn
+from PIL import Image, ImageOps
 
-from src.core.preprocessing import preprocess_array_for_model
+from src.pipeline.predict import _load_model_robust
 from src.utils.config import (
     CLASS_INDICES_PATH,
     FINAL_MODEL_PATH,
@@ -36,111 +39,9 @@ from src.utils.config import (
     PLOTS_DIR,
     VAL_DIR,
 )
-from src.utils.model_paths import resolve_keras_model_path
+from src.utils.model_paths import resolve_pytorch_model_path
 
 # background_remover import bypassed
-
-
-def _patch_vit_layer_init_for_compat() -> bool:
-    """Patch keras-hub ViT layer init to ignore legacy serialized kwargs."""
-    try:
-        from keras_hub.src.models.vit import vit_layers
-
-        layer_cls = vit_layers.ViTPatchingAndEmbedding
-    except Exception:
-        return False
-
-    if getattr(layer_cls, "_leaf_compat_patched", False):
-        return True
-
-    original_init = layer_cls.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        kwargs.pop("num_patches", None)
-        kwargs.pop("num_positions", None)
-
-        import inspect
-
-        expects_tuple = False
-        try:
-            source = inspect.getsource(original_init)
-            if "zip(" in source or "grid_size" in source:
-                expects_tuple = True
-        except Exception:
-            try:
-                import keras_hub
-
-                ver = getattr(keras_hub, "__version__", "0.0.0")
-                parts = [int(p) for p in ver.split(".") if p.isdigit()]
-                if parts and (parts[0] > 0 or parts[1] >= 20):
-                    expects_tuple = True
-            except Exception:
-                pass
-
-        if expects_tuple:
-            if "image_size" in kwargs and isinstance(
-                kwargs["image_size"], int
-            ):
-                kwargs["image_size"] = (
-                    kwargs["image_size"],
-                    kwargs["image_size"],
-                )
-            if "patch_size" in kwargs and isinstance(
-                kwargs["patch_size"], int
-            ):
-                kwargs["patch_size"] = (
-                    kwargs["patch_size"],
-                    kwargs["patch_size"],
-                )
-        else:
-            if "image_size" in kwargs and not isinstance(
-                kwargs["image_size"], int
-            ):
-                try:
-                    kwargs["image_size"] = kwargs["image_size"][0]
-                except Exception:
-                    pass
-            if "patch_size" in kwargs and not isinstance(
-                kwargs["patch_size"], int
-            ):
-                try:
-                    kwargs["patch_size"] = kwargs["patch_size"][0]
-                except Exception:
-                    pass
-
-        return original_init(self, *args, **kwargs)
-
-    layer_cls.__init__ = _patched_init
-    layer_cls._leaf_compat_patched = True
-    return True
-
-
-def _load_model_robust(model_path: str):
-    """Load model with compatibility fallbacks for DINO/KerasHub checkpoints."""
-    from src.training.training_utils import WarmupCosineSchedule as _WCS
-
-    custom_objects = {"WarmupCosineSchedule": _WCS}
-    try:
-        return keras.models.load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
-    except TypeError as exc:
-        error_text = str(exc)
-        if "ViTPatchingAndEmbedding" not in error_text:
-            raise
-
-        if not _patch_vit_layer_init_for_compat():
-            raise RuntimeError(
-                "Failed to load ViT/DINO checkpoint due to keras-hub version mismatch."
-            ) from exc
-
-        print(
-            "Detected KerasHub ViT checkpoint compatibility mismatch; "
-            "retrying load with compatibility shim."
-        )
-        return keras.models.load_model(
-            model_path, custom_objects=custom_objects, compile=False
-        )
 
 
 def _load_class_indices(path: str) -> dict[int, str]:
@@ -150,252 +51,180 @@ def _load_class_indices(path: str) -> dict[int, str]:
     return {int(v): k for k, v in label_to_idx.items()}
 
 
-def _infer_backbone_name(model) -> str:
-    """Best-effort backbone detection from model layers."""
-    for layer in getattr(model, "layers", []):
-        layer_name = (getattr(layer, "name", "") or "").lower()
-        if any(tok in layer_name for tok in ["vit", "dino", "transformer"]):
-            return "DINOv3"
-    return "EfficientNetV2B0"
+class HookContainer:
+    def __init__(self) -> None:
+        self.activation: torch.Tensor | None = None
+        self.gradient: torch.Tensor | None = None
+
+    def __call__(self, module: nn.Module, input: tuple[torch.Tensor, ...], output: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
+        if isinstance(output, tuple):
+            self.activation = output[0]
+        else:
+            self.activation = output
+
+        def backward_hook(grad: torch.Tensor) -> None:
+            self.gradient = grad.detach()
+
+        self.activation.register_hook(backward_hook)
 
 
-def _find_target_layer(model) -> str | None:
-    """Find the name of the target layer (last conv or vit_encoder)."""
-    # Check for ViT encoder first
-    for layer in model.layers:
-        if layer.name == "vit_encoder":
-            return layer.name
-
-    # Fallback to last conv
+def _find_last_conv_layer(module: nn.Module) -> nn.Module | None:
     last_conv = None
-    for layer in model.layers:
-        if isinstance(layer, (keras.layers.Conv2D,)):
-            last_conv = layer.name
-        # Also check inside nested models (like the backbone)
-        if hasattr(layer, "layers"):
-            for sub_layer in layer.layers:
-                if isinstance(sub_layer, (keras.layers.Conv2D,)):
-                    last_conv = sub_layer.name
+    for m in module.modules():
+        if isinstance(m, nn.Conv2d):
+            last_conv = m
     return last_conv
 
 
-def _find_conv_layer_in_model(model, layer_name: str):
-    """Find a layer by name, searching nested models too."""
-    try:
-        return model.get_layer(layer_name)
-    except ValueError:
-        pass
-    for layer in model.layers:
-        if hasattr(layer, "get_layer"):
-            try:
-                return layer.get_layer(layer_name)
-            except ValueError:
-                continue
-    return None
+def _process_heatmap_tensor(
+    act: torch.Tensor,
+    grad: torch.Tensor,
+    backbone_name: str,
+) -> np.ndarray:
+    act = act.detach().cpu()
+    grad = grad.detach().cpu()
+
+    if "vit" in backbone_name.lower() or backbone_name == "DINOv3":
+        # Average gradients over sequence dimension: shape (1, 768)
+        pooled = torch.mean(grad, dim=1)
+        # Weighted sum: shape (197,)
+        hm = torch.sum(act[0] * pooled[0], dim=-1)
+        # Slice off class token at index 0: shape (196,)
+        hm = hm[1:]
+        # Apply ReLU
+        hm = torch.clamp(hm, min=0.0)
+        # Reshape to (14, 14)
+        gs = int(np.sqrt(hm.shape[0]))
+        hm = hm.view(gs, gs)
+        heatmap = hm.numpy()
+    else:
+        # CNN backbone: shape (1, C, H, W)
+        # Average gradients over spatial dimensions (height, width): shape (C,)
+        pooled = torch.mean(grad, dim=(0, 2, 3))
+        # Weighted sum over channels: shape (H, W)
+        hm = torch.sum(act[0] * pooled.view(-1, 1, 1), dim=0)
+        hm = torch.clamp(hm, min=0.0)
+        heatmap = hm.numpy()
+
+    # Normalise heatmap to [0, 1]
+    denom = np.max(heatmap) + 1e-8
+    heatmap = heatmap / denom
+
+    import cv2
+    heatmap = cv2.resize(heatmap, (IMG_SIZE, IMG_SIZE))
+    return heatmap
 
 
 def _make_gradcam_heatmap(
-    model,
-    img_array: np.ndarray,
+    model: nn.Module,
+    img_tensor: torch.Tensor,
     target_layer_name: str | None = None,
     pred_index: int | None = None,
     backbone_name: str = "DINOv3",
-    vit_block_idx: int = 6,
+    vit_block_idx: int = 10,
     healthy_partner_idx: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generate Grad-CAM heatmap for a single image.
+    """Generate Grad-CAM heatmap for a single image using PyTorch hooks.
 
     Args:
-        model: Keras model.
-        img_array: Preprocessed image array of shape (1, H, W, 3).
+        model: PyTorch LeafDiseaseModel.
+        img_tensor: Preprocessed image tensor on device of shape (1, 3, 224, 224).
         target_layer_name: Name of the target layer (used for CNN/Conv2D models).
         pred_index: Class index to visualize. None = top predicted class.
         backbone_name: Detected backbone name (e.g. "DINOv3" or "EfficientNetV2B0").
-        vit_block_idx: The block index of the ViT backbone to visualize (default: 6).
+        vit_block_idx: The block index of the ViT backbone to visualize (default: 10).
         healthy_partner_idx: Healthy baseline index for FBDL deviation computation.
 
     Returns:
-        Heatmap array of shape (H, W) with values in [0, 1].
+        tuple containing (crop_heatmap, disease_heatmap) of shape (H, W) in [0, 1].
     """
-    if hasattr(model, "functional_model"):
-        # Extract underlying keras.Model from SaliencyAlignedModel wrapper
-        model = model.functional_model
+    # 1. Resolve target module
+    backbone_wrapper = getattr(model, "backbone", None)
+    if backbone_wrapper is None:
+        raise ValueError("Model does not have a backbone attribute.")
+    underlying_backbone = getattr(backbone_wrapper, "backbone", None)
+    if underlying_backbone is None:
+        raise ValueError("Backbone wrapper does not have a backbone attribute.")
 
+    target_module: nn.Module
     if backbone_name == "DINOv3":
-        # ViT Grad-CAM using custom forward pass to capture intermediate block activations
-        # and compute gradients of raw class logits (before softmax)
-        vit_encoder = model.get_layer("vit_encoder")
-        patch_embed = model.get_layer("vit_patching_and_embedding")
-        pool = model.get_layer("global_average_pooling1d")
-
-        with tf.GradientTape(persistent=True) as tape:
-            # Step 1: Patching & Embedding
-            pe_out = patch_embed(img_array)
-            tape.watch(pe_out)
-
-            # Step 2: ViT Encoder Blocks
-            if (
-                hasattr(vit_encoder, "dropout")
-                and vit_encoder.dropout is not None
-            ):
-                x = vit_encoder.dropout(pe_out)
-            else:
-                x = pe_out
-
-            target_activation = None
-            if target_layer_name == "patch_embed":
-                target_activation = pe_out
-
-            # Robustly find encoder blocks
-            encoder_blocks = []
-            if hasattr(vit_encoder, "layers"):
-                for blk in vit_encoder.layers:
-                    if (
-                        isinstance(blk, keras.layers.Layer)
-                        and "encoder_block" in blk.name
-                    ):
-                        encoder_blocks.append(blk)
-            if not encoder_blocks and hasattr(vit_encoder, "encoder_layers"):
-                encoder_blocks = vit_encoder.encoder_layers
-            elif not encoder_blocks and hasattr(
-                vit_encoder, "transformer_layers"
-            ):
-                encoder_blocks = vit_encoder.transformer_layers
-
-            for i, blk in enumerate(encoder_blocks):
-                x = blk(x)
-                if target_layer_name != "patch_embed" and i == vit_block_idx:
-                    target_activation = x
-                    tape.watch(target_activation)
-
-            if (
-                hasattr(vit_encoder, "layer_norm")
-                and vit_encoder.layer_norm is not None
-            ):
-                final_vit_out = vit_encoder.layer_norm(x)
-            else:
-                final_vit_out = x
-
-            if target_layer_name == "vit_encoder_final":
-                target_activation = final_vit_out
-                tape.watch(target_activation)
-
-            # Step 3: Classification Head
-            x_head = pool(final_vit_out)
-
-            try:
-                x_head = model.get_layer("head_bn")(x_head)
-                x_head = model.get_layer("head_dense_1")(x_head)
-                x_head = model.get_layer("head_dropout_1")(x_head)
-                x_head = model.get_layer("head_dense_2")(x_head)
-                x_head = model.get_layer("head_dropout_2")(x_head)
-
-                crop_logits = model.get_layer("crop_logits")(x_head)
-                disease_logits = model.get_layer("disease_logits")(x_head)
-            except ValueError:
-                raise ValueError(
-                    "Named layers missing. Ensure train_model.py sets explicit head layer names."
-                )
-
-            if pred_index is None:
-                disease_pred_index = tf.argmax(disease_logits[0])
-            else:
-                disease_pred_index = pred_index
-            crop_pred_index = tf.argmax(crop_logits[0])
-
-            if healthy_partner_idx is not None and healthy_partner_idx != -1:
-                disease_score = (
-                    disease_logits[:, disease_pred_index]
-                    - disease_logits[:, healthy_partner_idx]
-                )
-            else:
-                disease_score = disease_logits[:, disease_pred_index]
-
-            crop_score = crop_logits[:, crop_pred_index]
-
-        disease_grads = tape.gradient(disease_score, target_activation)
-        crop_grads = tape.gradient(crop_score, target_activation)
-        del tape
-
-        if disease_grads is None or crop_grads is None:
-            zeros = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.float32)
-            return zeros, zeros
-
-        def process_heatmap(g):
-            pooled = tf.reduce_mean(g, axis=1)
-            hm = tf.reduce_sum(target_activation[0] * pooled[0], axis=-1)
-            hm = tf.maximum(hm, 0.0)
-            if hm.shape[0] % 2 != 0:
-                hm = hm[1:]
-            gs = int(np.sqrt(hm.shape[0]))
-            return tf.reshape(hm, (gs, gs))
-
-        disease_heatmap = process_heatmap(disease_grads)
-        crop_heatmap = process_heatmap(crop_grads)
-
-    else:
-        # Standard CNN (Conv2D) Grad-CAM
-        target_layer = _find_conv_layer_in_model(model, target_layer_name)
-        if target_layer is None:
-            raise ValueError(
-                f"Layer '{target_layer_name}' not found in model."
-            )
-
-        original_activation = model.layers[-1].activation
-        model.layers[-1].activation = keras.activations.linear
-
+        encoder = getattr(underlying_backbone, "encoder", None)
+        if encoder is None:
+            raise ValueError("ViT backbone has no encoder.")
+        layers = getattr(encoder, "layers", None)
+        if layers is None:
+            raise ValueError("ViT encoder has no layers.")
         try:
-            grad_model = keras.Model(
-                inputs=model.input,
-                outputs=[target_layer.output, model.output],
+            target_module = layers[vit_block_idx]
+        except (AttributeError, IndexError) as e:
+            raise ValueError(
+                f"Failed to find ViT block index {vit_block_idx} in model backbone: {e}"
             )
+    else:
+        if target_layer_name:
+            resolved_module = None
+            for name, module in model.named_modules():
+                if name == target_layer_name:
+                    resolved_module = module
+                    break
+            if resolved_module is None:
+                raise ValueError(f"Target layer name '{target_layer_name}' not found.")
+            target_module = resolved_module
+        else:
+            resolved_module = _find_last_conv_layer(underlying_backbone)
+            if resolved_module is None:
+                raise ValueError("Could not find any Conv2d layer in backbone.")
+            target_module = resolved_module
 
-            with tf.GradientTape() as tape:
-                outputs, predictions = grad_model(img_array, training=False)
-                if pred_index is None:
-                    pred_index = tf.argmax(predictions[0])
+    # 2. Register hooks
+    container = HookContainer()
+    handle = target_module.register_forward_hook(container)
 
-                if (
-                    healthy_partner_idx is not None
-                    and healthy_partner_idx != -1
-                ):
-                    class_channel = (
-                        predictions[:, pred_index]
-                        - predictions[:, healthy_partner_idx]
-                    )
-                else:
-                    class_channel = predictions[:, pred_index]
+    # Enable grad to compute Grad-CAM gradients
+    with torch.set_grad_enabled(True):
+        outputs = model(img_tensor)
+        crop_logits = outputs["crop_output"]
+        disease_logits = outputs["disease_output"]
 
-            grads = tape.gradient(class_channel, outputs)
-        finally:
-            model.layers[-1].activation = original_activation
+        if pred_index is None:
+            pred_index = int(torch.argmax(disease_logits[0]).item())
+        crop_pred_index = int(torch.argmax(crop_logits[0]).item())
 
-        if grads is None:
-            return np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.float32)
+        if healthy_partner_idx is not None and healthy_partner_idx != -1:
+            disease_score = disease_logits[0, pred_index] - disease_logits[0, healthy_partner_idx]
+        else:
+            disease_score = disease_logits[0, pred_index]
 
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        outputs = outputs[0]
-        heatmap = outputs @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap)
+        crop_score = crop_logits[0, crop_pred_index]
 
-        disease_heatmap = heatmap
-        crop_heatmap = heatmap
+        # Backward for disease score
+        model.zero_grad()
+        disease_score.backward(retain_graph=True)
+        disease_grad = container.gradient
+        disease_act = container.activation
 
-    disease_heatmap = tf.maximum(disease_heatmap, 0) / (
-        tf.math.reduce_max(disease_heatmap) + 1e-5
-    )
-    disease_heatmap = disease_heatmap.numpy()
-    disease_heatmap = tf.image.resize(
-        disease_heatmap[..., np.newaxis], (IMG_SIZE, IMG_SIZE)
-    ).numpy()[:, :, 0]
+        # Clear gradient state in hook container
+        container.gradient = None
 
-    crop_heatmap = tf.maximum(crop_heatmap, 0) / (
-        tf.math.reduce_max(crop_heatmap) + 1e-5
-    )
-    crop_heatmap = crop_heatmap.numpy()
-    crop_heatmap = tf.image.resize(
-        crop_heatmap[..., np.newaxis], (IMG_SIZE, IMG_SIZE)
-    ).numpy()[:, :, 0]
+        # Backward for crop score
+        model.zero_grad()
+        crop_score.backward()
+        crop_grad = container.gradient
+        crop_act = container.activation
+
+    # Clean up hook handle
+    handle.remove()
+
+    # Process heatmaps
+    if disease_grad is None or disease_act is None:
+        disease_heatmap = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.float32)
+    else:
+        disease_heatmap = _process_heatmap_tensor(disease_act, disease_grad, backbone_name)
+
+    if crop_grad is None or crop_act is None:
+        crop_heatmap = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.float32)
+    else:
+        crop_heatmap = _process_heatmap_tensor(crop_act, crop_grad, backbone_name)
 
     return crop_heatmap, disease_heatmap
 
@@ -462,8 +291,8 @@ def _simple_blur(img_array: np.ndarray, size: int = 9) -> np.ndarray:
 
 
 def _compute_deletion_drop(
-    model,
-    img_array: np.ndarray,
+    model: nn.Module,
+    img_tensor: torch.Tensor,
     backbone_name: str,
     pred_idx: int,
     heatmap: np.ndarray,
@@ -471,22 +300,17 @@ def _compute_deletion_drop(
 ) -> float:
     """Calculate relative confidence drop when blurring the top 'fraction' of attended pixels."""
     # 1. Predict original probability
-    original_preds = model.predict(img_array, verbose=0)
-    if isinstance(original_preds, dict):
-        disease_preds = original_preds["disease_output"]
-    else:
-        disease_preds = original_preds
-    orig_prob = float(disease_preds[0][pred_idx])
+    with torch.no_grad():
+        outputs = model(img_tensor)
+        disease_out = outputs["disease_output"] if isinstance(outputs, dict) else outputs
+        disease_probs = torch.softmax(disease_out, dim=-1)
+        orig_prob = float(disease_probs[0][pred_idx].item())
+
     if orig_prob < 1e-8:
         return 0.0
 
-    # 2. Extract or reconstruct de-preprocessed RGB image in [0, 255]
-    if backbone_name == "DINOv3":
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        rgb_img = (img_array[0] * std + mean) * 255.0
-    else:
-        rgb_img = img_array[0].copy()
+    # 2. Extract original RGB image in [0, 255] from img_tensor
+    rgb_img = img_tensor[0].detach().cpu().numpy().transpose((1, 2, 0)) * 255.0
 
     # 3. Create blurred image
     blurred_img = _simple_blur(rgb_img, size=15)
@@ -500,19 +324,14 @@ def _compute_deletion_drop(
     perturbed_img[mask] = blurred_img[mask]
 
     # 6. Re-preprocess and predict
-    if backbone_name == "DINOv3":
-        perturbed_img_prep = perturbed_img / 255.0
-        perturbed_img_prep = (perturbed_img_prep - mean) / std
-    else:
-        perturbed_img_prep = perturbed_img
+    perturbed_tensor = torch.from_numpy(perturbed_img.transpose((2, 0, 1))).unsqueeze(0).float() / 255.0
+    perturbed_tensor = perturbed_tensor.to(img_tensor.device)
 
-    perturbed_batch = perturbed_img_prep[np.newaxis, ...]
-    perturbed_preds = model.predict(perturbed_batch, verbose=0)
-    if isinstance(perturbed_preds, dict):
-        pert_disease_preds = perturbed_preds["disease_output"]
-    else:
-        pert_disease_preds = perturbed_preds
-    perturbed_prob = float(pert_disease_preds[0][pred_idx])
+    with torch.no_grad():
+        perturbed_outputs = model(perturbed_tensor)
+        perturbed_disease_out = perturbed_outputs["disease_output"] if isinstance(perturbed_outputs, dict) else perturbed_outputs
+        perturbed_probs = torch.softmax(perturbed_disease_out, dim=-1)
+        perturbed_prob = float(perturbed_probs[0][pred_idx].item())
 
     # 7. Compute relative drop
     return float(max(0.0, (orig_prob - perturbed_prob) / orig_prob))
@@ -609,13 +428,15 @@ def main():
     if args.model_path:
         model_path = args.model_path
     else:
-        model_path = resolve_keras_model_path([FINAL_MODEL_PATH])
+        model_path = resolve_pytorch_model_path([FINAL_MODEL_PATH])
     print(f"Loading model: {model_path}")
 
-    model = _load_model_robust(model_path)
-
-    backbone_name = _infer_backbone_name(model)
+    model, backbone_name = _load_model_robust(model_path)
     print(f"Detected backbone: {backbone_name}")
+
+    from src.utils.hardware import get_device
+    device = get_device()
+    model.to(device)
 
     # Load class indices and parse family structure
     idx_to_label = _load_class_indices(str(CLASS_INDICES_PATH))
@@ -655,11 +476,12 @@ def main():
         )
         print(f"Using target layer for Grad-CAM: {target_desc}")
     else:
-        target_layer_name = args.conv_layer or _find_target_layer(model)
-        if target_layer_name is None:
-            print("ERROR: Could not find a convolutional layer in the model.")
-            sys.exit(1)
-        print(f"Using target layer for Grad-CAM: {target_layer_name}")
+        if args.conv_layer:
+            target_layer_name = args.conv_layer
+            print(f"Using target layer for Grad-CAM: {target_layer_name}")
+        else:
+            target_layer_name = None
+            print("Using target layer for Grad-CAM: last convolutional layer (auto-detected)")
 
     # Collect samples
     samples = _collect_sample_images(str(VAL_DIR), args.num_samples, args.seed)
@@ -678,24 +500,26 @@ def main():
 
     # Process each sample
     for i, (img_path, true_class) in enumerate(samples):
-        # Load and preprocess image
-        img = keras.utils.load_img(img_path, target_size=(IMG_SIZE, IMG_SIZE))
-        img_array = keras.utils.img_to_array(img)
-        original_img = img_array.copy()
+        # Load image
+        try:
+            img = Image.open(img_path)
+            img = ImageOps.exif_transpose(img).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+        except Exception as e:
+            print(f"  Failed to load image {img_path}: {e}")
+            continue
+        original_img = np.array(img, dtype=np.float32)
 
-        # Preprocess for model
-        preprocessed = preprocess_array_for_model(
-            img_array[np.newaxis, ...], backbone_name=backbone_name
-        )
+        # Convert to tensor: shape (1, 3, 224, 224), range [0.0, 1.0]
+        preprocessed_tensor = torch.from_numpy(original_img.transpose((2, 0, 1))).unsqueeze(0).float() / 255.0
+        preprocessed_tensor = preprocessed_tensor.to(device)
 
         # Get prediction
-        preds = model.predict(preprocessed, verbose=0)
-        if isinstance(preds, dict):
-            disease_preds = preds["disease_output"]
-        else:
-            disease_preds = preds
-        pred_idx = int(np.argmax(disease_preds[0]))
-        pred_conf = float(disease_preds[0][pred_idx])
+        with torch.no_grad():
+            outputs = model(preprocessed_tensor)
+            disease_out = outputs["disease_output"] if isinstance(outputs, dict) else outputs
+            disease_probs = torch.softmax(disease_out, dim=-1)
+            pred_idx = int(torch.argmax(disease_probs[0]).item())
+            pred_conf = float(disease_probs[0][pred_idx].item())
         pred_label = idx_to_label.get(pred_idx, f"class_{pred_idx}")
 
         # Generate Grad-CAM
@@ -707,7 +531,7 @@ def main():
             )
             crop_heatmap, disease_heatmap = _make_gradcam_heatmap(
                 model,
-                preprocessed,
+                preprocessed_tensor,
                 target_layer_name=target_layer_name,
                 pred_index=pred_idx,
                 backbone_name=backbone_name,
@@ -717,7 +541,9 @@ def main():
             # The metrics focus on the disease head for anomaly detection
             heatmap = disease_heatmap
         except Exception as exc:
+            import traceback
             print(f"  Grad-CAM failed for {os.path.basename(img_path)}: {exc}")
+            traceback.print_exc()
             continue
 
         # Segment leaf and background
@@ -733,7 +559,7 @@ def main():
         # Calculate Deletion Drop (blur 15% top pixels)
         del_drop = _compute_deletion_drop(
             model,
-            preprocessed,
+            preprocessed_tensor,
             backbone_name,
             pred_idx,
             heatmap,
@@ -742,7 +568,7 @@ def main():
         all_del_drops.append(del_drop)
 
         # Calculate Hierarchical Attention Consistency (HAC) if applicable
-        hac_info = None
+        hac_info: dict[str, Any] | None = None
         healthy_partner_idx = (
             healthy_partners[pred_idx]
             if pred_idx < len(healthy_partners)
@@ -755,7 +581,7 @@ def main():
                 # Generate deviation heatmap
                 _, deviation_heatmap = _make_gradcam_heatmap(
                     model,
-                    preprocessed,
+                    preprocessed_tensor,
                     target_layer_name=target_layer_name,
                     pred_index=pred_idx,
                     backbone_name=backbone_name,
@@ -827,10 +653,9 @@ def main():
         out_name = f"{i:03d}_{safe_class}_{status}_{pred_conf:.2f}.png"
         out_path = os.path.join(args.output_dir, out_name)
 
-        # Save using tf.io to avoid matplotlib dependency
-        overlay_tensor = tf.constant(overlay, dtype=tf.uint8)
-        encoded = tf.io.encode_png(overlay_tensor)
-        tf.io.write_file(out_path, encoded)
+        # Save overlay image
+        overlay_img = Image.fromarray(overlay)
+        overlay_img.save(out_path)
 
         # Print metrics
         hac_str = "N/A"

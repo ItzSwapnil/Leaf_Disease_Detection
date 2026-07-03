@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from torchvision.transforms import v2
 
 from src.utils.config import IMG_SIZE, MODELS_DIR
@@ -64,14 +64,20 @@ class LeafDetectorModel:
         """
         try:
             with Image.open(img_path) as img:
-                img_rgb = img.convert("RGB")
+                img_transposed = ImageOps.exif_transpose(img)
+                img_rgb = img_transposed.convert("RGB")
 
             # Apply transforms
-            input_tensor = self.transform(img_rgb).unsqueeze(0).to(self.device)
+            input_tensor = self.transform(img_rgb).unsqueeze(0).to(self.device, non_blocking=True)
 
             # Predict
+            device_type = self.device.type if self.device.type in ("cuda", "cpu") else "cuda"
+            use_bf16 = (self.device.type == "cuda" and torch.cuda.is_bf16_supported())
+            dtype = torch.bfloat16 if use_bf16 else torch.float16
+
             with torch.no_grad():
-                output = self.model(input_tensor)
+                with torch.amp.autocast(device_type=device_type, dtype=dtype):
+                    output = self.model(input_tensor)
                 # Assuming model outputs logits for binary classification (1 output node)
                 # or 2 output nodes. If 1 node:
                 if output.shape[-1] == 1:

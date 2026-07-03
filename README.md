@@ -7,8 +7,8 @@ safety-guarded inference, and a Flask web UI.
 ![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-blue.svg)
 ![PyTorch Nightly](https://img.shields.io/badge/PyTorch-Nightly-orange.svg)
 ![Keras 3 (Torch Backend)](https://img.shields.io/badge/Keras--3-PyTorch--Backend-red.svg)
-![Classes 46](https://img.shields.io/badge/Classes-46-brightgreen.svg)
-![Dataset 259K+](https://img.shields.io/badge/Dataset-259K%2B-blue.svg)
+![Classes 29](https://img.shields.io/badge/Classes-29-brightgreen.svg)
+![Dataset 8.8K+](https://img.shields.io/badge/Dataset-8.8K%2B-blue.svg)
 ![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ## Abstract
@@ -47,23 +47,17 @@ Main workflows included:
 
 ## Dataset Used
 
-This repository expects an expanded PlantVillage-style dataset called
-"PlantVillage-46" in local split folders.
+This repository expects the **PlantDoc** dataset (*"PlantDoc: A Dataset for Visual Plant Disease Detection"*, Singh et al., 2019) structured into local split folders.
 
 Primary dataset used for this project:
 
-- Mendeley Data (exact dataset package used): https://data.mendeley.com/datasets/32vfdrj76m/1
-
-Related base references (background attribution):
-
-- PlantVillage original dataset (GitHub): https://github.com/spMohanty/PlantVillage-Dataset
-- PlantVillage mirror (Kaggle): https://www.kaggle.com/datasets/mohitsingh1804/plantvillage
+- PlantDoc (Visual Plant Disease Detection): [Singh et al., 2019](https://github.com/daved01/PlantDoc-Dataset)
 
 Important notes:
 
-- The training setup in this repo uses 46 classes (13 healthy + 33 disease) and 16 crops.
-- Class index mapping is tracked in `models/class_indices.json`.
-- Exact reproducibility requires the same class folder names and split layout.
+- The training setup uses **29 classes** (covering 13 unique crop families).
+- Class index mapping is dynamically generated and tracked in [class_indices.json](file:///mnt/c/Users/Swapnil/Projects/Leaf_Disease_Detection/models/class_indices.json).
+- The dataset is partitioned into proper, stratified splits: **Train (80%)**, **Validation (10%)**, and **Test (10%)**.
 
 Expected dataset layout:
 
@@ -71,13 +65,13 @@ Expected dataset layout:
 dataset/
   train/
     <class_name>/
-      *.jpg|*.jpeg|*.png|...
+      *.jpg|*.jpeg|*.png
   val/
     <class_name>/
-      *
+      *.jpg|*.jpeg|*.png
   test/
     <class_name>/
-      *
+      *.jpg|*.jpeg|*.png
 ```
 
 ## Environment Setup
