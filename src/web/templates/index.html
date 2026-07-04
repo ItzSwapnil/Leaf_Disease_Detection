@@ -2431,10 +2431,51 @@
             const bgImg = document.getElementById('canvasBgImg');
             bgImg.src = `/review/sample/${className}`;
 
-            leafCtx.clearRect(0, 0, 448, 448);
-            focusCtx.clearRect(0, 0, 448, 448);
-
             bgImg.onload = async () => {
+                const container = document.querySelector('.canvas-container');
+                const canvas = document.getElementById('drawingCanvas');
+                
+                // Calculate display dimensions keeping max size 448
+                const naturalWidth = bgImg.naturalWidth;
+                const naturalHeight = bgImg.naturalHeight;
+                
+                let displayWidth = 448;
+                let displayHeight = 448;
+                
+                if (naturalWidth > 0 && naturalHeight > 0) {
+                    const imgAspect = naturalWidth / naturalHeight;
+                    if (imgAspect > 1) {
+                        // Wide image
+                        displayWidth = 448;
+                        displayHeight = Math.round(448 / imgAspect);
+                    } else {
+                        // Tall image
+                        displayHeight = 448;
+                        displayWidth = Math.round(448 * imgAspect);
+                    }
+                }
+                
+                // Set container and canvas dimensions
+                container.style.width = displayWidth + 'px';
+                container.style.height = displayHeight + 'px';
+                bgImg.style.width = displayWidth + 'px';
+                bgImg.style.height = displayHeight + 'px';
+                
+                canvas.width = displayWidth;
+                canvas.height = displayHeight;
+                canvas.style.width = displayWidth + 'px';
+                canvas.style.height = displayHeight + 'px';
+                
+                // Resize offscreen canvases
+                leafOffscreen.width = displayWidth;
+                leafOffscreen.height = displayHeight;
+                focusOffscreen.width = displayWidth;
+                focusOffscreen.height = displayHeight;
+
+                // Clear contexts now that sizes are set
+                leafCtx.clearRect(0, 0, displayWidth, displayHeight);
+                focusCtx.clearRect(0, 0, displayWidth, displayHeight);
+
                 initCanvasEngine();
                 
                 try {
@@ -2453,7 +2494,7 @@
                 const img = new Image();
                 img.crossOrigin = "anonymous";
                 img.onload = () => {
-                    ctx.drawImage(img, 0, 0, 448, 448);
+                    ctx.drawImage(img, 0, 0, ctx.canvas.width, ctx.canvas.height);
                     resolve();
                 };
                 img.onerror = () => reject();
@@ -2568,7 +2609,7 @@
 
         function redrawDisplay() {
             if (!dCtx) return;
-            dCtx.clearRect(0, 0, 448, 448);
+            dCtx.clearRect(0, 0, dCanvas.width, dCanvas.height);
             
             const showLeaf = document.getElementById('showLeafMask')?.checked !== false;
             const showFocus = document.getElementById('showFocusMask')?.checked !== false;
@@ -2588,7 +2629,7 @@
 
         function clearActiveCanvas() {
             const activeCtx = reviewDrawMode === 'leaf' ? leafCtx : focusCtx;
-            activeCtx.clearRect(0, 0, 448, 448);
+            activeCtx.clearRect(0, 0, activeCtx.canvas.width, activeCtx.canvas.height);
             redrawDisplay();
         }
 

@@ -209,10 +209,10 @@ def generate_confusion_matrix():
         json.dump(class_indices, f, indent=2)
     print(f"Saved: {CLASS_INDICES_PATH}")
 
-    # Summary metrics
     report = classification_report(
         y_true,
         y_pred,
+        labels=list(range(len(class_names))),
         target_names=class_names,
         output_dict=True,
     )

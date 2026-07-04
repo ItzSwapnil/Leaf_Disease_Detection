@@ -196,6 +196,9 @@ def _load_model_robust(
             backbone_name, num_classes, num_crops, healthy_partners
         )
         model.load_state_dict(actual_state)
+        # Load temperature parameter if present
+        temp_val = float(state.get("temperature", 1.0)) if isinstance(state, dict) and "temperature" in state else 1.0
+        setattr(model, "temperature", temp_val)
         model.to(device)
         model.eval()
 

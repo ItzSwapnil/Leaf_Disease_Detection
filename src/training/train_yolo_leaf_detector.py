@@ -138,13 +138,13 @@ def main():
     else:
         print("[*] YOLO dataset config already exists, skipping generation.")
 
-    # 2. Fine-tune YOLO26n
-    print("[*] Initializing YOLO26n pre-trained model...")
+    # 2. Fine-tune YOLO26m
+    print("[*] Initializing YOLO26m pre-trained model...")
     from ultralytics import YOLO
 
-    model = YOLO(os.path.join(MODELS_DIR, "yolo26n.pt"))
+    model = YOLO(os.path.join(MODELS_DIR, "yolo26m.pt"))
 
-    print("[*] Fine-tuning YOLO26n on leaf detection...")
+    print("[*] Fine-tuning YOLO26m on leaf detection...")
     model.train(
         data=str(yolo_dataset_dir / "leaf_data.yaml"),
         epochs=5,

@@ -40,7 +40,7 @@ class YOLOLeafDetector:
             model_path = (
                 YOLO_MODEL_PATH
                 if YOLO_MODEL_PATH.exists()
-                else Path(MODELS_DIR) / "yolo26n.pt"
+                else Path(MODELS_DIR) / "yolo26m.pt"
             )
         self.model = _create_yolo_model(model_path)
         self.model_path = model_path

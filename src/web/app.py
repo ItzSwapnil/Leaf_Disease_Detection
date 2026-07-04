@@ -710,18 +710,22 @@ def _get_leaf_detector_model():
     return LEAF_DETECTOR_MODEL
 
 
+YOLO_LOCK = threading.Lock()
+
+
 def _get_yolo_leaf_detector():
     global YOLO_FOCUS_DETECTOR
-    if YOLO_FOCUS_DETECTOR is not None:
-        return YOLO_FOCUS_DETECTOR
+    with YOLO_LOCK:
+        if YOLO_FOCUS_DETECTOR is not None:
+            return YOLO_FOCUS_DETECTOR
 
-    try:
-        from src.core.yolo_leaf import YOLOLeafDetector
-        YOLO_FOCUS_DETECTOR = YOLOLeafDetector()
-    except Exception as exc:
-        print(f"YOLOLeafDetector unavailable: {exc}")
-        YOLO_FOCUS_DETECTOR = None
-    return YOLO_FOCUS_DETECTOR
+        try:
+            from src.core.yolo_leaf import YOLOLeafDetector
+            YOLO_FOCUS_DETECTOR = YOLOLeafDetector()
+        except Exception as exc:
+            print(f"YOLOLeafDetector unavailable: {exc}")
+            YOLO_FOCUS_DETECTOR = None
+        return YOLO_FOCUS_DETECTOR
 
 
 def _parse_pipeline_options(payload, active_model=None):
@@ -1468,6 +1472,14 @@ def load_model_and_classes():
     print(f"Detected inference backbone: {ACTIVE_BACKBONE}")
 
     class_indices = _resolve_class_indices_for_model(model_path, model)
+
+    # Eagerly load YOLO leaf detector to prevent race conditions during request handling
+    try:
+        print("Eagerly loading YOLO leaf detector...")
+        _get_yolo_leaf_detector()
+    except Exception as exc:
+        print(f"Warning: Failed to eagerly load YOLO detector: {exc}")
+
     print("Model loaded successfully.")
     return model, class_indices, ACTIVE_MODEL_PATH
 
@@ -1905,7 +1917,7 @@ def generate_default_leaf_mask(image_path):
         return None
 
     h, w = img.shape[:2]
-    leaf_mask = np.ones((h, w), dtype=bool)
+    bbox = None
 
     # If YOLOv26 leaf detection is active, run it to get leaf bounding box.
     if USE_YOLO_LEAF_DETECTION:
@@ -1915,21 +1927,25 @@ def generate_default_leaf_mask(image_path):
                 detection = detector.detect(img)
                 if detection["found"]:
                     x1, y1, x2, y2 = detection["bbox"]
-                    yolo_mask = np.zeros((h, w), dtype=bool)
-                    yolo_mask[y1:y2, x1:x2] = True
-                    leaf_mask = yolo_mask
+                    # Only use bbox if it's smaller than the full image
+                    # to avoid GrabCut boundary issues
+                    if not (x1 == 0 and y1 == 0 and x2 == w and y2 == h):
+                        bbox = (x1, y1, x2, y2)
             except Exception as exc:
                 print(f"YOLOv26 detect failed in default mask gen: {exc}")
 
-    # Refine the mask using HSV color thresholding
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
-    bg_mask = (s <= 38) | (v <= 20) | (v >= 240)
-
-    refined_mask = leaf_mask & (~bg_mask)
-    if np.sum(refined_mask) > 100:
-        leaf_mask = refined_mask
+    # Run precise GrabCut segmentation
+    from src.core.leaf_segmentation import segment_leaf_grabcut
+    seg_res = segment_leaf_grabcut(img, bbox=bbox)
+    if seg_res["success"]:
+        leaf_mask = (seg_res["mask"] == 255)
+    else:
+        # Fallback to HSV color thresholding if GrabCut fails
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+        bg_mask = (s <= 38) | (v <= 20) | (v >= 240)
+        leaf_mask = np.ones((h, w), dtype=bool) & (~bg_mask)
 
     # Create 4-channel transparent PNG
     mask_rgba = np.zeros((h, w, 4), dtype=np.uint8)
@@ -1939,16 +1955,14 @@ def generate_default_leaf_mask(image_path):
     mask_rgba[leaf_mask, 2] = 34
     mask_rgba[leaf_mask, 3] = 255
 
-    # Resize to 448x448 to match front-end canvas
-    mask_rgba = cv2.resize(
-        mask_rgba, (448, 448), interpolation=cv2.INTER_NEAREST
-    )
     return mask_rgba
 
 
 def generate_default_focus_mask(class_name, image_path):
     import cv2
     import numpy as np
+    import torch
+    from torchvision.transforms import v2
 
     global model, class_indices, ACTIVE_BACKBONE
 
@@ -1956,32 +1970,151 @@ def generate_default_focus_mask(class_name, image_path):
     if img is None:
         return None
 
-    # PyTorch Grad-CAM is not implemented yet.
-    # Fallback to no Grad-CAM heatmap.
-    return None
+    h, w = img.shape[:2]
+    saliency_norm = None
 
-    # Fallback: segment center region of leaf mask
-    try:
-        leaf_mask_rgba = generate_default_leaf_mask(image_path)
-        if leaf_mask_rgba is not None:
-            mask_rgba = np.zeros((448, 448, 4), dtype=np.uint8)
-            h_c, w_c = 224, 224
-            for r in range(448):
-                for c in range(448):
-                    if leaf_mask_rgba[r, c, 3] == 255:
-                        dist = np.sqrt((r - h_c) ** 2 + (c - w_c) ** 2)
-                        if dist < 100:  # center circle of radius 100
-                            mask_rgba[r, c, 0] = 68
-                            mask_rgba[r, c, 1] = 68
-                            mask_rgba[r, c, 2] = 239
-                            mask_rgba[r, c, 3] = 255
-            return mask_rgba
-    except Exception:
-        pass
+    # Try to generate saliency map using the classification model
+    if model is not None:
+        try:
+            # 1. Resolve class index
+            target_class_idx = 0
+            if class_indices:
+                for idx, name in class_indices.items():
+                    if name == class_name:
+                        target_class_idx = idx
+                        break
 
-    # Ultimate fallback: center circle on blank background
-    mask_rgba = np.zeros((448, 448, 4), dtype=np.uint8)
-    cv2.circle(mask_rgba, (224, 224), 80, (68, 68, 239, 255), -1)
+            # Use the first model if it is an ensemble list
+            active_model = model[0] if isinstance(model, list) else model
+            active_model.eval()
+
+            # 2. Preprocess image
+            from PIL import Image
+            img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+
+            transform = v2.Compose([
+                v2.Resize((IMG_SIZE, IMG_SIZE)),
+                v2.ToImage(),
+                v2.ToDtype(torch.float32, scale=True),
+                v2.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                ),
+            ])
+
+            input_tensor = transform(img_pil).unsqueeze(0).to(get_device())
+            input_tensor.requires_grad_()
+
+            # Enable gradients for backprop saliency
+            with torch.enable_grad():
+                output = active_model(input_tensor)
+                if isinstance(output, dict) and "disease_output" in output:
+                    logits = output["disease_output"]
+                else:
+                    logits = output
+
+                logit = logits[0, target_class_idx]
+                active_model.zero_grad()
+                logit.backward()
+
+                saliency, _ = torch.max(torch.abs(input_tensor.grad[0]), dim=0)
+                saliency_np = saliency.cpu().numpy()
+
+                # Apply Gaussian blur to smooth out gradient noise
+                saliency_np = cv2.GaussianBlur(saliency_np, (15, 15), 0)
+
+                # Resize saliency back to original image size
+                saliency_resized = cv2.resize(saliency_np, (w, h))
+                denom = (
+                    saliency_resized.max()
+                    - saliency_resized.min()
+                    + 1e-8
+                )
+                saliency_norm = (
+                    saliency_resized - saliency_resized.min()
+                ) / denom
+        except Exception as exc:
+            print(f"[Warning] Failed to generate model saliency mask: {exc}")
+            saliency_norm = None
+
+    focus_mask = np.zeros((h, w), dtype=bool)
+    leaf_mask_rgba = generate_default_leaf_mask(image_path)
+    leaf_mask_bool = None
+    if leaf_mask_rgba is not None:
+        leaf_mask_bool = leaf_mask_rgba[:, :, 3] == 255
+
+    saliency_mask = None
+    if saliency_norm is not None:
+        # Resolve saliency map threshold exclusively inside the leaf region
+        if leaf_mask_bool is not None and np.sum(leaf_mask_bool) > 100:
+            saliency_inside_leaf = saliency_norm[leaf_mask_bool]
+            # Take the top 15% of salient pixels within the leaf
+            threshold = np.percentile(saliency_inside_leaf, 85)
+            saliency_mask = (saliency_norm >= threshold) & leaf_mask_bool
+        else:
+            threshold = np.percentile(saliency_norm, 80)
+            saliency_mask = saliency_norm >= threshold
+
+    # 1. Try to segment diseased/lesion spots based on color heuristic
+    # inside leaf interior (only if diseased class)
+    is_healthy = "healthy" in class_name.lower()
+    if not is_healthy:
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hv = hsv[:, :, 0]
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+
+        # Erode leaf mask to get interior region, avoiding edge shadows
+        if leaf_mask_bool is not None and np.sum(leaf_mask_bool) > 100:
+            kernel = np.ones((5, 5), np.uint8)
+            leaf_interior = cv2.erode(
+                leaf_mask_bool.astype(np.uint8), kernel, iterations=1
+            ) > 0
+        else:
+            leaf_interior = (
+                leaf_mask_bool
+                if leaf_mask_bool is not None
+                else np.ones((h, w), dtype=bool)
+            )
+
+        # Lesions are:
+        # - Hue outside the green range (green is 33 to 88)
+        # - Dark necrotic spots (low value, medium saturation)
+        # - White/grey powdery mildew (low saturation, high value)
+        non_green = ((hv < 33) | (hv > 88)) & (s > 40)
+        dark_spots = (v < 50) & (s > 20)
+        white_patches = (s < 45) & (v > 150)
+
+        lesion_mask = (non_green | dark_spots | white_patches) & leaf_interior
+
+        if np.sum(lesion_mask) > 50:
+            focus_mask = lesion_mask
+
+    # 2. Combine with saliency map if available
+    if saliency_mask is not None:
+        if not is_healthy:
+            # Combine lesions and saliency map
+            focus_mask = focus_mask | saliency_mask
+        else:
+            focus_mask = saliency_mask
+
+    # 3. Ultimate Fallback: center circle if mask is empty
+    if np.sum(focus_mask) < 100:
+        cv2.circle(
+            focus_mask.astype(np.uint8),
+            (w // 2, h // 2),
+            min(w, h) // 4,
+            1,
+            -1
+        )
+
+    # Paint focus mask red: BGR = (68, 68, 239), alpha = 255
+    mask_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    mask_rgba[focus_mask, 0] = 68
+    mask_rgba[focus_mask, 1] = 68
+    mask_rgba[focus_mask, 2] = 239
+    mask_rgba[focus_mask, 3] = 255
+
     return mask_rgba
 
 
