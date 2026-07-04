@@ -33,6 +33,7 @@ from src.training.training_utils import (
     OverfittingStopper,
 )
 from src.utils.config import (
+    ACCUMULATION_STEPS,
     BASE_MODEL,
     BATCH_SIZE,
     CHECKPOINT_PATH,
@@ -183,9 +184,16 @@ def train_one_epoch(
     correct = 0
     total = 0
 
+    accum_steps = int(os.getenv("LEAF_ACCUMULATION_STEPS", ACCUMULATION_STEPS))
+    optimizer.zero_grad()
+
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1} Train", leave=False)
     for batch_idx, (images, masks, labels) in enumerate(pbar):
-        images, masks, labels = images.to(device, non_blocking=True), masks.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        images, masks, labels = (
+            images.to(device, non_blocking=True),
+            masks.to(device, non_blocking=True),
+            labels.to(device, non_blocking=True)
+        )
 
         if heavy_augment_fn:
             images = heavy_augment_fn(images)
@@ -201,7 +209,6 @@ def train_one_epoch(
         use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
         dtype = torch.bfloat16 if use_bf16 else torch.float16
 
-        optimizer.zero_grad()
         with autocast(device_type=device.type, dtype=dtype):
             outputs = model(images)
             disease_out = outputs["disease_output"]
@@ -209,7 +216,10 @@ def train_one_epoch(
 
             if mixed_labels is not None:
                 mixed_labels = mixed_labels.squeeze(1)
-                loss_disease = -torch.sum(mixed_labels * torch.log_softmax(disease_out, dim=-1), dim=-1).mean()
+                loss_disease = -torch.sum(
+                    mixed_labels * torch.log_softmax(disease_out, dim=-1),
+                    dim=-1
+                ).mean()
                 
                 active_model = ema_model.module if ema_model is not None else model
                 if hasattr(active_model, "module"):
@@ -217,10 +227,22 @@ def train_one_epoch(
                 class_to_crop = getattr(active_model, "class_to_crop_idx")
                 num_crops = getattr(active_model, "crop_logits").out_features
                 
-                mixed_crop_labels = torch.zeros((mixed_labels.size(0), num_crops), device=mixed_labels.device)
-                mixed_crop_labels.scatter_add_(1, class_to_crop.unsqueeze(0).expand(mixed_labels.size(0), -1).to(mixed_labels.device), mixed_labels)
+                mixed_crop_labels = torch.zeros(
+                    (mixed_labels.size(0), num_crops),
+                    device=mixed_labels.device
+                )
+                mixed_crop_labels.scatter_add_(
+                    1,
+                    class_to_crop.unsqueeze(0).expand(
+                        mixed_labels.size(0), -1
+                    ).to(mixed_labels.device),
+                    mixed_labels
+                )
                 
-                loss_crop = -torch.sum(mixed_crop_labels * torch.log_softmax(crop_out, dim=-1), dim=-1).mean()
+                loss_crop = -torch.sum(
+                    mixed_crop_labels * torch.log_softmax(crop_out, dim=-1),
+                    dim=-1
+                ).mean()
             else:
                 loss_disease = criterion(disease_out, labels)
                 
@@ -232,20 +254,25 @@ def train_one_epoch(
                 crop_labels = class_to_crop[labels]
                 loss_crop = nn.CrossEntropyLoss()(crop_out, crop_labels)
                 
-            loss = loss_disease + 0.5 * loss_crop
+            loss = (loss_disease + 0.5 * loss_crop) / accum_steps
 
         if scaler is not None and not use_bf16:
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(dataloader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                if ema_model is not None:
+                    ema_model.update_parameters(model)
         else:
             loss.backward()
-            optimizer.step()
+            if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(dataloader):
+                optimizer.step()
+                optimizer.zero_grad()
+                if ema_model is not None:
+                    ema_model.update_parameters(model)
 
-        if ema_model is not None:
-            ema_model.update_parameters(model)
-
-        running_loss += float(loss.item()) * images.size(0)
+        running_loss += float(loss.item() * accum_steps) * images.size(0)
         _, predicted = torch.max(disease_out, 1)
         if mixed_labels is not None:
             _, target_max = torch.max(mixed_labels, 1)
@@ -255,11 +282,17 @@ def train_one_epoch(
         total += images.size(0)
 
         if interval_logger:
-            interval_logger.on_train_batch_end(batch_idx, logs={"loss": loss.item(), "accuracy": correct/total})
+            interval_logger.on_train_batch_end(
+                batch_idx,
+                logs={"loss": loss.item() * accum_steps, "accuracy": correct / total}
+            )
         if progress_emitter:
             progress_emitter.on_train_batch_end(batch_idx)
 
-        pbar.set_postfix({'loss': f"{running_loss/total:.4f}", 'acc': f"{correct/total:.4f}"})
+        pbar.set_postfix({
+            'loss': f"{running_loss/total:.4f}",
+            'acc': f"{correct/total:.4f}"
+        })
 
     return running_loss / total, correct / total
 

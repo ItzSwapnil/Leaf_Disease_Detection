@@ -26,6 +26,17 @@ from pathlib import Path
 
 os.environ["KERAS_BACKEND"] = "torch"
 
+# ============================================================
+#                       FILESYSTEM PATHS
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+# Dataset directories
+TRAIN_DIR = str(BASE_DIR / "dataset" / "train")
+VAL_DIR = str(BASE_DIR / "dataset" / "val")
+TEST_DIR = str(BASE_DIR / "dataset" / "test")
+
 
 def _env_bool(name: str, default: bool) -> bool:
     """Parse a boolean from an environment variable with a safe fallback."""
@@ -112,13 +123,75 @@ def _env_float_list(name: str, default_csv: str) -> tuple[float, ...]:
     return tuple(values)
 
 
+def _get_default_hardware_batch_settings(backbone: str) -> tuple[int, int]:
+    """Dynamically determine physical batch size and accumulation steps.
+
+    Prevents OOM on 8GB VRAM cards while keeping the effective batch size
+    constant (at 32).
+    """
+    import torch
+    if not torch.cuda.is_available():
+        return 16, 2  # CPU safe fallback
+
+    try:
+        props = torch.cuda.get_device_properties(0)
+        total_mem_gb = props.total_memory / (1024 ** 3)
+    except Exception:
+        total_mem_gb = 8.0  # Assumed default for target device
+
+    backbone_lower = backbone.lower()
+
+    if "vit_l" in backbone_lower:
+        # ViT-Large models
+        if total_mem_gb <= 8.5:
+            return 4, 8  # Effective batch size = 32
+        elif total_mem_gb <= 16.5:
+            return 8, 4  # Effective batch size = 32
+        else:
+            return 16, 2  # Effective batch size = 32
+    elif "vit" in backbone_lower or "dino" in backbone_lower:
+        # ViT-Base models (e.g. DINOv3)
+        if total_mem_gb <= 8.5:
+            return 16, 2  # Effective batch size = 32
+        elif total_mem_gb <= 16.5:
+            return 32, 1  # Effective batch size = 32
+        else:
+            return 64, 1  # Keep batch size large for high-end cards
+    else:
+        # EfficientNet / CNN models
+        if total_mem_gb <= 8.5:
+            return 32, 1  # Effective batch size = 32
+        else:
+            return 64, 1  # Higher throughput
+
+
 # ============================================================
 #                    IMAGE & CLASS SETTINGS
 # ============================================================
 
 IMG_SIZE = 224  # EfficientNetV2-B0 native resolution
-NUM_CLASSES = 29  # Total classes in PlantDoc
-NUM_CROPS = 13  # Total unique plant crop families in PlantDoc
+
+# Try to dynamically resolve the number of classes and crops from the dataset
+try:
+    _train_path = Path(TRAIN_DIR)
+    if _train_path.exists():
+        _classes = sorted([
+            entry.name for entry in _train_path.iterdir() if entry.is_dir()
+        ])
+        NUM_CLASSES = len(_classes) if _classes else 46
+        NUM_CROPS = len(set(
+            name.split("___")[0] for name in _classes
+        )) if _classes else 16
+    else:
+        NUM_CLASSES = 46
+        NUM_CROPS = 16
+except Exception:
+    NUM_CLASSES = 46
+    NUM_CROPS = 16
+
+# Backbone: EfficientNetV2-B0 offers the best accuracy/speed trade-off
+# for transfer learning on laptop-class hardware.
+BASE_MODEL = "DINOv3"
 
 # ============================================================
 #           HEAVY AUGMENTATION (background invariance)
@@ -181,7 +254,11 @@ ATTENTION_VIT_BLOCK_IDX = _env_int("LEAF_ATTENTION_VIT_BLOCK_IDX", 10)
 #                 TRAINING HYPERPARAMETERS
 # ============================================================
 
-BATCH_SIZE = _env_int("LEAF_BATCH_SIZE", 32)  # Safer default for 8 GB GPUs
+# Dynamically determine default batch size and accumulation steps to prevent OOM
+_backbone = os.getenv("LEAF_BASE_MODEL", BASE_MODEL)
+_default_bs, _default_accum = _get_default_hardware_batch_settings(_backbone)
+
+BATCH_SIZE = _env_int("LEAF_BATCH_SIZE", _default_bs)
 EPOCHS_PHASE1 = _env_int("LEAF_EPOCHS_PHASE1", 5)
 EPOCHS_PHASE2 = _env_int("LEAF_EPOCHS_PHASE2", 15)
 LEARNING_RATE_PHASE1 = 2e-4  # Safe LR for head-only + class equalizer
@@ -200,7 +277,7 @@ OPTIMIZER = "AdamW"
 WEIGHT_DECAY = _env_float("LEAF_WEIGHT_DECAY", 0.02)  # Stronger regularization
 LR_SCHEDULER = "cosine"
 WARMUP_EPOCHS = 1
-ACCUMULATION_STEPS = _env_int("LEAF_ACCUMULATION_STEPS", 1)
+ACCUMULATION_STEPS = _env_int("LEAF_ACCUMULATION_STEPS", _default_accum)
 
 # Regularisation
 DROPOUT_RATE = _env_float("LEAF_DROPOUT_RATE", 0.5)  # Stronger regularization
@@ -278,12 +355,7 @@ SAVE_RUN_MANIFESTS = _env_bool(
 #                       FILESYSTEM PATHS
 # ============================================================
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-
-# Dataset directories
-TRAIN_DIR = str(BASE_DIR / "dataset" / "train")
-VAL_DIR = str(BASE_DIR / "dataset" / "val")
-TEST_DIR = str(BASE_DIR / "dataset" / "test")
+# BASE_DIR and dataset directories are defined at the top of the file
 
 # Model artefact paths
 MODELS_DIR = str(BASE_DIR / "models")
@@ -325,9 +397,7 @@ NUM_WORKERS = _env_int("LEAF_NUM_WORKERS", 8)
 #                    MODEL ARCHITECTURE
 # ============================================================
 
-# Backbone: EfficientNetV2-B0 offers the best accuracy/speed trade-off
-# for transfer learning on laptop-class hardware.
-BASE_MODEL = "DINOv3"
+# Backbone/BASE_MODEL is defined at the top of the file
 
 # Classification head
 DENSE_UNITS = 512
