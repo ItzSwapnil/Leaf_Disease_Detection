@@ -19,6 +19,7 @@ from src.training.training_utils import (
     build_dynamic_yolo_dataset,
     build_loss,
     build_optimizer,
+    build_warmup_cosine_schedule,
     get_mixup_cutmix_transforms,
     parse_class_structure,
     resolve_augmentation_probabilities,
@@ -36,6 +37,7 @@ from src.utils.config import (
     EPOCHS_PHASE1,
     EPOCHS_PHASE2,
     LEARNING_RATE_PHASE2,
+    MIN_LR,
     MIXUP_ALPHA,
     MIXUP_PROB,
     NORMAL_PROB,
@@ -53,6 +55,7 @@ from src.utils.config import (
     OVERFITTING_STOP_ENABLED,
     OVERFITTING_STOP_MIN_GAP,
     OVERFITTING_STOP_PATIENCE,
+    WARMUP_EPOCHS,
 )
 
 try:
@@ -157,7 +160,14 @@ def main():
     epochs_ft = int(os.getenv("LEAF_FINE_TUNE_EPOCHS", EPOCHS_PHASE2))
 
     optimizer_ft = build_optimizer(model, learning_rate_ft, optimizer_name)
-    scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_ft, epochs_ft)
+    warmup_epochs = int(os.getenv("LEAF_WARMUP_EPOCHS", WARMUP_EPOCHS))
+    scheduler_ft = build_warmup_cosine_schedule(
+        optimizer_ft,
+        peak_lr=learning_rate_ft,
+        min_lr=MIN_LR,
+        warmup_steps=warmup_epochs,
+        total_steps=epochs_ft
+    )
     scaler = GradScaler('cuda')
 
     heavy_augment = _build_heavy_augmentation_layer() if USE_RANDAUGMENT else None

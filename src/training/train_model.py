@@ -26,6 +26,7 @@ from src.training.training_utils import (
     build_dynamic_yolo_dataset,
     build_loss,
     build_optimizer,
+    build_warmup_cosine_schedule,
     get_mixup_cutmix_transforms,
     parse_class_structure,
     resolve_augmentation_probabilities,
@@ -44,6 +45,7 @@ from src.utils.config import (
     EPOCHS_PHASE2,
     LEARNING_RATE_PHASE1,
     LEARNING_RATE_PHASE2,
+    MIN_LR,
     MIXUP_ALPHA,
     MIXUP_PROB,
     NORMAL_PROB,
@@ -61,6 +63,7 @@ from src.utils.config import (
     OVERFITTING_STOP_ENABLED,
     OVERFITTING_STOP_MIN_GAP,
     OVERFITTING_STOP_PATIENCE,
+    WARMUP_EPOCHS,
 )
 
 try:
@@ -446,8 +449,17 @@ def main():
     unfreeze_backbone_layers(model.backbone.backbone, unfreeze_layers)
 
     # Note: Define optimizer_ft, scheduler_ft here as per logic requirements
-    optimizer_ft = build_optimizer(model, LEARNING_RATE_PHASE2, optimizer_name)
-    scheduler_ft = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_ft, int(EPOCHS_PHASE2))
+    optimizer_ft = build_optimizer(
+        model, LEARNING_RATE_PHASE2, optimizer_name
+    )
+    warmup_epochs = int(os.getenv("LEAF_WARMUP_EPOCHS", WARMUP_EPOCHS))
+    scheduler_ft = build_warmup_cosine_schedule(
+        optimizer_ft,
+        peak_lr=LEARNING_RATE_PHASE2,
+        min_lr=MIN_LR,
+        warmup_steps=warmup_epochs,
+        total_steps=int(EPOCHS_PHASE2)
+    )
 
     stopper = None
     if OVERFITTING_STOP_ENABLED:
