@@ -117,7 +117,7 @@ def confidence_rejection_metrics(
     probs: np.ndarray,
     labels: np.ndarray,
     threshold: float,
-) -> dict[str, object]:
+) -> dict[str, float]:
     """Compute coverage and accepted-set accuracy for confidence thresholding."""
     probs = np.asarray(probs, dtype=np.float64)
     y_true = _to_label_indices(labels)
@@ -149,7 +149,7 @@ def entropy_rejection_metrics(
     probs: np.ndarray,
     labels: np.ndarray,
     threshold: float,
-) -> dict[str, object]:
+) -> dict[str, float]:
     """Compute rejection metrics using entropy thresholding (reject high-entropy)."""
     probs = np.asarray(probs, dtype=np.float64)
     y_true = _to_label_indices(labels)
@@ -238,7 +238,9 @@ def optimize_temperature(
 
     # softplus(log_temp) guarantees a strictly positive temperature.
     log_temp = torch.nn.Parameter(
-        torch.tensor(math.log(math.e - 1.0), dtype=torch.float32, device=device)
+        torch.tensor(
+            math.log(math.e - 1.0), dtype=torch.float32, device=device
+        )
     )
     optimizer = torch.optim.Adam([log_temp], lr=float(learning_rate))
     criterion = torch.nn.CrossEntropyLoss()
@@ -259,7 +261,9 @@ def optimize_temperature(
         temperature_value = float(
             (torch.nn.functional.softplus(log_temp) + 1e-6).item()
         )
-        nll_after = float(criterion(logits_t / temperature_value, labels_t).item())
+        nll_after = float(
+            criterion(logits_t / temperature_value, labels_t).item()
+        )
 
     return {
         "temperature": temperature_value,

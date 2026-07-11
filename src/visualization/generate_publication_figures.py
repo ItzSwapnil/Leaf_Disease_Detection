@@ -20,7 +20,7 @@ import seaborn as sns
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PLOTS_DIR = ROOT / "plots"
 DATASET_DIR = ROOT / "dataset"
 REPORT_PATH = ROOT / "reports" / "evaluation_report.json"

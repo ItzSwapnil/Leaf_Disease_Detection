@@ -5,17 +5,18 @@ Runs all figure generation scripts in the correct order with error handling
 and comprehensive logging.
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.visualization.figure_paths import (
+from src.visualization.figure_paths import (  # noqa: E402
     DINO_PLOTS_DIR,
     EFFICIENTNET_B0_PLOTS_DIR,
     EFFICIENTNET_S_PLOTS_DIR,
@@ -27,8 +28,18 @@ from src.visualization.figure_paths import (
 
 
 def run_script(script_name, description, timeout_seconds=5400, args=None):
-    """Run a generation script with live output streaming and error handling."""
-    script_path = os.path.join(ROOT, "scripts", script_name)
+    """Run a generation script with live output streaming."""
+    script_path = os.path.join(ROOT, "src", "visualization", script_name)
+
+    keras_scripts = {
+        "generate_statistical_figures.py",
+        "generate_preprocessing_figures.py",
+    }
+    if script_name in keras_scripts:
+        if importlib.util.find_spec("tensorflow") is None:
+            print(f"\n⚠ SKIPPED: {description}")
+            print("   Reason: TensorFlow is not installed in the environment.")
+            return False
 
     if not os.path.exists(script_path):
         print(f"\n⚠ SKIPPED: {description}")
@@ -90,6 +101,7 @@ def main():
     reset_plot_directories()
     prepare_plot_directories()
 
+    model_path_str = str(ROOT / "models" / "leaf_disease_checkpoint.pt")
     scripts_to_run = [
         (
             "generate_figures.py",
@@ -97,7 +109,7 @@ def main():
             5400,
             [
                 "--model-path",
-                str(ROOT / "models" / "leaf_disease_refined.keras"),
+                model_path_str,
                 "--output-dir",
                 str(DINO_PLOTS_DIR),
             ],
@@ -108,7 +120,7 @@ def main():
             1800,
             [
                 "--model-path",
-                str(ROOT / "models" / "leaf_disease_refined.keras"),
+                model_path_str,
                 "--output-dir",
                 str(DINO_PLOTS_DIR),
             ],
@@ -119,7 +131,7 @@ def main():
             1800,
             [
                 "--model-path",
-                str(ROOT / "models" / "leaf_disease_refined.keras"),
+                model_path_str,
                 "--output-dir",
                 str(DINO_PLOTS_DIR),
             ],
@@ -134,8 +146,11 @@ def main():
 
     effnet_b0_dir = ROOT / "models" / "EfficientNetv2B0"
     effnet_b0_candidates = [
+        effnet_b0_dir / "leaf_disease_EfficientNetV2-B0.pt",
         effnet_b0_dir / "leaf_disease_EfficientNetV2-B0.keras",
+        effnet_b0_dir / "leaf_disease_classifier.pt",
         effnet_b0_dir / "leaf_disease_classifier.keras",
+        effnet_b0_dir / "leaf_disease_checkpoint.pt",
         effnet_b0_dir / "leaf_disease_checkpoint.keras",
     ]
     effnet_b0_model = next(
@@ -193,8 +208,11 @@ def main():
     # Handle EfficientNetV2-S model
     effnet_s_dir = ROOT / "models" / "EfficientNetv2S"
     effnet_s_candidates = [
+        effnet_s_dir / "leaf_disease_EfficientNetV2-S.pt",
         effnet_s_dir / "leaf_disease_EfficientNetV2-S.keras",
+        effnet_s_dir / "leaf_disease_classifier.pt",
         effnet_s_dir / "leaf_disease_classifier.keras",
+        effnet_s_dir / "leaf_disease_checkpoint.pt",
         effnet_s_dir / "leaf_disease_checkpoint.keras",
     ]
     effnet_s_model = next(

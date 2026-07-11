@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PLOTS_ROOT = ROOT / "plots"
 OTHERS_PLOTS_DIR = PLOTS_ROOT / "others"
 EFFICIENTNET_PLOTS_DIR = PLOTS_ROOT / "EfficientNetV2"

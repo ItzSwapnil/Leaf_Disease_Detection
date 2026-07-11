@@ -4,24 +4,27 @@ import argparse
 import json
 import os
 import sys
+
 import numpy as np
 import torch
 from sklearn.metrics import (
-    classification_report,
     accuracy_score,
+    classification_report,
     precision_recall_fscore_support,
 )
 
 # Add project root to sys.path to support running directly as a script
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src.evaluation.metrics.calibration import (
-    expected_calibration_error,
+    apply_temperature,
     confidence_rejection_metrics,
     entropy_rejection_metrics,
-    apply_temperature,
+    expected_calibration_error,
 )
 from src.evaluation.metrics.robustness import evaluate_robustness_suite
 from src.pipeline.predict import _load_model_robust
@@ -90,7 +93,10 @@ def run_bootstrap_ci(
             float(np.percentile(accs, 2.5)),
             float(np.percentile(accs, 97.5)),
         ],
-        "f1": [float(np.percentile(f1s, 2.5)), float(np.percentile(f1s, 97.5))],
+        "f1": [
+            float(np.percentile(f1s, 2.5)),
+            float(np.percentile(f1s, 97.5)),
+        ],
         "ece": [
             float(np.percentile(eces, 2.5)),
             float(np.percentile(eces, 97.5)),
@@ -115,7 +121,7 @@ def main() -> None:
     print(f"Using device: {device}")
 
     # CPU Thread optimization
-    from src.utils.config import INTRA_OP_THREADS, INTER_OP_THREADS
+    from src.utils.config import INTER_OP_THREADS, INTRA_OP_THREADS
 
     torch.set_num_threads(INTRA_OP_THREADS)
     try:
@@ -154,6 +160,15 @@ def main() -> None:
         use_yolo=not _skip_yolo,
     )
 
+    total_samples: int = len(val_loader.dataset)
+    subset_size: int = min(200, total_samples)
+    subset_indices: np.ndarray = np.random.default_rng(42).choice(
+        total_samples, size=subset_size, replace=False
+    )
+    # Sort to preserve indexing alignment when collecting sequentially
+    subset_indices = np.sort(subset_indices)
+    subset_indices_set: set[int] = set(subset_indices)
+
     y_true: list[int] = []
     all_logits: list[np.ndarray] = []
     all_images: list[np.ndarray] = []
@@ -163,6 +178,7 @@ def main() -> None:
     use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
     dtype = torch.bfloat16 if use_bf16 else torch.float16
 
+    current_idx: int = 0
     with torch.no_grad():
         with torch.amp.autocast(device_type=device_type, dtype=dtype):
             for images, _, labels in val_loader:
@@ -175,11 +191,18 @@ def main() -> None:
                 )
                 all_logits.append(disease_out.cpu().float().numpy())
                 y_true.extend(labels.cpu().numpy())
-                all_images.append(images.numpy())
+
+                # Retrieve only the subset of images needed for robustness suite to avoid OOM
+                batch_size_i = images.shape[0]
+                for j in range(batch_size_i):
+                    global_idx = current_idx + j
+                    if global_idx in subset_indices_set:
+                        all_images.append(images[j].unsqueeze(0).numpy())
+                current_idx += batch_size_i
 
     logits = np.concatenate(all_logits, axis=0)
     labels = np.array(y_true)
-    images_all = np.concatenate(all_images, axis=0)
+    images_subset = np.concatenate(all_images, axis=0)
 
     # Compute uncalibrated probabilities
     exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
@@ -236,11 +259,6 @@ def main() -> None:
 
     # Evaluate Robustness Suite on a subset to ensure fast execution
     print("Running robustness perturbations evaluation...")
-    subset_size = min(200, len(images_all))
-    subset_indices = np.random.default_rng(42).choice(
-        len(images_all), size=subset_size, replace=False
-    )
-    images_subset = images_all[subset_indices]
     labels_subset = labels[subset_indices]
 
     def predictor_fn(imgs: np.ndarray) -> np.ndarray:
@@ -251,9 +269,9 @@ def main() -> None:
         with torch.no_grad():
             with torch.amp.autocast(device_type=device_type, dtype=dtype):
                 for i in range(0, len(imgs_nchw), BATCH_SIZE):
-                    batch = torch.from_numpy(
-                        imgs_nchw[i:i + BATCH_SIZE]
-                    ).to(device)
+                    batch = torch.from_numpy(imgs_nchw[i : i + BATCH_SIZE]).to(
+                        device
+                    )
                     outputs = model(batch)
                     disease_out = (
                         outputs["disease_output"]

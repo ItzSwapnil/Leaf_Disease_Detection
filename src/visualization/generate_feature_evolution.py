@@ -6,7 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PLOTS_DIR = ROOT / "plots"
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
