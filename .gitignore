@@ -30,8 +30,8 @@ env/
 .agents/
 
 # --- Dataset (large/local files) ---
-/dataset/
-!/dataset/README.md
+dataset
+
 *.zip
 dataset.zip
 ignored_crops/
@@ -90,5 +90,3 @@ Thumbs.db
 leaf-disease.ipynb
 dataset_plantvillage
 plantdoc_download
-docs
-dataset
