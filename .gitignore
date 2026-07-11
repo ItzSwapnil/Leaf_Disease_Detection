@@ -72,14 +72,9 @@ scratch/*.png
 /zzplots/
 /xxplotsxx/
 /ignored_plots/
-
 # Allow tracking generated evaluation figures for README
-!plots/others/class_distribution.png
-!plots/DINOv3/learning_curves.png
-!plots/DINOv3/model_architecture.png
-!plots/DINOv3/training_timeline_overview.png
-!plots/DINOv3/confusion_matrix.png
-!plots/DINOv3/sample_predictions.png
+!plots/others/*
+!plots/DINOv3/*
 
 # --- Testing & Coverage ---
 .pytest_cache/
